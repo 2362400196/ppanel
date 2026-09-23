@@ -1,0 +1,14 @@
+[Unit]
+Description=PPanel Agent (Docker node agent)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/ppanel-agent
+ExecStart=/root/ppanel-agent/.venv/bin/uvicorn agent_main:app --host 0.0.0.0 --port 9100
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
