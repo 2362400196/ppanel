@@ -399,9 +399,118 @@ tr[data-kind='file'] .f-svg { color: var(--text2); }
       <button data-view="term" onclick="switchView('term')">终端</button>
       <button data-view="logs" onclick="switchView('logs')">日志</button>
       <button data-view="ops" onclick="switchView('ops')">操作记录</button>
+      <button data-view="apidoc" onclick="switchView('apidoc')">API 文档</button>
     </nav>
 
     <div class="content">
+      <!-- API 文档 -->
+      <div id="v-apidoc" class="view">
+        <style>
+          .doc-p { font-size: 13px; color: var(--text2); line-height: 1.7; margin: 6px 0 10px; }
+          .doc-p code { background: var(--bg); padding: 1px 6px; border-radius: 5px; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+          .api-item { border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; margin-bottom: 12px; }
+          .api-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+          .api-method { font-family: ui-monospace, Consolas, monospace; font-size: 11.5px; font-weight: 700; padding: 3px 9px; border-radius: 6px; color: #fff; }
+          .m-get { background: #0d9488; } .m-post { background: #0369a1; } .m-del { background: #b91c1c; }
+          .api-path { font-family: ui-monospace, Consolas, monospace; font-size: 13px; font-weight: 600; }
+          .api-desc { font-size: 12.5px; color: var(--text2); }
+          .api-sec { font-size: 12px; font-weight: 600; color: var(--text2); margin: 10px 0 4px; text-transform: uppercase; letter-spacing: .4px; }
+          .api-tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+          .api-tbl th { text-align: left; color: var(--text2); font-weight: 500; padding: 5px 8px; border-bottom: 1px solid var(--line); }
+          .api-tbl td { padding: 5px 8px; border-bottom: 1px dashed var(--line); vertical-align: top; }
+          .api-tbl tr:last-child td { border-bottom: none; }
+          .api-tbl .mono { font-size: 12px; }
+          .api-pre { background: #10161a; color: #c7e5df; border-radius: 10px; padding: 12px 14px; font-family: ui-monospace, Consolas, monospace; font-size: 12px; overflow-x: auto; white-space: pre; line-height: 1.6; }
+        </style>
+        <div class="card">
+          <div class="sec-head"><span style="font-weight:700;font-size:15px">Open API 对接文档</span></div>
+          <p class="doc-p">本节点的实例生命周期管理接口，供商城 / 主控 / 第三方系统对接。所有接口均需鉴权，鉴权方式二选一：</p>
+          <p class="doc-p">① 请求头携带 <code>X-API-Key</code>（被控 <code>.env</code> 中设置 <code>PANEL_API_KEY</code> 后启用）</p>
+          <p class="doc-p">② 主控内部调用携带 <code>X-Node-Token</code>（即 <code>NODE_TOKEN</code>，与主控共用）</p>
+          <div class="api-sec">通用约定</div>
+          <ul class="doc-p" style="margin-left:18px">
+            <li>Base URL：<code class="api-origin mono"></code></li>
+            <li>请求体为 JSON；错误统一返回 <code>{"detail": "原因"}</code>；鉴权失败 401，实例不存在 404</li>
+            <li>镜像白名单由 <code>PYTHON_IMAGES / PHP_IMAGES</code> 决定，开通时镜像不在白名单将返回 400</li>
+          </ul>
+        </div>
+
+        <div class="card">
+          <div class="api-item">
+            <div class="api-head"><span class="api-method m-post">POST</span><span class="api-path">/open/provision</span><span class="api-desc">开通实例（分配端口、创建容器、生成面板令牌）</span></div>
+            <div class="api-sec">请求参数</div>
+            <table class="api-tbl">
+              <tr><th>字段</th><th>类型</th><th>默认</th><th>说明</th></tr>
+              <tr><td class="mono">name</td><td>string</td><td>必填</td><td>实例名称（1-64 字符）</td></tr>
+              <tr><td class="mono">image</td><td>string</td><td>必填</td><td>镜像名，如 <span class="mono">python:3.12-slim</span>、<span class="mono">php:8.3-cli</span></td></tr>
+              <tr><td class="mono">days</td><td>int</td><td>30</td><td>有效期（天），1-3650</td></tr>
+              <tr><td class="mono">cpu</td><td>float</td><td>1.0</td><td>CPU 核数上限，&gt;0 且 ≤8</td></tr>
+              <tr><td class="mono">mem</td><td>int</td><td>512</td><td>内存上限（MB），64-16384</td></tr>
+              <tr><td class="mono">disk_quota</td><td>int</td><td>2048</td><td>磁盘配额（MB）</td></tr>
+              <tr><td class="mono">start_cmd</td><td>string</td><td>""</td><td>入口命令，空则按镜像取默认</td></tr>
+              <tr><td class="mono">owner_ref</td><td>string</td><td>""</td><td>归属备注（如商城订单号），便于对账</td></tr>
+            </table>
+            <div class="api-sec">示例</div>
+            <div class="api-pre">curl -X POST <span class="api-origin"></span>/open/provision \
+  -H "X-API-Key: &lt;your-api-key&gt;" -H "Content-Type: application/json" \
+  -d '{"name":"shop-1001","image":"python:3.12-slim","days":30,"cpu":1,"mem":512,"owner_ref":"order-1001"}'</div>
+            <div class="api-sec">响应</div>
+            <div class="api-pre">{
+  "iid": 12, "name": "shop-1001",
+  "panel_url": "http://&lt;节点地址&gt;:9100/panel?token=...",
+  "panel_token": "&lt;实例面板令牌&gt;",
+  "ext_port": 30124, "expire_at": "2026-10-24T12:00:00",
+  "owner_ref": "order-1001"
+}</div>
+          </div>
+
+          <div class="api-item">
+            <div class="api-head"><span class="api-method m-get">GET</span><span class="api-path">/open/instances/{iid}</span><span class="api-desc">查询实例：状态、配置与实时用量</span></div>
+            <div class="api-sec">示例</div>
+            <div class="api-pre">curl <span class="api-origin"></span>/open/instances/12 -H "X-API-Key: &lt;your-api-key&gt;"</div>
+            <div class="api-sec">响应（含 provision 全字段，附加）</div>
+            <div class="api-pre">{
+  "status": "running", "image": "python:3.12-slim",
+  "cpu_limit": 1.0, "mem_limit": 512,
+  "stats": { "running": true, "cpu_percent": 2.1, "mem_usage_mb": 87, "mem_limit_mb": 512, "mem_percent": 17.0, "net_rx_mb": 12.4, "net_tx_mb": 8.2 }
+}</div>
+          </div>
+
+          <div class="api-item">
+            <div class="api-head"><span class="api-method m-post">POST</span><span class="api-path">/open/instances/{iid}/renew</span><span class="api-desc">续期：在当前到期时间上追加天数</span></div>
+            <div class="api-sec">请求参数</div>
+            <table class="api-tbl">
+              <tr><th>字段</th><th>类型</th><th>说明</th></tr>
+              <tr><td class="mono">days</td><td>int</td><td>续期天数（1-3650），已过期则从当前时间起算</td></tr>
+            </table>
+            <div class="api-sec">示例</div>
+            <div class="api-pre">curl -X POST <span class="api-origin"></span>/open/instances/12/renew \
+  -H "X-API-Key: &lt;your-api-key&gt;" -H "Content-Type: application/json" -d '{"days":30}'
+# =&gt; {"iid": 12, "expire_at": "2026-11-23T12:00:00"}</div>
+          </div>
+
+          <div class="api-item">
+            <div class="api-head"><span class="api-method m-post">POST</span><span class="api-path">/open/instances/{iid}/token-reset</span><span class="api-desc">重置实例面板令牌（旧 panel_url 立即失效）</span></div>
+            <div class="api-sec">示例</div>
+            <div class="api-pre">curl -X POST <span class="api-origin"></span>/open/instances/12/token-reset -H "X-API-Key: &lt;your-api-key&gt;"
+# =&gt; 返回新的 panel_url / panel_token（字段同开通接口）</div>
+          </div>
+
+          <div class="api-item">
+            <div class="api-head"><span class="api-method m-del">DELETE</span><span class="api-path">/open/instances/{iid}?purge=1</span><span class="api-desc">回收实例：删容器，联动回收实例数据库；purge=1 时同时删除站点文件</span></div>
+            <div class="api-sec">查询参数</div>
+            <table class="api-tbl">
+              <tr><th>参数</th><th>说明</th></tr>
+              <tr><td class="mono">purge</td><td>1 = 连同站点目录一起删除；0 = 仅删容器与数据库，文件保留</td></tr>
+            </table>
+            <div class="api-sec">示例</div>
+            <div class="api-pre">curl -X DELETE "<span class="api-origin"></span>/open/instances/12?purge=1" -H "X-API-Key: &lt;your-api-key&gt;"
+# =&gt; {"ok": true, "iid": 12, "purged": true}</div>
+          </div>
+        </div>
+        <script>document.querySelectorAll('.api-origin').forEach(el => el.textContent = location.origin)</script>
+      </div>
+
       <!-- 概览 -->
       <div id="v-overview" class="view active">
         <div class="card">

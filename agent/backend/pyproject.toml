@@ -13,6 +13,8 @@ dependencies = [
     "sqlalchemy>=2.0.54",
     "uvicorn[standard]>=0.53.0",
     "paramiko>=3.4.0",
+    # cffi 2.x 暂无 aarch64 预编译 wheel，树莓派等 arm 设备需源码编译；锁在 1.x（有全平台 wheel）
+    "cffi>=1.15,<2",
 ]
 
 [dependency-groups]
