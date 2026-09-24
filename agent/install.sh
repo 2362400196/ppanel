@@ -138,7 +138,26 @@ fetch_code() {
   if [ -d "$SRC_DIR/.git" ]; then
     MODE_UPGRADE=1
     info "检测到已有安装（$SRC_DIR），更新代码..."
-    git -C "$SRC_DIR" pull --ff-only >/dev/null 2>&1 || warn "git pull 失败，沿用现有代码"
+    if git -C "$SRC_DIR" pull --ff-only > /tmp/ppanel-git.log 2>&1; then
+      ok "代码已是最新"
+    else
+      tail -4 /tmp/ppanel-git.log
+      warn "git pull 失败，尝试自动修复（本地改动仅限已跟踪文件，不影响 .env 与数据）..."
+      # 已跟踪文件的本地改动（如 uv.lock 被改写）→ 还原后重试
+      git -C "$SRC_DIR" checkout -- . 2>/dev/null || true
+      if git -C "$SRC_DIR" pull --ff-only > /tmp/ppanel-git.log 2>&1; then
+        ok "已修复并更新"
+      else
+        # 远程历史分叉（如强推）→ 硬对齐远程（未跟踪的 .env/data 不受影响）
+        BR=$(git -C "$SRC_DIR" rev-parse --abbrev-ref HEAD)
+        if git -C "$SRC_DIR" fetch origin > /dev/null 2>&1 \
+           && git -C "$SRC_DIR" reset --hard "origin/$BR" > /dev/null 2>&1; then
+          ok "已对齐远程分支 $BR"
+        else
+          warn "无法自动更新，沿用现有代码继续"
+        fi
+      fi
+    fi
   else
     MODE_UPGRADE=0
     info "克隆仓库 -> $SRC_DIR"

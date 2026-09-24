@@ -370,8 +370,28 @@ tr[data-kind='file'] .f-svg { color: var(--text2); }
     <button id="loginBtn" class="btn block" onclick="doLogin()">进入面板</button>
     <div id="loginErr" class="login-err"></div>
     <p class="hint">令牌由服务提供方（主控 / 商城）下发，每个令牌只绑定一个容器。丢失请联系提供方重置。</p>
+    <p class="hint" style="text-align:center;margin-top:2px"><a href="javascript:void(0)" onclick="showApidoc()" style="color:var(--prim,#0d9488);text-decoration:none;font-weight:600">Open API 对接文档 →</a></p>
   </div>
 </div>
+
+<!-- API 文档全屏层（登录前可查看，内容复用面板内 v-apidoc） -->
+<div id="apidocOverlay" style="display:none;position:fixed;inset:0;background:var(--bg);z-index:1000;overflow-y:auto;padding:26px 18px">
+  <div style="max-width:860px;margin:0 auto">
+    <button class="btn ghost" style="margin-bottom:14px" onclick="document.getElementById('apidocOverlay').style.display='none'">← 返回登录</button>
+    <div id="apidocOverlayBody"></div>
+  </div>
+</div>
+<script>
+function showApidoc() {
+  const o = document.getElementById('apidocOverlay')
+  if (!o.dataset.loaded) {
+    document.getElementById('apidocOverlayBody').innerHTML = document.getElementById('v-apidoc').innerHTML
+    o.dataset.loaded = '1'
+  }
+  o.style.display = 'block'
+  o.scrollTop = 0
+}
+</script>
 
 <!-- 主界面 -->
 <div id="app" class="app">
