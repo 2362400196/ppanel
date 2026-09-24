@@ -9,6 +9,7 @@ import UIModal from '../components/ui/UIModal.vue'
 import UIInput from '../components/ui/UIInput.vue'
 import StatusDot from '../components/ui/StatusDot.vue'
 import ConfirmDialog from '../components/ui/ConfirmDialog.vue'
+import NodeAdminModal from '../components/NodeAdminModal.vue'
 
 const nodes = ref([])
 const loaded = ref(false)
@@ -19,8 +20,16 @@ const nodeCols = [
   { key: 'base_url', label: '被控地址' },
   { key: 'health_text', label: 'Docker 概况' },
   { key: 'enabled', label: '启用', width: '80px' },
-  { key: 'ops', label: '', width: '230px' }
+  { key: 'ops', label: '', width: '290px' }
 ]
+
+// 节点管理面板
+const adminOpen = ref(false)
+const adminNode = ref(null)
+function openNodeAdmin(n) {
+  adminNode.value = n
+  adminOpen.value = true
+}
 
 const healthText = n => {
   if (!n.online) return '-'
@@ -156,6 +165,7 @@ onUnmounted(() => clearInterval(timer))
         <UITag :tone="row.enabled ? 'ok' : 'dim'">{{ row.enabled ? '启用' : '停用' }}</UITag>
       </template>
       <template #col-ops="{ row }">
+        <UIButton type="text" @click="openNodeAdmin(row)">管理</UIButton>
         <UIButton type="text" @click="testNode(row)">测连通</UIButton>
         <UIButton type="text" @click="openEdit(row)">编辑</UIButton>
         <UIButton type="text" @click="toggleEnabled(row)">{{ row.enabled ? '停用' : '启用' }}</UIButton>
@@ -200,6 +210,9 @@ onUnmounted(() => clearInterval(timer))
       danger
       @confirm="doDelete"
     />
+
+    <!-- 节点管理面板（概览/容器/镜像/文件管理/宿主机终端） -->
+    <NodeAdminModal v-model:open="adminOpen" :node="adminNode" />
   </div>
 </template>
 

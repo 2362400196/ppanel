@@ -41,11 +41,17 @@ function clear() {
   cursor.value = 0
 }
 
+// 整体重绘（docker pull 进度条快照：以 \x01 前缀的消息触发）
+function redraw(chunk) {
+  lines.value = String(chunk).split('\n')
+  cursor.value = 0
+}
+
 watch(lines, () => nextTick(() => {
   if (el.value) el.value.scrollTop = el.value.scrollHeight
 }), { deep: true })
 
-defineExpose({ write, clear })
+defineExpose({ write, clear, redraw })
 </script>
 
 <template>

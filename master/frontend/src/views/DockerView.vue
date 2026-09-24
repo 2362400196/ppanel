@@ -12,6 +12,7 @@ import UIModal from '../components/ui/UIModal.vue'
 import StatusDot from '../components/ui/StatusDot.vue'
 import ConfirmDialog from '../components/ui/ConfirmDialog.vue'
 import Terminal from '../components/Terminal.vue'
+import HostTerminal from '../components/HostTerminal.vue'
 
 const tab = ref('containers')
 const dockerDown = ref(false)
@@ -36,7 +37,6 @@ async function loadNodes() {
 }
 
 watch(nodeId, () => {
-  termWs?.close()
   loadContainers()
   loadImages()
   loadSettings()
@@ -141,7 +141,29 @@ const pullImageName = ref('')
 const pulling = ref(false)
 const pullTerm = ref(null)
 const pullOpen = ref(false)
+const pullTitle = ref('')
 let pullWs = null
+let pullBuf = []        // Terminal 未挂载时先缓冲，挂载后统一刷入
+let pullWatchdog = null   // 链路看门狗：连接后一直无任何消息
+let pullRepoTimer = null  // 仓库看门狗：agent 已响应但迟迟无拉取事件
+let pullGotAny = false
+let pullGotEvent = false
+
+function flushPull() {
+  if (!pullTerm.value || !pullBuf.length) return
+  for (const msg of pullBuf) {
+    if (msg.charCodeAt(0) === 1) pullTerm.value.redraw(msg.slice(1))  // 进度条快照：清空重绘
+    else pullTerm.value.write(msg + '\n')
+  }
+  pullBuf = []
+}
+watch(pullTerm, flushPull) // Terminal 挂载瞬间刷出缓冲
+
+function pullStop() {
+  clearTimeout(pullWatchdog)
+  clearTimeout(pullRepoTimer)
+  pulling.value = false
+}
 
 async function loadImages() {
   if (!nodeId.value) return
@@ -155,19 +177,47 @@ function startPull() {
   const image = pullImageName.value.trim()
   if (!image || pulling.value) return
   pulling.value = true
+  pullTitle.value = image
   pullOpen.value = true
   pullTerm.value?.clear()
-  nextTick(() => pullTerm.value?.write(`$ docker pull ${image}\n`))
+  pullBuf = [`$ docker pull ${image}`]
+  nextTick(flushPull)
+  pullGotAny = false
+  pullGotEvent = false
+  // 看门狗1：WS 打开但一条消息都没有 → 链路问题
+  pullWatchdog = setTimeout(() => {
+    if (pullGotAny) return
+    pullBuf.push('[错误] 20 秒未收到任何拉取进度：节点可能正在重启、被控不在线或网络不通，请稍后重试')
+    flushPull()
+    pullWs?.close()
+    pulling.value = false
+  }, 20000)
   pullWs = new WebSocket(wsUrl('/ws/docker/pull', { image, node: nodeId.value }))
   pullWs.onmessage = ev => {
-    pullTerm.value?.write(ev.data + '\n')
-    if (ev.data.startsWith('[面板] 拉取完成') || ev.data.startsWith('[错误]')) {
+    pullBuf.push(ev.data)
+    flushPull()
+    if (!pullGotAny) {
+      pullGotAny = true
+      // 看门狗2：agent 已响应但 40s 仍无拉取事件 → 仓库查询缓慢或镜像名不存在
+      clearTimeout(pullWatchdog)
+      pullRepoTimer = setTimeout(() => {
+        if (pullGotEvent) return
+        pullBuf.push('[错误] 40 秒仍无拉取进度：仓库查询缓慢，或该镜像不存在。请检查镜像名格式（注意冒号分隔标签，如 php:7.4）')
+        flushPull()
+        pullWs?.close()
+        pulling.value = false
+      }, 40000)
+    }
+    if (!ev.data.startsWith('[agent]')) pullGotEvent = true
+    if (ev.data.startsWith('[agent] 拉取完成') || ev.data.startsWith('[错误]')) {
+      clearTimeout(pullWatchdog)
+      clearTimeout(pullRepoTimer)
       pulling.value = false
       loadImages()
     }
   }
-  pullWs.onerror = () => { pulling.value = false }
-  pullWs.onclose = () => { pulling.value = false }
+  pullWs.onerror = pullStop
+  pullWs.onclose = pullStop
 }
 
 function removeImage(img) {
@@ -233,56 +283,7 @@ const infoItems = computed(() => info.value ? [
   ['镜像数量', info.value.images],
 ] : [])
 
-// ---------- 宿主机终端 ----------
-const termOut = ref(null)
-const cmdInput = ref('')
-const termConnected = ref(false)
-const termCwd = ref('~')
-let termWs = null
-const history = ref([])
-const histIdx = ref(-1)
-
-function termConnect() {
-  if (termWs || !nodeId.value) return
-  termWs = new WebSocket(wsUrl('/ws/host/term', { node: nodeId.value }))
-  termWs.onopen = () => {
-    termConnected.value = true
-    termOut.value?.write('')
-  }
-  termWs.onmessage = ev => {
-    const msg = JSON.parse(ev.data)
-    if (msg.type === 'hello') {
-      termOut.value?.write(`[面板] 已连接宿主机终端 ${msg.user}@${msg.host}（行模式，每次执行一条命令）\n`)
-    } else if (msg.type === 'out') {
-      termCwd.value = msg.cwd || '~'
-      if (msg.out) termOut.value?.write(msg.out + '\n')
-    }
-  }
-  termWs.onclose = () => {
-    termConnected.value = false
-    termWs = null
-    termOut.value?.write('[面板] 连接已断开\n')
-  }
-}
-function termSend() {
-  const cmd = cmdInput.value
-  if (!cmd.trim() || !termWs || termWs.readyState !== 1) return
-  history.value.push(cmd)
-  histIdx.value = history.value.length
-  termOut.value?.write(`${termCwd.value}$ ${cmd}\n`)
-  cmdInput.value = ''
-  termWs.send(JSON.stringify({ cmd }))
-}
-function termKey(e) {
-  if (e.key === 'ArrowUp') {
-    e.preventDefault()
-    if (histIdx.value > 0) { histIdx.value--; cmdInput.value = history.value[histIdx.value] }
-  } else if (e.key === 'ArrowDown') {
-    e.preventDefault()
-    if (histIdx.value < history.value.length - 1) { histIdx.value++; cmdInput.value = history.value[histIdx.value] }
-    else { histIdx.value = history.value.length; cmdInput.value = '' }
-  }
-}
+// ---------- 宿主机终端（HostTerminal 组件，xterm.js PTY） ----------
 
 let timer
 onMounted(() => {
@@ -291,11 +292,12 @@ onMounted(() => {
 })
 onUnmounted(() => {
   clearInterval(timer)
+  clearTimeout(pullWatchdog)
+  clearTimeout(pullRepoTimer)
   pullWs?.close()
-  termWs?.close()
 })
 
-watch(tab, v => { if (v === 'terminal') termConnect() })
+// 终端由 HostTerminal 组件自管理（Tab 切换时随 v-if 重建并自动重连）
 
 const tabs = [
   { key: 'containers', label: '容器管理' },
@@ -364,13 +366,6 @@ const tabs = [
         <UIInput v-model="pullImageName" class="pull-input mono" placeholder="镜像名，如 python:3.13-slim 或 redis:7" @keyup.enter="startPull" />
         <UIButton :loading="pulling" :disabled="!pullImageName.trim()" @click="startPull">拉取镜像</UIButton>
       </div>
-      <div v-if="pullOpen" class="pull-term">
-        <div class="pull-term-head">
-          <span>拉取输出</span>
-          <button class="pull-close" @click="pullOpen = false">收起</button>
-        </div>
-        <Terminal ref="pullTerm" placeholder="等待拉取..." class="pull-term-box" />
-      </div>
       <UITable :columns="imgCols" :rows="images">
         <template #col-full_name="{ row }"><span class="mono">{{ row.full_name }}</span></template>
         <template #col-created="{ row }">{{ fmtWhen(row.created) }}</template>
@@ -378,6 +373,10 @@ const tabs = [
           <UIButton type="text" class="danger" @click="removeImage(row)">删除</UIButton>
         </template>
       </UITable>
+
+      <UIModal v-model:open="pullOpen" :title="`拉取镜像 - ${pullTitle}`" width="720px" persistent>
+        <Terminal ref="pullTerm" placeholder="等待拉取..." class="pull-term-box" />
+      </UIModal>
     </template>
 
     <!-- Docker 设置 -->
@@ -412,24 +411,7 @@ const tabs = [
 
     <!-- 宿主机终端 -->
     <template v-else>
-      <div class="sec-head">
-        <span class="text-dim">以当前管理员身份在宿主机执行命令（行模式，每回车执行一条）</span>
-        <UITag :tone="termConnected ? 'primary' : 'warn'">{{ termConnected ? '已连接' : '未连接' }}</UITag>
-      </div>
-      <div class="term-shell">
-        <Terminal ref="termOut" placeholder="连接后输入命令，如：docker ps / df -h / free -m" class="term-box" />
-        <div class="term-input-row">
-          <span class="term-prompt mono">{{ termCwd }}$</span>
-          <input
-            v-model="cmdInput"
-            class="term-input mono"
-            :disabled="!termConnected"
-            placeholder="输入命令，回车执行"
-            @keyup.enter="termSend"
-            @keydown="termKey"
-          >
-        </div>
-      </div>
+      <HostTerminal :node-id="nodeId" />
     </template>
 
     <ConfirmDialog
@@ -464,14 +446,7 @@ const tabs = [
 
 .pull-bar { display: flex; gap: 10px; margin-bottom: 14px; }
 .pull-input { max-width: 380px; }
-.pull-term { margin-bottom: 14px; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
-.pull-term-head {
-  display: flex; justify-content: space-between; align-items: center;
-  padding: 7px 12px; background: #eef4f2; font-size: 12px; color: var(--text-2);
-}
-.pull-close { border: none; background: transparent; cursor: pointer; font-size: 12px; color: var(--text-dim); font-family: inherit; }
-.pull-close:hover { color: var(--primary); }
-.pull-term-box { height: 260px; border-radius: 0; }
+.pull-term-box { height: 340px; }
 
 .info-grid {
   display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 18px;

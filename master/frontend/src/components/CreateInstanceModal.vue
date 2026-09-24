@@ -55,6 +55,11 @@ watch(() => props.open, async v => {
   }
 })
 
+// 切换运行环境时联动默认启动命令
+watch(image, v => {
+  startCmd.value = v.startsWith('php:') ? 'php -S 0.0.0.0:8000 -t /app' : 'python main.py'
+})
+
 async function submit() {
   if (!name.value.trim()) return toastErr('请输入实例名称')
   submitting.value = true
@@ -65,7 +70,7 @@ async function submit() {
       cpu_limit: parseFloat(cpu.value),
       mem_limit: parseInt(mem.value),
       disk_quota: parseInt(disk.value),
-      start_cmd: startCmd.value.trim() || 'python main.py'
+      start_cmd: startCmd.value.trim()
     })
     toastOk(`实例「${data.name}」创建成功，外部端口 ${data.ext_port}`)
     emit('update:open', false)

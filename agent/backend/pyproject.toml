@@ -1,0 +1,21 @@
+[project]
+name = "ppanel"
+version = "0.1.0"
+description = "PPanel 被控端 Agent"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "bcrypt>=5.0.0",
+    "docker>=7.2.0",
+    "fastapi>=0.141.1",
+    "pyjwt>=2.14.0",
+    "python-multipart>=0.0.32",
+    "sqlalchemy>=2.0.54",
+    "uvicorn[standard]>=0.53.0",
+    "paramiko>=3.4.0",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+]

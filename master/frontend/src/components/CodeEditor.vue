@@ -48,7 +48,7 @@ const props = defineProps({
   filename: String,
   readonly: Boolean
 })
-const emit = defineEmits(['update:modelValue'])
+const emit = defineEmits(['update:modelValue', 'save'])
 
 const dark = ref(true)
 const box = ref(null)
@@ -89,6 +89,8 @@ onMounted(() => {
   editor.onDidChangeModelContent(() => {
     emit('update:modelValue', editor.getValue())
   })
+  // Ctrl/Cmd+S 保存（外部监听 save 事件才生效）
+  editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => emit('save'))
 })
 
 watch(() => props.modelValue, v => {

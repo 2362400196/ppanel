@@ -29,11 +29,23 @@ const routes = [
     component: () => import('../views/SettingsView.vue')
   },
   {
-    path: '/admin',
-    name: 'admin',
-    component: () => import('../views/AdminView.vue'),
-    meta: { admin: true }
-  },
+      path: '/admin',
+      name: 'admin',
+      component: () => import('../views/PlansView.vue'),
+      meta: { admin: true },
+    },
+    {
+      path: '/users',
+      name: 'users',
+      component: () => import('../views/UsersView.vue'),
+      meta: { admin: true },
+    },
+    {
+      path: '/manage',
+      name: 'manage',
+      component: () => import('../views/AdminInstancesView.vue'),
+      meta: { admin: true },
+    },
   {
     path: '/docker',
     name: 'docker',
@@ -66,6 +78,8 @@ router.beforeEach(async to => {
     }
   }
   if (to.meta.admin && !auth.isAdmin) return '/'
+  // 管理员视角专注管理：用户功能页（仪表盘/商城）重定向到管理后台
+  if (auth.isAdmin && ['instances', 'shop'].includes(to.name)) return '/admin'
   return true
 })
 
