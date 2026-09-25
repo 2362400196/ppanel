@@ -118,8 +118,9 @@ def _fw_allow(port: int) -> str | None:
     return None  # 未安装防火墙工具：跳过
 
 
-def _wait_ready(ver: str, root_password: str, timeout: int = 90) -> None:
+def _wait_ready(ver: str, root_password: str, timeout: int = 90, tid: str = "") -> None:
     """循环 mysqladmin ping 直到 mysqld 就绪（首次启动需初始化数据目录）。"""
+    from app import tasks
     c = _svc_container(ver)
     deadline = time.time() + timeout
     last = ""
@@ -131,16 +132,20 @@ def _wait_ready(ver: str, root_password: str, timeout: int = 90) -> None:
             res = c.exec_run(["mysqladmin", "ping", "-uroot", f"-p{root_password}", "--silent"])
             last = res.output.decode("utf-8", "replace") if isinstance(res.output, bytes) else ""
             if res.exit_code == 0:
+                tasks.log(tid, f"mysqld 就绪（等待 {int(timeout - (deadline - time.time()))}s）")
                 return
         except docker.errors.APIError:
             pass
+        if tid and int(deadline - time.time()) % 10 == 0:
+            tasks.log(tid, f"等待 mysqld 初始化…（剩余 {int(deadline - time.time())}s 内）")
         time.sleep(2)
     raise HTTPException(status_code=504, detail=f"MySQL 在 {timeout}s 内未就绪，请稍后在服务列表查看状态")
 
 
 # ---------- 服务生命周期（管理员，/agent/docker/mysql/*） ----------
 
-def enable_mysql(db: Session, ver: str) -> dict:
+def enable_mysql(db: Session, ver: str, tid: str = "") -> dict:
+    from app import tasks
     if ver not in MYSQL_VERSIONS:
         raise HTTPException(status_code=400, detail=f"不支持的版本（可选：{' / '.join(MYSQL_VERSIONS)}）")
     if db.get(MySqlService, ver):
@@ -154,6 +159,7 @@ def enable_mysql(db: Session, ver: str) -> dict:
         raise HTTPException(status_code=404, detail=f"镜像 {image} 未拉取，请先在镜像页拉取")
     except docker.errors.APIError as e:
         raise HTTPException(status_code=502, detail=f"Docker 调用失败：{e}")
+    tasks.log(tid, f"镜像 {image} 就绪，选取外网端口…")
 
     import secrets
     root_password = secrets.token_urlsafe(24)
@@ -165,6 +171,7 @@ def enable_mysql(db: Session, ver: str) -> dict:
         client.volumes.create(vol_name(ver))
     except docker.errors.APIError as e:
         raise HTTPException(status_code=502, detail=f"Docker 调用失败：{e}")
+    tasks.log(tid, f"数据卷 {vol_name(ver)} 就绪，端口 {host_port}")
 
     # 同名容器残留（如 DB 记录丢失）：先删旧容器再建（数据在卷里，不丢）
     try:
@@ -190,8 +197,16 @@ def enable_mysql(db: Session, ver: str) -> dict:
         )
     except docker.errors.APIError as e:
         raise HTTPException(status_code=502, detail=f"创建 MySQL 容器失败：{e}")
+    tasks.log(tid, f"容器 {svc_name(ver)} 已创建，等待 mysqld 就绪（首次初始化较慢）…")
 
-    _wait_ready(ver, root_password)
+    _wait_ready(ver, root_password, tid=tid)
+
+    # 数据卷复用（停用未删卷→重新启用）时 MYSQL_ROOT_PASSWORD 不生效（它只在卷为空的
+    # 首次初始化生效），卷内旧 root 密码会与登记密码失配——这里校验并自动重置
+    if not _sql_ok(ver, root_password):
+        tasks.log(tid, "检测到数据卷已有旧数据（root 密码失配），自动重置 root 密码…")
+        _reset_root_password(ver, root_password, tid=tid)
+
     _fw_allow(host_port)
 
     row = MySqlService(version=ver, container_id=container.id,
@@ -201,13 +216,72 @@ def enable_mysql(db: Session, ver: str) -> dict:
     return {"ok": True, "version": ver, "host_port": host_port, "root_password": root_password}
 
 
-def disable_mysql(db: Session, ver: str, purge: bool = False) -> dict:
+def _sql_ok(ver: str, password: str) -> bool:
+    """真实 SQL 校验 root 密码（mysqladmin ping 对 access denied 也算存活，不可靠）。"""
+    try:
+        _sql(ver, password, "SELECT 1")
+        return True
+    except HTTPException:
+        return False
+
+
+def _reset_root_password(ver: str, new_password: str, tid: str = "") -> None:
+    """复用旧数据卷导致 root 密码失配时：停主容器 → skip-grant 临时实例重置 → 复原。"""
+    from app import tasks
+    client = get_docker()
+    main = client.containers.get(svc_name(ver))
+    main.stop(timeout=10)
+    tmp_name = f"{svc_name(ver)}-resetpw"
+    try:
+        client.containers.get(tmp_name).remove(force=True)
+    except docker.errors.NotFound:
+        pass
+    tasks.log(tid, "启动 skip-grant 临时实例…")
+    tmp = client.containers.run(
+        image=f"mysql:{ver}",
+        name=tmp_name,
+        command=["--skip-grant-tables", "--skip-networking"],
+        volumes={vol_name(ver): {"bind": "/var/lib/mysql", "mode": "rw"}},
+        network=settings.docker_network,
+        detach=True,
+    )
+    try:
+        for _ in range(60):  # 等 skip-grant 实例就绪
+            time.sleep(1)
+            r = tmp.exec_run(["sh", "-c", "mysql -uroot -N -e 'SELECT 1'"])
+            if r.exit_code == 0:
+                break
+        else:
+            raise HTTPException(status_code=502, detail="root 密码重置超时：临时实例未就绪")
+        # skip-grant 模式下必须先 FLUSH PRIVILEGES 才能执行 ALTER USER
+        r = tmp.exec_run(["sh", "-c",
+            "mysql -uroot -e \"FLUSH PRIVILEGES; "
+            f"ALTER USER 'root'@'%' IDENTIFIED BY '{new_password}'; "
+            f"ALTER USER 'root'@'localhost' IDENTIFIED BY '{new_password}'; "
+            "FLUSH PRIVILEGES;\""])
+        if r.exit_code != 0:
+            raise HTTPException(status_code=502, detail="root 密码重置失败："
+                                + (r.output or b"").decode("utf-8", "replace")[-200:])
+    finally:
+        try:
+            tmp.remove(force=True)
+        except docker.errors.APIError:
+            pass
+    tasks.log(tid, "重启 MySQL 服务…")
+    main.start()
+    if not _sql_ok(ver, new_password):
+        raise HTTPException(status_code=502, detail="root 密码重置后仍无法连接，请查看容器日志")
+
+
+def disable_mysql(db: Session, ver: str, purge: bool = False, tid: str = "") -> dict:
+    from app import tasks
     _get_svc_row(db, ver)
     n = db.query(InstanceDb).filter(InstanceDb.version == ver).count()
     if n:
         raise HTTPException(status_code=400, detail=f"该版本下还有 {n} 个实例数据库，请先删除后再停用")
 
     client = get_docker()
+    tasks.log(tid, "删除 MySQL 容器…")
     try:
         client.containers.get(svc_name(ver)).remove(force=True)
     except docker.errors.NotFound:
@@ -216,6 +290,7 @@ def disable_mysql(db: Session, ver: str, purge: bool = False) -> dict:
         raise HTTPException(status_code=502, detail=f"删除容器失败：{e}")
 
     if purge:
+        tasks.log(tid, "删除数据卷（不可恢复）…")
         try:
             client.volumes.get(vol_name(ver)).remove()
         except docker.errors.NotFound:
@@ -303,6 +378,8 @@ def create_instance_db(db: Session, inst: Instance, ver: str) -> dict:
     _sql(ver, _get_svc_row(db, ver).root_password,
          f"CREATE DATABASE IF NOT EXISTS `{db_name}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; "
          f"CREATE USER IF NOT EXISTS '{db_user}'@'%' IDENTIFIED BY '{db_password}'; "
+         # 用户可能因"停用服务保留数据卷→重新启用"而残留，密码必须与登记一致
+         f"ALTER USER '{db_user}'@'%' IDENTIFIED BY '{db_password}'; "
          f"GRANT ALL PRIVILEGES ON `{db_name}`.* TO '{db_user}'@'%'; FLUSH PRIVILEGES;")
 
     row = InstanceDb(instance_id=inst.id, version=ver, db_name=db_name,

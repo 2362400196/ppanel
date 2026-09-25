@@ -50,6 +50,7 @@ class Instance(Base):
     status: Mapped[str] = mapped_column(String(16), default="creating")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     expire_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    traffic_gb: Mapped[float | None] = mapped_column(Float, nullable=True)  # 月流量限额 GB，空=不限
 
 
 class OpLog(Base):
@@ -98,6 +99,7 @@ class Plan(Base):
     mem: Mapped[int] = mapped_column(Integer, default=512)        # MB
     disk: Mapped[int] = mapped_column(Integer, default=2048)      # MB
     days: Mapped[int] = mapped_column(Integer, default=30)        # 有效期
+    traffic_gb: Mapped[int] = mapped_column(Integer, default=0)   # 月流量 GB；0=不限
     price_cents: Mapped[int] = mapped_column(Integer, default=500)  # 价格（分）
     sort: Mapped[int] = mapped_column(Integer, default=0)         # 越小越靠前
     node_id: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 绑定节点；空=自动分配

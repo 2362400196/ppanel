@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 # ============================================================
 #  PPanel 独立面板（被控节点）一键安装管理器
 #
@@ -103,7 +103,7 @@ switch_mirror() {  # 国内环境自动换 apt 源
 #  安装步骤
 # ============================================================
 install_base() {
-  step "1/5 安装基础依赖"
+  step "1/6 安装基础依赖"
   pkg_install curl git ca-certificates
   if ! command -v python3 >/dev/null 2>&1; then
     case "$PKG" in
@@ -118,7 +118,7 @@ install_base() {
 }
 
 install_docker() {
-  step "2/5 检查 Docker（运行用户实例容器）"
+  step "2/6 检查 Docker（运行用户实例容器）"
   if ! command -v docker >/dev/null 2>&1; then
     info "安装 Docker..."
     curl -fsSL https://get.docker.com | sh -s -- --mirror Aliyun >/dev/null 2>&1 \
@@ -133,8 +133,71 @@ install_docker() {
   ok "Docker 服务运行中"
 }
 
+install_caddy() {
+  step "3/6 安装 Caddy（域名自动 HTTPS / Let's Encrypt 证书）"
+  if command -v caddy >/dev/null 2>&1; then
+    ok "Caddy 已存在：$(caddy version 2>/dev/null | head -1)"
+  else
+    if [ "$PKG" = "apt" ]; then
+      info "安装 Caddy（caddy 官方仓库）..."
+      apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https curl >/dev/null 2>&1 || true
+      curl -fsSL "https://caddyserver.com/api/download-gpg" 2>/dev/null | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg 2>/dev/null \
+        || curl -fsSL "https://dl.cloudsmith.io/public/caddy/stable/gpg.key" 2>/dev/null | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg 2>/dev/null || true
+      echo "deb [signed-by=/usr/share/keyrings/caddy-stable-archive-keyring.gpg] https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version main" \
+        > /etc/apt/sources.list.d/caddy-stable.list 2>/dev/null || true
+      apt-get update -qq >/dev/null 2>&1 || true
+      if ! apt-get install -y -qq caddy >/dev/null 2>&1; then
+        # 仓库不可达时退回静态二进制（GitHub 直链 / 国内加速）
+        info "apt 安装失败，尝试静态二进制..."
+        ARCH=$(uname -m); case "$ARCH" in x86_64) CA=amd64 ;; aarch64) CA=arm64 ;; *) CA=amd64 ;; esac
+        curl -fsSL --max-time 120 "https://github.com/caddyserver/caddy/releases/latest/download/caddy_${CA}.tar.gz" -o /tmp/caddy.tgz 2>/dev/null \
+          || curl -fsSL --max-time 120 "https://ghfast.top/https://github.com/caddyserver/caddy/releases/latest/download/caddy_${CA}.tar.gz" -o /tmp/caddy.tgz 2>/dev/null \
+          || { warn "Caddy 安装失败（不影响面板运行，仅「域名与 SSL」功能不可用）"; return 0; }
+        tar -xzf /tmp/caddy.tgz -C /usr/local/bin caddy && chmod +x /usr/local/bin/caddy && rm -f /tmp/caddy.tgz
+        # 静态安装补 systemd 单元
+        cat > /etc/systemd/system/caddy.service <<'UNIT'
+[Unit]
+Description=Caddy
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+User=root
+ExecStart=/usr/local/bin/caddy run --environ --config /etc/caddy/Caddyfile
+ExecReload=/usr/local/bin/caddy reload --config /etc/caddy/Caddyfile --force
+TimeoutStopSec=5s
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+        systemctl daemon-reload
+      fi
+    else
+      # dnf/yum
+      $PKG_INSTALL caddy || { warn "Caddy 安装失败（不影响面板运行，仅「域名与 SSL」功能不可用）"; return 0; }
+    fi
+    ok "Caddy 安装完成：$(caddy version 2>/dev/null | head -1)"
+  fi
+  # 主 Caddyfile：确保 include 实例站点目录
+  mkdir -p /etc/caddy/sites
+  if [ ! -f /etc/caddy/Caddyfile ]; then
+    printf '# PPanel 主配置：实例站点在 /etc/caddy/sites/ 下自动管理\nimport /etc/caddy/sites/*\n' > /etc/caddy/Caddyfile
+  elif ! grep -q "import /etc/caddy/sites" /etc/caddy/Caddyfile; then
+    printf '\nimport /etc/caddy/sites/*\n' >> /etc/caddy/Caddyfile
+  fi
+  systemctl enable --now caddy >/dev/null 2>&1 || true
+  # 80/443 放行（ACME HTTP-01 验证与 HTTPS 访问必需）
+  ufw allow 80/tcp >/dev/null 2>&1 || true
+  ufw allow 443/tcp >/dev/null 2>&1 || true
+  firewall-cmd --permanent --add-service=http >/dev/null 2>&1 || true
+  firewall-cmd --permanent --add-service=https >/dev/null 2>&1 || true
+  firewall-cmd --reload >/dev/null 2>&1 || true
+  ok "Caddy 已启动，80/443 端口已放行"
+}
+
 fetch_code() {
-  step "3/5 拉取代码"
+  step "4/6 拉取代码"
   if [ -d "$SRC_DIR/.git" ]; then
     MODE_UPGRADE=1
     info "检测到已有安装（$SRC_DIR），更新代码..."
@@ -168,7 +231,7 @@ fetch_code() {
 }
 
 install_deps() {
-  step "4/5 安装 Python 依赖（uv 加速）"
+  step "5/6 安装 Python 依赖（uv 加速）"
   cd "$APP_DIR"
   export UV_DEFAULT_INDEX="$PYPI_MIRROR"
   export UV_INDEX_URL="$PYPI_MIRROR"
@@ -217,7 +280,7 @@ install_deps() {
 }
 
 setup_service() {
-  step "5/5 注册服务并启动"
+  step "6/6 注册服务并启动"
   mkdir -p /data/inst "$APP_DIR/data"
   if [ ! -f "$APP_DIR/.env" ]; then
     NODE_TOKEN="ppnode_$(openssl rand -hex 16 2>/dev/null || head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
@@ -301,6 +364,7 @@ action_install() {
   switch_mirror
   install_base
   install_docker
+  install_caddy
   fetch_code
   install_deps
   setup_service
@@ -318,6 +382,7 @@ action_reinstall() {  # 全新重装：清除旧安装（含数据）后重装
   switch_mirror
   install_base
   install_docker
+  install_caddy
   fetch_code
   install_deps
   setup_service

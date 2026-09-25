@@ -15,7 +15,7 @@ from app.metrics_sampler import metrics_loop
 from app.models import Domain, Instance, Metric, Node, OpLog, Plan, User  # noqa: F401 确保模型注册
 from app.routers import (auth_router, docker_proxy, host_proxy, instances,
                          nodes_admin, open_api, plans_admin, users_admin,
-                         ws_proxy)
+                         ws_proxy, tasks_router)
 
 
 @asynccontextmanager
@@ -41,6 +41,13 @@ def _migrate() -> None:
             conn.commit()
         if "image" not in cols:
             conn.execute(text("ALTER TABLE plans ADD COLUMN image VARCHAR(128) DEFAULT ''"))
+            conn.commit()
+        if "traffic_gb" not in cols:
+            conn.execute(text("ALTER TABLE plans ADD COLUMN traffic_gb INTEGER DEFAULT 0"))
+            conn.commit()
+        icols = {r[1] for r in conn.execute(text("PRAGMA table_info(instances)"))}
+        if "traffic_gb" not in icols:
+            conn.execute(text("ALTER TABLE instances ADD COLUMN traffic_gb REAL"))
             conn.commit()
 
 
@@ -85,6 +92,7 @@ app.include_router(plans_admin.router, prefix="/api")
 app.include_router(plans_admin.pub, prefix="/api")
 app.include_router(docker_proxy.router, prefix="/api")
 app.include_router(host_proxy.router, prefix="/api")
+app.include_router(tasks_router.router, prefix="/api")  # 任务日志增量拉取（配合 X-Task-Id）
 app.include_router(open_api.router, prefix="/api")
 app.include_router(ws_proxy.router)  # WS 与面板一致，不带 /api 前缀
 

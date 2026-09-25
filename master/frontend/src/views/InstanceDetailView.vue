@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api, errText } from '../api/client'
+import { startTask } from '../api/tasks'
 import { toastErr, toastOk } from '../components/ui/toast'
 import UIButton from '../components/ui/UIButton.vue'
 import StatusDot from '../components/ui/StatusDot.vue'
@@ -78,7 +79,9 @@ async function act(action) {
 
 async function doDelete() {
   try {
-    const { data } = await api.delete(`/instances/${instanceId.value}`)
+    const tid = startTask()  // 回收实例全程终端日志
+    const { data } = await api.delete(`/instances/${instanceId.value}`,
+      { headers: { 'X-Task-Id': tid } })
     toastOk(data.detail || '已删除')
     router.push('/')
   } catch (e) {

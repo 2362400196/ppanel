@@ -39,7 +39,9 @@ watch(() => props.open, v => {
           <div class="modal-head">
             <span class="modal-title">{{ title }}</span>
             <button class="modal-x" aria-label="关闭" @click="closeForced">
-              <i />
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+                <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
             </button>
           </div>
           <div class="modal-body"><slot /></div>
@@ -72,16 +74,14 @@ watch(() => props.open, v => {
 }
 .modal-title { font-size: 15px; font-weight: 700; }
 .modal-x {
-  width: 26px; height: 26px; border: none; background: transparent;
-  border-radius: 6px; cursor: pointer; position: relative;
+  width: 28px; height: 28px; border: none; background: transparent;
+  border-radius: 8px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--text);
+  transition: background .15s ease, color .15s ease;
 }
-.modal-x:hover { background: var(--primary-soft); }
-.modal-x i, .modal-x i::after {
-  content: ''; position: absolute; left: 50%; top: 50%;
-  width: 12px; height: 1.6px; background: var(--text-2); border-radius: 1px;
-  transform: translate(-50%, -50%) rotate(45deg);
-}
-.modal-x i::after { transform: translate(-50%, -50%) rotate(-45deg); }
+.modal-x:hover { background: rgba(229, 72, 77, .12); color: #e5484d; }
+.modal-x svg { width: 16px; height: 16px; }
 .modal-body { padding: 16px 20px; overflow-y: auto; }
 .modal-foot {
   display: flex; justify-content: flex-end; gap: 10px;

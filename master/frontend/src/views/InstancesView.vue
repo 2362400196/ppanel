@@ -1,6 +1,7 @@
 <script setup>
 import { onMounted, onUnmounted, ref } from 'vue'
 import { api, errText } from '../api/client'
+import { startTask } from '../api/tasks'
 import { toastErr, toastOk } from '../components/ui/toast'
 import UIButton from '../components/ui/UIButton.vue'
 import UITag from '../components/ui/UITag.vue'
@@ -53,7 +54,9 @@ async function openPanel(inst) {
 
 async function doDelete() {
   try {
-    const { data } = await api.delete(`/instances/${delTarget.value.id}`)
+    const tid = startTask()  // 回收实例全程终端日志
+    const { data } = await api.delete(`/instances/${delTarget.value.id}`,
+      { headers: { 'X-Task-Id': tid } })
     toastOk(data.detail || '已删除')
     delOpen.value = false
     load()

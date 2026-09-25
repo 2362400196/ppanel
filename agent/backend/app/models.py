@@ -46,6 +46,11 @@ class Instance(Base):
     owner_ref: Mapped[str] = mapped_column(String(128), default="")
     # 实例自定义 PHP 禁用函数（逗号分隔；空=使用节点默认 PHP_DISABLE_FUNCTIONS）
     disabled_funcs: Mapped[str] = mapped_column(String(512), default="")
+    # 流量限制与计量（GB / MB）：gb 空=不限；used 为本期累计（自然月重置）；last 为采集游标
+    traffic_gb: Mapped[float | None] = mapped_column(Float, nullable=True)
+    traffic_used_mb: Mapped[float] = mapped_column(Float, default=0.0)
+    traffic_last_mb: Mapped[float] = mapped_column(Float, default=0.0)
+    traffic_month: Mapped[str] = mapped_column(String(7), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 

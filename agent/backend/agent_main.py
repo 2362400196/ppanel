@@ -18,7 +18,7 @@ from app.auth import hash_password
 from app.config import settings
 from app.database import Base, SessionLocal, engine
 from app.models import Instance, User  # noqa: F401
-from app.routers import agent, agent_ws, host_files, open_api, panel
+from app.routers import agent, agent_ws, backup, host_files, host_tasks, open_api, panel, security
 from app.services import instance_service as svc
 
 
@@ -107,7 +107,11 @@ async def lifespan(_app):
                 "ALTER TABLE instances ADD COLUMN domain VARCHAR(255)",
                 "ALTER TABLE instances ADD COLUMN expire_at DATETIME",
                 "ALTER TABLE instances ADD COLUMN owner_ref VARCHAR(128) DEFAULT ''",
-                "ALTER TABLE instances ADD COLUMN disabled_funcs VARCHAR(512) DEFAULT ''"):
+                "ALTER TABLE instances ADD COLUMN disabled_funcs VARCHAR(512) DEFAULT ''",
+                "ALTER TABLE instances ADD COLUMN traffic_gb REAL",
+                "ALTER TABLE instances ADD COLUMN traffic_used_mb REAL DEFAULT 0",
+                "ALTER TABLE instances ADD COLUMN traffic_last_mb REAL DEFAULT 0",
+                "ALTER TABLE instances ADD COLUMN traffic_month VARCHAR(7) DEFAULT ''"):
             try:
                 conn.exec_driver_sql(ddl)
             except Exception:  # noqa: BLE001 列已存在
@@ -140,6 +144,9 @@ app.include_router(agent.router, prefix="/agent",
                    dependencies=[Depends(require_node)])
 app.include_router(agent_ws.router, prefix="/agent")
 app.include_router(host_files.router, prefix="/agent")  # 宿主机文件管理（管理员节点运维）
+app.include_router(security.router, prefix="/agent")  # 宿主机安全防护：X-Node-Token 或 X-API-Key
+app.include_router(backup.router, prefix="/agent")  # 节点备份：容器导出 / 数据库导出，X-Node-Token 或 X-API-Key
+app.include_router(host_tasks.router, prefix="/agent")  # 任务日志增量拉取（配合 X-Task-Id）
 app.include_router(panel.router)  # 独立单容器面板：自带令牌鉴权
 app.include_router(open_api.router)  # 开放开通面：X-API-Key，供第三方商城直连
 

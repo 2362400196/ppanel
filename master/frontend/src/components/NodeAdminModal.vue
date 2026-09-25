@@ -12,6 +12,7 @@ import StatusDot from './ui/StatusDot.vue'
 import ConfirmDialog from './ui/ConfirmDialog.vue'
 import CodeEditor from './CodeEditor.vue'
 import HostTerminal from './HostTerminal.vue'
+import { startTask } from '../api/tasks'
 
 // 节点管理面板：一个大模态框聚合节点级运维能力（概览/容器/镜像/文件/终端）
 const props = defineProps({
@@ -38,13 +39,15 @@ const gauges = computed(() => {
   const s = stats.value
   if (!s) return []
   const color = p => p == null ? 'var(--line)' : p >= 85 ? '#e5484d' : p >= 60 ? '#f59e0b' : 'var(--primary)'
+  // 容器运行率语义与资源占用相反：越高越健康 → 高绿低红
+  const upColor = p => p == null ? 'var(--line)' : p >= 60 ? 'var(--primary)' : p >= 30 ? '#f59e0b' : '#e5484d'
   const c = s.cpu || {}, m = s.mem || {}, d = s.disk || {}, ct = s.containers
   const contP = ct && ct.total ? Math.round((ct.running || 0) / ct.total * 100) : null
   return [
     { label: 'CPU', p: c.percent, color: color(c.percent), sub: c.cores ? `${c.cores} 核` : '—' },
     { label: '内存', p: m.percent, color: color(m.percent), sub: m.total ? `${fmtSize(m.used)} / ${fmtSize(m.total)}` : '—' },
     { label: '磁盘', p: d.percent, color: color(d.percent), sub: d.total ? `${fmtSize(d.used)} / ${fmtSize(d.total)}` : '—' },
-    { label: '容器运行', p: contP, color: color(contP), sub: ct ? `${ct.running} 运行 / ${ct.paused} 暂停 / ${ct.stopped} 停止` : '—' }
+    { label: '容器运行', p: contP, color: upColor(contP), sub: ct ? `${ct.running} 运行 / ${ct.paused} 暂停 / ${ct.stopped} 停止` : '—' }
   ]
 })
 
@@ -57,7 +60,7 @@ const infoItems = computed(() => {
     ['内存总量', s.mem?.total ? fmtSize(s.mem.total) : (info.value.mem_total_gb ? `${info.value.mem_total_gb} GB` : '-')],
     ['系统负载', s.load ? s.load.join(' / ') : '-'],
     ['运行时长', fmtUptime(s.uptime)],
-    ['Docker 版本', info.value.docker_version || '-'],
+    ['Docker 版本', info.value.server_version || '-'],
     ['存储驱动', info.value.storage_driver || '-'],
     ['内核', info.value.kernel || '-'],
     ['架构', info.value.arch || '-'],
@@ -119,7 +122,10 @@ async function confirmDelContainer() {
   contDelOpen.value = false
   if (!c) return
   try {
-    const { data } = await api.delete(`/docker/containers/${c.id}`, { params: { ...np(), force: c.state === 'running' } })
+    // running/restarting/paused 必须强制删除（docker rm 对这些状态非 -f 会失败）
+    const { data } = await api.delete(`/docker/containers/${c.id}`, {
+      params: { ...np(), force: ['running', 'restarting', 'paused'].includes(c.state) ? 1 : '' }
+    })
     toastOk(data.detail || '已删除')
     loadContainers()
   } catch (e) { toastErr(errText(e)) }
@@ -177,7 +183,9 @@ async function doPull() {
   if (!image) { toastErr('请输入镜像名'); return }
   pullLoading.value = true
   try {
-    const { data } = await api.post('/docker/images/pull', { image }, { params: np(), timeout: 600000 })
+    const tid = startTask(props.node?.id)
+    const { data } = await api.post('/docker/images/pull', { image },
+      { params: np(), timeout: 600000, headers: { 'X-Task-Id': tid } })
     toastOk(`拉取完成：${data.image?.full_name || image}（${data.image?.size || ''}）`)
     pullOpen.value = false
     pullImage.value = ''
@@ -192,7 +200,9 @@ const pruning = ref(false)
 async function pruneImages() {
   pruning.value = true
   try {
-    const { data } = await api.post('/docker/images/prune', null, { params: np() })
+    const tid = startTask(props.node?.id)
+    const { data } = await api.post('/docker/images/prune', null,
+      { params: np(), headers: { 'X-Task-Id': tid } })
     toastOk(data.detail || '清理完成')
     loadImages()
     loadInfo()
@@ -784,8 +794,10 @@ async function saveMirrors() {
   const mirrors = mirrorsText.value.split('\n').map(s => s.trim()).filter(Boolean)
   savingMirrors.value = true
   try {
+    const tid = startTask(props.node?.id)
     const { data } = await api.put('/docker/settings',
-      { registry_mirrors: mirrors, restart: true }, { params: np(), timeout: 120000 })
+      { registry_mirrors: mirrors, restart: true },
+      { params: np(), timeout: 120000, headers: { 'X-Task-Id': tid } })
     toastOk(data.detail || '已保存')
   } catch (e) { toastErr(errText(e)) }
   finally { savingMirrors.value = false }
@@ -793,8 +805,9 @@ async function saveMirrors() {
 async function doSystemPrune() {
   pruneRunning.value = true
   try {
+    const tid = startTask(props.node?.id)
     const { data } = await api.post('/docker/system/prune',
-      { builder: pruneBuilder.value }, { params: np(), timeout: 300000 })
+      { builder: pruneBuilder.value }, { params: np(), timeout: 300000, headers: { 'X-Task-Id': tid } })
     toastOk(data.detail || '清理完成')
     loadDf()
   } catch (e) { toastErr(errText(e)) }
@@ -809,7 +822,9 @@ const navs = [
   { key: 'files', label: '文件管理' },
   { key: 'terminal', label: '宿主机终端' },
   { key: 'firewall', label: '防火墙' },
+  { key: 'sec', label: 'SSH 防护' },
   { key: 'mysql', label: 'MySQL 服务' },
+  { key: 'backup', label: '备份' },
   { key: 'settings', label: '设置' }
 ]
 
@@ -825,7 +840,9 @@ watch(view, v => {
   else if (v === 'files') { if (!entries.value.length) loadFiles(curPath.value) }
   else if (v === 'settings') { loadDf(); loadSettings() }
   else if (v === 'firewall') loadFirewall()
+  else if (v === 'sec') loadSec()
   else if (v === 'mysql') loadMysql()
+  else if (v === 'backup') { loadBackups(); loadBkDbs(); if (!containers.value.length) loadContainers(); loadMysql() }
   syncPoll()
 })
 
@@ -855,8 +872,9 @@ async function loadMysql() {
 async function enableMysql(v) {
   mysqlBusy.value = v
   try {
+    const tid = startTask(props.node?.id)
     const { data } = await api.post(`/docker/mysql/${v}/enable`, null,
-      { params: np(), timeout: 120000 })  // 首次启动需初始化数据目录，最长 ~90s
+      { params: np(), timeout: 120000, headers: { 'X-Task-Id': tid } })
     toastOk(`MySQL ${v} 已启用，外网端口 ${data.host_port}`)
     loadMysql()
   } catch (e) {
@@ -878,8 +896,9 @@ async function confirmDisableMysql() {
   if (!v) return
   mysqlBusy.value = v
   try {
+    const tid = startTask(props.node?.id)
     const { data } = await api.post(`/docker/mysql/${v}/disable`,
-      { purge: mysqlPurgeVol.value }, { params: np() })
+      { purge: mysqlPurgeVol.value }, { params: np(), headers: { 'X-Task-Id': tid } })
     toastOk(data.detail || '已停用')
     loadMysql()
   } catch (e) {
@@ -893,6 +912,196 @@ async function showRootPwd(v) {
   try {
     mysqlRootInfo.value = (await api.get(`/docker/mysql/${v}/root-password`, { params: np() })).data
     mysqlRootOpen.value = true
+  } catch (e) { toastErr(errText(e)) }
+}
+
+// ---------- 备份（容器导出 / 实例数据库导出） ----------
+const backups = ref([])            // [{ file, kind, size, created_at }]
+const backupsLoading = ref(false)
+const bkDbs = ref([])              // [{ version, db_name, running }]
+const bkContainer = ref('')        // 选中要备份的容器 id
+const bkDb = ref('')               // 选中 "version|db_name"
+const bkBusy = ref('')             // 'c' 容器备份中 / 'd' 数据库备份中 / 'w' 目录备份中
+const bkDelOpen = ref(false)
+const bkDelFile = ref('')
+const bkDirPath = ref('')          // 网站目录备份：容器内路径
+const bkTables = ref([])           // 表级备份：已选表（空 = 整库）
+const bkTableOpts = ref([])        // 选中库的表列表
+const bkTblLoading = ref(false)
+
+const bkContainerOpts = computed(() => containers.value
+  .filter(c => c.state === 'running')
+  .map(c => ({ value: c.id, label: `${c.name}（${c.image}）` })))
+const bkDbOpts = computed(() => bkDbs.value
+  .map(d => ({ value: `${d.version}|${d.db_name}`,
+               label: `${d.db_name}（MySQL ${d.version}${d.running ? '' : '，服务未运行'}）` })))
+
+// 恢复面板
+const bkRestore = ref(null)        // { file, kind } 当前恢复目标
+const bkRestoreName = ref('')      // 容器恢复：新容器名
+const bkRestoreVer = ref('')       // 数据库恢复：目标 MySQL 版本
+const bkRestoreDb = ref('')        // 数据库恢复：目标库名
+const bkRestoreCid = ref('')       // 目录恢复：目标容器 id
+const bkRestorePath = ref('')      // 目录恢复：目标目录（容器内）
+const bkRestoreBusy = ref(false)
+const bkVerOpts = computed(() => mysqlRows.value
+  .filter(x => x.enabled && x.running)
+  .map(x => ({ value: x.version, label: `MySQL ${x.version}` })))
+
+async function loadBackups() {
+  backupsLoading.value = true
+  try {
+    const { data } = await api.get('/host/backups', { params: np() })
+    backups.value = data.backups || []
+  } catch (e) {
+    const s = e?.response?.status
+    if (s !== 404) toastErr(errText(e))
+    backups.value = []
+  } finally {
+    backupsLoading.value = false
+  }
+}
+
+async function loadBkDbs() {
+  try {
+    const { data } = await api.get('/host/backups/dbs', { params: np() })
+    bkDbs.value = data.dbs || []
+  } catch (e) {
+    const s = e?.response?.status
+    if (s !== 404) toastErr(errText(e))
+    bkDbs.value = []
+  }
+}
+
+async function backupContainer() {
+  if (!bkContainer.value) return
+  bkBusy.value = 'c'
+  try {
+    const tid = startTask(props.node?.id)
+    const { data } = await api.post('/host/backups/container',
+      { container_id: bkContainer.value },
+      { params: np(), timeout: 600000, headers: { 'X-Task-Id': tid } })
+    toastOk(data.detail || '容器备份完成')
+    loadBackups()
+  } catch (e) { toastErr(errText(e)) }
+  finally { bkBusy.value = '' }
+}
+
+async function backupDatabase() {
+  if (!bkDb.value) return
+  const [version, db_name] = bkDb.value.split('|')
+  bkBusy.value = 'd'
+  try {
+    const tid = startTask(props.node?.id)
+    const { data } = await api.post('/host/backups/database',
+      { version, db_name, tables: bkTables.value },
+      { params: np(), timeout: 600000, headers: { 'X-Task-Id': tid } })
+    toastOk(data.detail || '数据库备份完成')
+    loadBackups()
+  } catch (e) { toastErr(errText(e)) }
+  finally { bkBusy.value = '' }
+}
+
+async function backupDir() {
+  if (!bkContainer.value) return
+  bkBusy.value = 'w'
+  try {
+    const tid = startTask(props.node?.id)
+    const { data } = await api.post('/host/backups/dir',
+      { container_id: bkContainer.value, path: bkDirPath.value.trim() || '/app' },
+      { params: np(), timeout: 600000, headers: { 'X-Task-Id': tid } })
+    toastOk(data.detail || '目录备份完成')
+    loadBackups()
+  } catch (e) { toastErr(errText(e)) }
+  finally { bkBusy.value = '' }
+}
+
+async function loadTables() {
+  bkTables.value = []
+  bkTableOpts.value = []
+  if (!bkDb.value) return
+  const [version, db_name] = bkDb.value.split('|')
+  bkTblLoading.value = true
+  try {
+    const { data } = await api.get('/host/backups/tables',
+      { params: { ...np(), version, db_name } })
+    bkTableOpts.value = data.tables || []
+  } catch (e) {
+    bkTableOpts.value = []
+  } finally { bkTblLoading.value = false }
+}
+
+function toggleTable(t) {
+  const i = bkTables.value.indexOf(t)
+  if (i >= 0) bkTables.value.splice(i, 1)
+  else bkTables.value.push(t)
+}
+
+watch(bkDb, loadTables)
+
+function askDelBackup(file) {
+  bkDelFile.value = file
+  bkDelOpen.value = true
+}
+
+function startRestore(b) {
+  bkRestore.value = b
+  if (b.kind === 'container') {
+    bkRestoreName.value = 'restore-' + b.file.replace(/\.tar$/, '')
+  } else if (b.kind === 'dir') {
+    bkRestoreCid.value = bkContainer.value || ''
+    bkRestorePath.value = ''
+  } else {
+    bkRestoreDb.value = b.file.replace(/\.sql\.gz$/, '')
+    const running = mysqlRows.value.filter(x => x.enabled && x.running)
+    bkRestoreVer.value = running[0]?.version || ''
+    if (!running.length) toastErr('当前没有运行中的 MySQL 服务，请先在「MySQL 服务」启用')
+  }
+}
+
+async function doRestore() {
+  const t = bkRestore.value
+  if (!t) return
+  bkRestoreBusy.value = true
+  try {
+    const tid = startTask(props.node?.id)
+    const { data } = t.kind === 'container'
+      ? await api.post('/host/backups/restore/container',
+          { file: t.file, name: bkRestoreName.value.trim() },
+          { params: np(), timeout: 600000, headers: { 'X-Task-Id': tid } })
+      : t.kind === 'dir'
+      ? await api.post('/host/backups/restore/dir',
+          { file: t.file, container_id: bkRestoreCid.value, path: bkRestorePath.value.trim() },
+          { params: np(), timeout: 600000, headers: { 'X-Task-Id': tid } })
+      : await api.post('/host/backups/restore/database',
+          { file: t.file, version: bkRestoreVer.value, db_name: bkRestoreDb.value.trim() },
+          { params: np(), timeout: 600000, headers: { 'X-Task-Id': tid } })
+    toastOk(data.detail || '恢复完成')
+    bkRestore.value = null
+  } catch (e) { toastErr(errText(e)) }
+  finally { bkRestoreBusy.value = false }
+}
+
+async function doDelBackup() {
+  try {
+    const { data } = await api.delete('/host/backups',
+      { params: { ...np(), file: bkDelFile.value } })
+    toastOk(data.detail || '已删除')
+    bkDelOpen.value = false  // 删除成功自动关确认弹窗
+    loadBackups()
+  } catch (e) { toastErr(errText(e)) }
+}
+
+async function downloadBackup(file) {
+  try {
+    const { data } = await api.get('/host/backups/download',
+      { params: { ...np(), file }, responseType: 'blob' })
+    const url = URL.createObjectURL(data)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = file
+    a.click()
+    URL.revokeObjectURL(url)
   } catch (e) { toastErr(errText(e)) }
 }
 
@@ -969,6 +1178,89 @@ async function doFwToggle() {
   } catch (e) {
     toastErr(errText(e))
     fwToggleOpen.value = false
+  }
+}
+
+// ---------- SSH 防护（fail2ban 防爆破） ----------
+const sec = ref(null)   // { installed, active, version, jails, sshd, error }
+const secLoading = ref(false)
+const secBusy = ref(false)
+const secBanIp = ref('')
+const secUnbanOpen = ref(false)
+const secUnbanIp = ref('')
+const secToggleOpen = ref(false)
+
+async function loadSec() {
+  secLoading.value = true
+  try {
+    const { data } = await api.get('/security/fail2ban', { params: np() })
+    sec.value = data
+  } catch (e) {
+    const s = e?.response?.status
+    sec.value = {
+      installed: false, active: false, version: '', jails: [], sshd: null,
+      error: s === 404 ? '该节点的被控端代码版本较旧，尚无安全防护接口，请同步最新 agent 后重启被控服务' : errText(e)
+    }
+  } finally {
+    secLoading.value = false
+  }
+}
+
+async function secSetup() {
+  secBusy.value = true
+  try {
+    const tid = startTask(props.node?.id)
+    const { data } = await api.post('/security/fail2ban/setup', null,
+      { params: np(), timeout: 180000, headers: { 'X-Task-Id': tid } })  // 包安装最长可达数分钟
+    sec.value = data
+    toastOk('fail2ban 已安装并启用')
+  } catch (e) {
+    toastErr(errText(e))
+  } finally {
+    secBusy.value = false
+  }
+}
+
+async function doSecToggle() {
+  const enable = !(sec.value && sec.value.active)
+  try {
+    const { data } = await api.post('/security/fail2ban/toggle', { enable }, { params: np() })
+    sec.value = data
+    toastOk(enable ? 'fail2ban 已启用' : 'fail2ban 已停用')
+    secToggleOpen.value = false
+  } catch (e) {
+    toastErr(errText(e))
+    secToggleOpen.value = false
+  }
+}
+
+async function secBan() {
+  const ip = secBanIp.value.trim()
+  if (!/^(\d{1,3}\.){3}\d{1,3}$/.test(ip) && !/^[0-9A-Fa-f:]{2,45}$/.test(ip)) {
+    toastErr('IP 格式无效'); return
+  }
+  secBusy.value = true
+  try {
+    const { data } = await api.post('/security/fail2ban/ban', { ip }, { params: np() })
+    toastOk(data.detail || '已封禁')
+    secBanIp.value = ''
+    loadSec()
+  } catch (e) {
+    toastErr(errText(e))
+  } finally {
+    secBusy.value = false
+  }
+}
+
+async function doSecUnban() {
+  try {
+    const { data } = await api.post('/security/fail2ban/unban', { ip: secUnbanIp.value }, { params: np() })
+    toastOk(data.detail || '已解封')
+    secUnbanOpen.value = false
+    loadSec()
+  } catch (e) {
+    toastErr(errText(e))
+    secUnbanOpen.value = false
   }
 }
 
@@ -1213,6 +1505,61 @@ onUnmounted(() => {
           </UITable>
         </div>
 
+        <!-- SSH 防护：fail2ban 防爆破（安装/启停/封禁/解封） -->
+        <div v-else-if="view === 'sec'">
+          <div class="fw-head">
+            <span class="fw-tool">
+              <template v-if="sec && sec.installed">
+                fail2ban <i class="fw-dot" :class="sec.active ? 'on' : 'off'" />
+                <em>{{ sec.active ? `运行中（${sec.version || ''}）` : '未运行' }}</em>
+              </template>
+              <template v-else>未安装 fail2ban</template>
+            </span>
+            <span class="sp" />
+            <UIButton type="ghost" size="sm" :loading="secLoading" @click="loadSec">刷新</UIButton>
+            <UIButton v-if="sec && sec.installed" type="ghost" size="sm" @click="secToggleOpen = true">
+              {{ sec.active ? '停用' : '启用' }}
+            </UIButton>
+            <UIButton size="sm" :loading="secBusy" @click="secSetup">
+              {{ sec && sec.installed ? '重装 / 修复' : '安装并启用' }}
+            </UIButton>
+          </div>
+
+          <p v-if="sec && sec.error && !sec.installed" class="form-tip danger-tip">{{ sec.error }}</p>
+          <div v-else-if="sec && !sec.installed" class="set-card fw-none">
+            <p class="form-tip">fail2ban 监控 SSH 登录失败：同一 IP 短时间内失败 5 次将自动封禁 10 分钟，防御 SSH 爆破。<br>
+              点击「安装并启用」将在该节点上安装 fail2ban 并写入策略（约 1 分钟，不影响已有防护配置）。</p>
+          </div>
+
+          <template v-else-if="sec && sec.installed">
+            <p v-if="sec.error" class="form-tip danger-tip">{{ sec.error }}</p>
+            <div v-if="sec.active && sec.sshd && sec.sshd.enabled" class="sec-stats">
+              <div class="sec-stat"><b>{{ sec.sshd.currently_failed }}</b><span>当前失败</span></div>
+              <div class="sec-stat"><b>{{ sec.sshd.total_failed }}</b><span>累计失败</span></div>
+              <div class="sec-stat"><b :class="{ hot: sec.sshd.currently_banned > 0 }">{{ sec.sshd.currently_banned }}</b><span>当前封禁</span></div>
+              <div class="sec-stat"><b>{{ sec.sshd.total_banned }}</b><span>累计封禁</span></div>
+            </div>
+
+            <div v-if="sec.active" class="set-card" style="margin-top:12px">
+              <div class="fw-head" style="padding:0 0 10px">
+                <span class="fw-tool"><em>SSH 封禁列表（sshd jail）</em></span>
+                <span class="sp" />
+                <UIInput v-model="secBanIp" placeholder="手动封禁 IP" style="width:180px" @keyup.enter="secBan" />
+                <UIButton size="sm" :loading="secBusy" :disabled="!secBanIp.trim()" @click="secBan">封禁</UIButton>
+              </div>
+              <p v-if="!sec.sshd || !sec.sshd.enabled" class="form-tip danger-tip">
+                {{ (sec.sshd && sec.sshd.error) || 'sshd jail 未启用，请点「重装 / 修复」' }}</p>
+              <p v-else-if="!sec.sshd.banned.length" class="form-tip">暂无封禁中的 IP（出现 SSH 爆破时自动加入）</p>
+              <div v-else class="sec-bans">
+                <span v-for="ip in sec.sshd.banned" :key="ip" class="sec-ban-ip mono">
+                  {{ ip }}
+                  <i title="解封" @click="secUnbanIp = ip; secUnbanOpen = true">×</i>
+                </span>
+              </div>
+            </div>
+          </template>
+        </div>
+
         <!-- MySQL 服务：节点级共享 MySQL（每版本一容器，实例一库） -->
         <div v-else-if="view === 'mysql'">
           <div class="bar">
@@ -1249,6 +1596,109 @@ onUnmounted(() => {
             启用要求镜像已拉取（绝不自动拉取；mysql:5.7 无 ARM64 版本，树莓派节点不可用）。
             停用时需先清空该版本下所有实例数据库；数据卷默认保留，勾选「同时删除数据卷」才彻底清除。
           </p>
+        </div>
+
+        <!-- 备份：容器导出 / 实例数据库导出 -->
+        <div v-else-if="view === 'backup'">
+          <div class="set-card">
+            <div class="bk-line">
+              <span class="bk-label">容器备份</span>
+              <UISelect v-model="bkContainer" style="width:280px" :options="bkContainerOpts"
+                        placeholder="选择要备份的容器" />
+              <UIButton size="sm" :loading="bkBusy === 'c'" :disabled="!bkContainer"
+                        @click="backupContainer">备份容器</UIButton>
+            </div>
+            <div class="bk-line">
+              <span class="bk-label">目录备份</span>
+              <UIInput v-model="bkDirPath" style="width:280px" class="mono"
+                       placeholder="容器内网站目录，留空默认 /app" />
+              <UIButton size="sm" :loading="bkBusy === 'w'" :disabled="!bkContainer"
+                        @click="backupDir">备份目录</UIButton>
+            </div>
+            <div class="bk-line">
+              <span class="bk-label">数据库</span>
+              <UISelect v-model="bkDb" style="width:280px" :options="bkDbOpts"
+                        placeholder="选择要备份的数据库" />
+              <UIButton size="sm" :loading="bkBusy === 'd'" :disabled="!bkDb"
+                        @click="backupDatabase">备份数据库</UIButton>
+            </div>
+            <div v-if="bkDb" class="bk-line" style="padding-left:70px">
+              <template v-if="bkTableOpts.length">
+                <span class="hint-text" style="font-size:12px">表级（不选 = 整库）：</span>
+                <span v-for="t in bkTableOpts" :key="t" class="tbl-chip"
+                      :class="{ on: bkTables.includes(t) }" @click="toggleTable(t)">{{ t }}</span>
+              </template>
+              <span v-else class="hint-text" style="font-size:12px">该库暂无数据表，直接「备份数据库」即可</span>
+            </div>
+            <p class="form-tip">容器备份 = 整容器导出（tar）；目录备份 = 仅打包所选容器的网站目录（tar.gz，体积小）；
+              数据库备份 = mysqldump（sql.gz）。文件保存在被控 /opt/ppanel/backups/。</p>
+          </div>
+
+          <!-- 恢复面板 -->
+          <div v-if="bkRestore" class="set-card" style="margin-top:14px;border-color:var(--danger, #e5484d)">
+            <template v-if="bkRestore.kind === 'container'">
+              <div class="set-row" style="flex-wrap:wrap;gap:8px">
+                <UIInput v-model="bkRestoreName" style="width:260px" placeholder="新容器名" />
+                <UIButton size="sm" :loading="bkRestoreBusy" :disabled="!bkRestoreName.trim()"
+                          @click="doRestore">恢复容器</UIButton>
+                <UIButton type="ghost" size="sm" @click="bkRestore = null">取消</UIButton>
+              </div>
+              <p class="form-tip">将 <span class="mono">{{ bkRestore.file }}</span> 导入为镜像
+                ppanel-restore:* 并创建新容器（sleep 入口，供进入容器取回数据；完整恢复服务请按原配置重建）。</p>
+            </template>
+            <template v-else-if="bkRestore.kind === 'dir'">
+              <div class="set-row" style="flex-wrap:wrap;gap:8px">
+                <UISelect v-model="bkRestoreCid" style="width:230px" :options="bkContainerOpts"
+                          placeholder="目标容器" />
+                <UIInput v-model="bkRestorePath" style="width:230px" class="mono"
+                         placeholder="目标目录（如 /var/www/html）" />
+                <UIButton size="sm" :loading="bkRestoreBusy"
+                          :disabled="!bkRestoreCid || !bkRestorePath.trim()" @click="doRestore">恢复目录</UIButton>
+                <UIButton type="ghost" size="sm" @click="bkRestore = null">取消</UIButton>
+              </div>
+              <p class="form-tip">将 {{ bkRestore.file }} 解压到目标容器的指定目录，覆盖同名文件（不删除目录下其他文件）。</p>
+            </template>
+            <template v-else>
+              <div class="set-row" style="flex-wrap:wrap;gap:8px">
+                <UISelect v-model="bkRestoreVer" style="width:200px" :options="bkVerOpts"
+                          placeholder="目标 MySQL 版本" />
+                <UIInput v-model="bkRestoreDb" style="width:220px" placeholder="目标库名" />
+                <UIButton size="sm" :loading="bkRestoreBusy"
+                          :disabled="!bkRestoreVer || !bkRestoreDb.trim()" @click="doRestore">恢复数据库</UIButton>
+                <UIButton type="ghost" size="sm" @click="bkRestore = null">取消</UIButton>
+              </div>
+              <p class="form-tip" style="color:var(--danger, #e5484d)">
+                将把 {{ bkRestore.file }} 覆盖导入到 MySQL {{ bkRestoreVer }} 的
+                {{ bkRestoreDb.trim() || '—' }} 库，目标库现有数据会被覆盖，请谨慎操作！</p>
+            </template>
+          </div>
+
+          <div class="bar" style="margin-top:14px">
+            <span class="hint-text">共 {{ backups.length }} 个备份文件</span>
+            <span class="sp" />
+            <UIButton type="ghost" size="sm" :loading="backupsLoading" @click="loadBackups">刷新</UIButton>
+          </div>
+          <table class="ftable">
+            <thead><tr><th>文件名</th><th>类型</th><th>大小</th><th>时间</th><th /></tr></thead>
+            <tbody>
+              <tr v-for="b in backups" :key="b.file">
+                <td class="mono">{{ b.file }}</td>
+                <td>
+                  <UITag :tone="b.kind === 'container' ? 'primary' : b.kind === 'database' ? 'ok' : b.kind === 'dir' ? 'warn' : 'dim'">
+                    {{ b.kind === 'container' ? '容器' : b.kind === 'database' ? '数据库' : b.kind === 'dir' ? '目录' : '其他' }}
+                  </UITag>
+                </td>
+                <td class="mono">{{ fmtSize(b.size) }}</td>
+                <td class="dim">{{ b.created_at }}</td>
+                <td class="ops">
+                  <UIButton v-if="b.kind !== 'other'" type="text" @click="startRestore(b)">恢复</UIButton>
+                  <UIButton type="text" @click="downloadBackup(b.file)">下载</UIButton>
+                  <UIButton type="text" class="danger" @click="askDelBackup(b.file)">删除</UIButton>
+                </td>
+              </tr>
+              <tr v-if="!backups.length"><td colspan="5" class="empty">暂无备份，可从上方创建</td></tr>
+            </tbody>
+          </table>
         </div>
 
         <!-- 设置：磁盘占用 / 一键清理 / 镜像加速 -->
@@ -1465,6 +1915,18 @@ onUnmounted(() => {
                      : '启用防火墙前请确认已放行节点端口（9100 及 SSH 22），否则可能失联。确定启用吗？'"
                    confirm-text="确定" danger @confirm="doFwToggle" />
 
+    <!-- SSH 防护：启停确认 -->
+    <ConfirmDialog v-model:open="secToggleOpen" title="切换 fail2ban"
+                   :message="sec?.active
+                     ? '停用后节点将不再自动封禁 SSH 爆破 IP，确定停用吗？'
+                     : '启用 fail2ban 防爆破（失败 5 次封 10 分钟）。确定启用吗？'"
+                   confirm-text="确定" :danger="sec?.active" @confirm="doSecToggle" />
+
+    <!-- SSH 防护：解封确认 -->
+    <ConfirmDialog v-model:open="secUnbanOpen" :title="`解封 ${secUnbanIp}`"
+                   message="解封后该 IP 可立即重新连接 SSH。确定解封吗？"
+                   confirm-text="解封" @confirm="doSecUnban" />
+
     <!-- MySQL 停用确认（可选同时删数据卷） -->
     <UIModal v-model:open="mysqlDisableOpen" title="停用 MySQL 服务" width="440px">
       <p class="form-tip">将停止并删除 MySQL {{ mysqlDisableVer }} 容器，该版本下所有实例数据库将无法连接。</p>
@@ -1489,6 +1951,11 @@ onUnmounted(() => {
         <UIButton type="ghost" @click="mysqlRootOpen = false">关闭</UIButton>
       </template>
     </UIModal>
+
+    <!-- 备份删除确认 -->
+    <ConfirmDialog v-model:open="bkDelOpen" title="删除备份"
+                   :message="`确定删除备份文件「${bkDelFile}」吗？此操作不可恢复。`"
+                   confirm-text="删除" danger @confirm="doDelBackup" />
 
     <!-- 右键菜单 -->
     <teleport to="body">
@@ -1689,6 +2156,17 @@ tr[data-kind='file'] .f-svg { color: var(--text-2); }
 .set-title { font-size: 13px; font-weight: 600; color: var(--text-1); margin: 20px 0 10px; }
 .set-title:first-child { margin-top: 0; }
 .set-card { border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+
+.tbl-chip {
+  display: inline-block; padding: 3px 10px; border-radius: 999px; cursor: pointer;
+  font-size: 12px; font-family: var(--font-mono);
+  background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.14);
+  color: var(--text-dim, #9aa); transition: all .15s ease; user-select: none;
+}
+.tbl-chip:hover { border-color: rgba(47,181,159,.5); color: #fff; }
+.tbl-chip.on { background: rgba(47,181,159,.18); border-color: var(--primary); color: var(--primary); }
+.bk-line { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.bk-label { width: 60px; flex-shrink: 0; font-size: 13px; color: var(--text-2); }
 .set-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .check-line { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-2); cursor: pointer; }
 .check-line input { accent-color: var(--primary); width: 14px; height: 14px; cursor: pointer; }
@@ -1718,4 +2196,15 @@ tr[data-kind='file'] .f-svg { color: var(--text-2); }
 .fw-badge { font-style: normal; font-size: 11.5px; font-weight: 600; padding: 2px 8px; border-radius: 10px; }
 .fw-badge.allow { color: #2fb59f; background: rgba(47, 181, 159, .12); }
 .fw-badge.deny { color: #d98a7c; background: rgba(217, 138, 124, .14); }
+
+/* SSH 防护 */
+.sec-stats { display: flex; gap: 12px; margin-top: 12px; }
+.sec-stat { flex: 1; background: var(--panel-2, rgba(255, 255, 255, .04)); border: 1px solid var(--line, rgba(255, 255, 255, .08)); border-radius: 12px; padding: 14px 10px; text-align: center; }
+.sec-stat b { display: block; font-size: 22px; line-height: 1.3; }
+.sec-stat span { font-size: 12px; color: var(--text-3); }
+.sec-stat b.hot { color: #d98a7c; }
+.sec-bans { display: flex; flex-wrap: wrap; gap: 8px; }
+.sec-ban-ip { display: inline-flex; align-items: center; gap: 8px; color: #d98a7c; background: rgba(217, 138, 124, .1); border: 1px solid rgba(217, 138, 124, .28); border-radius: 9px; padding: 4px 6px 4px 10px; font-size: 13px; }
+.sec-ban-ip i { cursor: pointer; font-style: normal; font-weight: 700; width: 18px; height: 18px; line-height: 17px; text-align: center; border-radius: 50%; }
+.sec-ban-ip i:hover { background: rgba(217, 138, 124, .25); }
 </style>

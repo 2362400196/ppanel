@@ -105,8 +105,9 @@ function removeContainer(c, force) {
   })
 }
 function onRemoveClick(c) {
-  if (c.state === 'running') {
-    askConfirm('删除运行中的容器', `「${c.name}」正在运行，强制删除将直接杀死进程。继续吗？`, async () => {
+  // running/restarting/paused 必须强制删除（docker rm 对这些状态非 -f 会失败）
+  if (['running', 'restarting', 'paused'].includes(c.state)) {
+    askConfirm('删除运行中的容器', `「${c.name}」状态为 ${c.state}，将强制删除（运行中进程会被先杀死）。继续吗？`, async () => {
       await api.delete(`/docker/containers/${c.id}`, { params: { ...np(), force: 1 } })
       toastOk('容器已删除')
       loadContainers()

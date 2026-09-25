@@ -45,7 +45,10 @@ def agent_json(node: Node, method: str, path: str, **kw) -> dict | list:
     resp = agent_request(node, method, path, **kw)
     if resp.status_code >= 400:
         detail = _error_detail(resp)
-        raise HTTPException(status_code=resp.status_code, detail=detail)
+        # 被控 401（node_token 不匹配）不能透传给前端：axios 拦截器会把
+        # 任何 401 当成主控登录失效而清 token 跳登录页。上游认证失败按 502 报。
+        code = 502 if resp.status_code == 401 else resp.status_code
+        raise HTTPException(status_code=code, detail=detail)
     try:
         return resp.json()
     except ValueError:

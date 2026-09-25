@@ -18,6 +18,7 @@ from app.config import settings
 from app.database import get_db, SessionLocal
 from app.docker_client import get_docker
 from app.models import AgentMetric, AgentOpLog, Instance
+from app.services import caddy_service as caddy
 from app.services import file_service as fs
 from app.services import instance_service as svc
 from app.services import mysql_service as mysql_svc
@@ -103,6 +104,8 @@ def _out(inst: Instance) -> dict:
         "created_at": inst.created_at.isoformat() if inst.created_at else None,
         "expire_at": expire.isoformat() if expire else None,
         "owner_ref": getattr(inst, "owner_ref", ""),
+        "traffic_gb": getattr(inst, "traffic_gb", None),
+        "traffic_used_mb": round(getattr(inst, "traffic_used_mb", 0.0) or 0.0, 1),
     }
 
 
@@ -262,14 +265,36 @@ _DOMAIN_RE = re.compile(
 
 @router.get("/panel/instance/domain")
 def panel_get_domain(dep: Instance = Depends(_dep)):
-    return {"domain": dep.domain or ""}
+    """域名与 SSL 状态：域名、Caddy 状态、DNS 解析检测、HTTPS 地址。"""
+    domain = (dep.domain or "").strip()
+    info = caddy.caddy_info()
+    ip = caddy.public_ip()
+    out = {
+        "domain": domain,
+        "caddy": info,
+        "https_url": f"https://{domain}" if domain else "",
+        "http_url": f"http://{ip}:{dep.ext_port}" if dep.ext_port and ip else "",
+        "ssl_active": bool(domain and info.get("active")),
+    }
+    if domain:
+        ok, msg = caddy.check_dns(domain)
+        out["dns_ok"] = ok
+        out["dns_msg"] = msg
+    return out
 
 
 @router.put("/panel/instance/domain")
 def panel_set_domain(body: dict, dep: Instance = Depends(_dep), db: Session = Depends(get_db)):
+    """绑定/解绑域名：校验解析 → 写 Caddy 反代 → reload（证书由 Caddy 自动申请续期）。
+
+    body: {"domain": "app.example.com"} 或 {"domain": ""}（解绑）。"""
     raw = (body or {}).get("domain", "").strip().lower()
     if not raw:
         if dep.domain:
+            try:
+                caddy.remove_site(dep.id)
+            except RuntimeError as e:
+                raise HTTPException(status_code=500, detail=str(e))
             svc.log_op(db, dep.id, "domain_unbind", detail=dep.domain)
             dep.domain = None
             db.commit()
@@ -280,10 +305,23 @@ def panel_set_domain(body: dict, dep: Instance = Depends(_dep), db: Session = De
              .filter(Instance.domain == raw, Instance.id != dep.id).first())
     if other:
         raise HTTPException(status_code=409, detail="该域名已被其他实例绑定")
+    if not caddy.caddy_installed():
+        raise HTTPException(status_code=400, detail="节点未安装 Caddy，无法自动签发证书（联系管理员安装）")
+    if not dep.ext_port:
+        raise HTTPException(status_code=400, detail="实例没有外部端口，无法反代")
+    ok, msg = caddy.check_dns(raw)
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+    try:
+        if dep.domain and dep.domain != raw:
+            caddy.remove_site(dep.id)  # 换域名：先清旧配置
+        caddy.write_site(dep.id, raw, dep.ext_port)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
     dep.domain = raw
-    svc.log_op(db, dep.id, "domain_bind", detail=raw)
+    svc.log_op(db, dep.id, "domain_bind", detail=f"{raw}（{msg}）")
     db.commit()
-    return {"domain": raw}
+    return {"domain": raw, "dns_msg": msg, "https_url": f"https://{raw}"}
 
 
 @router.get("/panel/instance/ops")
@@ -490,24 +528,87 @@ def _require_php(inst: Instance) -> None:
         raise HTTPException(status_code=400, detail="该功能仅支持 PHP 环境")
 
 
-# 扩展目录（宝塔同款）：pecl=pecl 包名；deps=安装前需 apt 的系统库；manual=需管理员构建进镜像；builtin=官方内置
+# 扩展目录（宝塔同款思路）：
+#   builtin=官方镜像默认已装；core=PHP 核心扩展（pecl 无包，docker-php-ext-install 编译，可带
+#           deps=apt 系统库 / configure=编译前配置参数）；
+#   pecl=pecl 在线编译（可带 deps / pre=前置依赖扩展 / interactive=安装问句回车取默认）；
+#   manual=运行时依赖复杂或私有 loader（SG/oracle 等），需管理员构建进镜像。
 PHP_EXT_CATALOG = [
+    # ---- 核心扩展（pecl 上无包，镜像内源码编译） ----
+    {"name": "mysqli", "type": "数据库", "desc": "MySQL 改进版扩展", "core": True},
+    {"name": "pdo_mysql", "type": "数据库", "desc": "PDO MySQL 驱动", "core": True},
+    {"name": "gd", "type": "图形库", "desc": "图片处理（含 freetype/jpeg 字体）", "core": True,
+     "deps": "libpng-dev libjpeg62-turbo-dev libfreetype-dev", "configure": "--with-freetype --with-jpeg"},
+    {"name": "zip", "type": "通用扩展", "desc": "zip 压缩包读写", "core": True, "deps": "libzip-dev"},
+    {"name": "exif", "type": "通用扩展", "desc": "读取图片 EXIF 信息", "core": True},
+    {"name": "intl", "type": "通用扩展", "desc": "国际化支持", "core": True, "deps": "libicu-dev"},
+    {"name": "xsl", "type": "通用扩展", "desc": "XSL 解析", "core": True, "deps": "libxslt1-dev"},
+    {"name": "soap", "type": "通用扩展", "desc": "SOAP 协议（官方扩展）", "core": True},
+    {"name": "sockets", "type": "通用扩展", "desc": "socket 通信（官方扩展）", "core": True},
+    {"name": "pcntl", "type": "通用扩展", "desc": "多进程控制（官方扩展）", "core": True},
+    {"name": "shmop", "type": "通用扩展", "desc": "共享内存（官方扩展）", "core": True},
+    {"name": "sysvmsg", "type": "通用扩展", "desc": "System V 消息队列（官方扩展）", "core": True},
+    {"name": "sysvshm", "type": "通用扩展", "desc": "System V 共享内存（官方扩展）", "core": True},
+    {"name": "gettext", "type": "通用扩展", "desc": "多语言翻译（官方扩展）", "core": True},
+    {"name": "bz2", "type": "通用扩展", "desc": "bzip2 压缩（官方扩展）", "core": True, "deps": "libbz2-dev"},
+    {"name": "gmp", "type": "通用扩展", "desc": "大数运算（官方扩展）", "core": True, "deps": "libgmp-dev"},
+    {"name": "snmp", "type": "通用扩展", "desc": "SNMP 网络管理（官方扩展）", "core": True, "deps": "libsnmp-dev"},
+    {"name": "ldap", "type": "通用扩展", "desc": "LDAP 目录服务（官方扩展）", "core": True, "deps": "libldap-dev"},
+    {"name": "pspell", "type": "通用扩展", "desc": "拼写检查（官方扩展）", "core": True, "deps": "libpspell-dev"},
+    {"name": "enchant", "type": "通用扩展", "desc": "拼写库抽象（官方扩展）", "core": True, "deps": "libenchant-2-dev"},
+    {"name": "pgsql", "type": "数据库", "desc": "PostgreSQL 连接（官方扩展）", "core": True, "deps": "libpq-dev"},
+    {"name": "pdo_pgsql", "type": "数据库", "desc": "PDO PostgreSQL 驱动（官方扩展）", "core": True, "deps": "libpq-dev"},
+    # ---- 官方镜像默认已装 ----
     {"name": "opcache", "type": "缓存器", "desc": "用于加速 PHP 脚本", "builtin": True},
     {"name": "fileinfo", "type": "通用扩展", "desc": "文件类型识别", "builtin": True},
+    {"name": "mbstring", "type": "通用扩展", "desc": "多字节字符串处理", "builtin": True},
+    {"name": "calendar", "type": "通用扩展", "desc": "历法转换（官方扩展）", "builtin": True},
+    {"name": "readline", "type": "通用扩展", "desc": "交互式输入（官方扩展）", "builtin": True},
+    # ---- pecl 在线编译 ----
     {"name": "redis", "type": "缓存器", "desc": "基于内存的可持久化的 Key-Value 数据库", "pecl": "redis"},
     {"name": "memcache", "type": "缓存器", "desc": "强大的内容缓存器", "pecl": "memcache"},
     {"name": "memcached", "type": "缓存器", "desc": "比 memcache 支持更多高级功能", "pecl": "memcached",
      "deps": "libz-dev libmemcached-dev"},
+    {"name": "igbinary", "type": "缓存器", "desc": "二进制序列化（redis/memcached/yac 的优化前置）", "pecl": "igbinary"},
+    {"name": "yac", "type": "缓存器", "desc": "高性能无锁共享内存 Cache（自动先装 igbinary）", "pecl": "yac",
+     "pre": "igbinary"},
     {"name": "apcu", "type": "缓存器", "desc": "脚本缓存器", "pecl": "apcu"},
     {"name": "imagick", "type": "通用扩展", "desc": "Imagick 高性能图形库", "pecl": "imagick",
      "deps": "libmagickwand-dev"},
+    {"name": "mongodb", "type": "数据库", "desc": "MongoDB 数据库连接驱动", "pecl": "mongodb"},
+    {"name": "sqlsrv", "type": "数据库", "desc": "SQL Server 扩展（连接需运行时 msodbcsql）", "pecl": "sqlsrv",
+     "deps": "unixodbc-dev"},
+    {"name": "pdo_sqlsrv", "type": "数据库", "desc": "SQL Server PDO 驱动", "pecl": "pdo_sqlsrv",
+     "deps": "unixodbc-dev"},
+    {"name": "rdkafka", "type": "通用扩展", "desc": "Kafka 消息队列客户端", "pecl": "rdkafka",
+     "deps": "librdkafka-dev"},
+    {"name": "zmq", "type": "通用扩展", "desc": "ZeroMQ 通用消息库", "pecl": "zmq", "deps": "libzmq3-dev"},
+    {"name": "swoole", "type": "通用扩展", "desc": "高性能协程网络引擎（最新版，具体版本以 phpinfo 为准）",
+     "pecl": "swoole", "interactive": True},
+    {"name": "swoole_loader", "type": "脚本加密", "desc": "SourceGuardian 解密 loader（SG11/SG14-17，按 PHP 版本自动装载）",
+     "loader": "sg"},
+    {"name": "xlswriter", "type": "通用扩展", "desc": "Excel xlsx 高性能读写", "pecl": "xlswriter"},
+    {"name": "yaf", "type": "框架", "desc": "C 语言编写的 PHP 框架", "pecl": "yaf"},
+    {"name": "phalcon", "type": "框架", "desc": "C 语言编写的 PHP 框架（自动先装 psr 依赖）", "pecl": "phalcon",
+     "pre": "psr"},
+    {"name": "grpc", "type": "通用扩展", "desc": "gRPC 客户端", "pecl": "grpc", "deps": "zlib1g-dev"},
+    {"name": "protobuf", "type": "通用扩展", "desc": "protobuf 编解码", "pecl": "protobuf"},
+    {"name": "xhprof", "type": "调试器", "desc": "PHP 性能分析", "pecl": "xhprof"},
+    {"name": "xdebug", "type": "调试器", "desc": "开源的 PHP 程序调试器", "pecl": "xdebug"},
+    {"name": "event", "type": "通用扩展", "desc": "libevent 库接口", "pecl": "event", "deps": "libevent-dev",
+     "interactive": True},
+    {"name": "mailparse", "type": "邮件服务", "desc": "邮件消息处理", "pecl": "mailparse"},
+    {"name": "yaml", "type": "通用扩展", "desc": "YAML 解析", "pecl": "yaml", "deps": "libyaml-dev"},
+    {"name": "ssh2", "type": "通用扩展", "desc": "SSH2 协议（libssh2）", "pecl": "ssh2", "deps": "libssh2-1-dev"},
+    {"name": "zstd", "type": "通用扩展", "desc": "Zstandard 压缩解压", "pecl": "zstd", "deps": "libzstd-dev"},
     {"name": "mcrypt", "type": "通用扩展", "desc": "mcrypt 加密/解密", "pecl": "mcrypt",
      "deps": "libmcrypt-dev"},
-    {"name": "xdebug", "type": "调试器", "desc": "开源的 PHP 程序调试器", "pecl": "xdebug"},
     {"name": "imap", "type": "邮件服务", "desc": "邮件服务器必备（依赖较多，可能安装失败）", "pecl": "imap",
      "deps": "libkrb5-dev", "interactive": True},
-    {"name": "ioncube", "type": "脚本解密", "desc": "用于解密 ionCube Encoder 加密脚本（需管理员构建进镜像）",
-     "manual": True},
+    {"name": "smbclient", "type": "通用扩展", "desc": "Samba 相关功能与 smb 流", "pecl": "smbclient",
+     "deps": "libsmbclient-dev"},
+    # ---- 解密 loader（运行时下载对应 PHP 版本的预编译 .so，无需编译/构建镜像） ----
+    {"name": "ioncube", "type": "脚本解密", "desc": "用于解密 ionCube Encoder 加密脚本", "loader": "ioncube"},
 ]
 
 
@@ -687,20 +788,62 @@ def panel_php_disabled_reset(dep: Instance = Depends(_dep), db: Session = Depend
     return {"disabled": default, "restarted": was_running, "status": dep.status}
 
 
-def _ext_install_cmd(pecl: str, deps: str = "", interactive: bool = False) -> list:
+def _ext_install_cmd(pecl: str, deps: str = "", interactive: bool = False,
+                     core: bool = False, configure: str = "", pre: str = "") -> list:
     parts = []
     if deps:
         parts.append(f"apt-get update -qq && apt-get install -y -qq {deps}")
+    if core:
+        # PHP 核心扩展（mysqli/gd 等）pecl 上无包：官方镜像自带源码，直接 docker-php-ext-install
+        if configure:
+            parts.append(f"docker-php-ext-configure {pecl} {configure}")
+        parts.append(f"docker-php-ext-install -j$(nproc) {pecl}")
+        return ["sh", "-c", " && ".join(parts)]
+    if pre:  # 前置依赖扩展（如 phalcon→psr、yac→igbinary），失败不阻断主扩展安装
+        parts.append(f"(pecl install {pre} && docker-php-ext-enable {pre}) || true")
     # test 文件重定向到 /tmp：绕开 PEAR 向 /usr/local/lib/php/test 写入的权限问题
     parts.append("mkdir -p /tmp/pear-tests && pear config-set test_dir /tmp/pear-tests")
-    # 已安装（上次编译成功但未启用/被卸载）时跳过编译，直接走到启用步骤
-    pecl_cmd = (f"pecl install {pecl} || {{ pecl list | grep -q {pecl} && "
-                f"echo '[面板] 扩展已编译过，跳过重新编译' || exit 1; }}")
-    if interactive:  # 交互询问项一路回车取默认值
-        pecl_cmd = f"printf '\\n\\n\\n' | {pecl_cmd}"
+    # 已安装（上次编译成功但未启用/被卸载）时跳过编译，直接走到启用步骤；
+    # pecl 无此包（如手动安装 mysqli 等核心扩展）时自动回退 docker-php-ext-install
+    pecl_cmd = (f"(pecl install {pecl} || {{ pecl list | grep -q {pecl} && "
+                f"echo '[面板] 扩展已编译过，跳过重新编译' || exit 1; }}) "
+                f"|| docker-php-ext-install -j$(nproc) {pecl}")
+    if interactive:  # 交互询问项一路回车取默认值（swoole 等问项较多，多给几个回车）
+        pecl_cmd = f"printf '\\n\\n\\n\\n\\n\\n' | {pecl_cmd}"
     parts.append(pecl_cmd)
-    parts.append(f"docker-php-ext-enable {pecl}")
+    parts.append(f"docker-php-ext-enable {pecl} 2>/dev/null || true")
     return ["sh", "-c", " && ".join(parts)]
+
+
+def _loader_install_cmd(kind: str) -> list:
+    """解密 loader（ionCube / SourceGuardian）：下载官方预编译包，按 PHP 版本取 .so 放置并写 ini。"""
+    if kind == "ioncube":
+        url = "https://downloads.ioncube.com/loader_downloads/ioncube_loaders_lin_x86-64.tar.gz"
+        script = (
+            "cd /tmp && rm -rf ioncube loaders.tgz && "
+            f"curl -fsSL {url} -o loaders.tgz && tar xzf loaders.tgz && "
+            "V=$(php -r 'echo PHP_MAJOR_VERSION.\".\".PHP_MINOR_VERSION;') && "
+            "SO=$(ls ioncube/ioncube_loader_lin_$V.so) && "
+            "D=$(php-config --extension-dir) && cp \"$SO\" \"$D/\" && "
+            "printf 'zend_extension=%s/ioncube_loader_lin_%s.so\\n' \"$D\" \"$V\" "
+            "> /usr/local/etc/php/conf.d/01-ioncube.ini && "
+            "php -v | grep -qi ioncube && echo '[面板] ionCube Loader 已就位（重启实例后生效）'"
+        )
+    elif kind == "sg":
+        url = "https://www.sourceguardian.com/loaders/download/loaders.linux-x86_64.tar.gz"
+        script = (
+            "cd /tmp && rm -rf sgloaders loaders.tgz && "
+            f"curl -fsSL {url} -o loaders.tgz && mkdir sgloaders && tar xzf loaders.tgz -C sgloaders && "
+            "V=$(php -r 'echo PHP_MAJOR_VERSION.\".\".PHP_MINOR_VERSION;') && "
+            "SO=$(ls sgloaders/ixed.$V.lin) && "
+            "D=$(php-config --extension-dir) && cp \"$SO\" \"$D/\" && "
+            "printf 'zend_extension=%s/ixed.%s.lin\\n' \"$D\" \"$V\" "
+            "> /usr/local/etc/php/conf.d/01-swoole_loader.ini && "
+            "php -v | grep -qi sourceguardian && echo '[面板] SourceGuardian Loader 已就位（重启实例后生效）'"
+        )
+    else:
+        raise ValueError(f"未知 loader: {kind}")
+    return ["sh", "-c", script]
 
 
 @router.post("/panel/instance/php/extensions/install")
@@ -717,11 +860,19 @@ def panel_php_ext_install(body: dict, dep: Instance = Depends(_dep), db: Session
         raise HTTPException(status_code=400, detail=f"{name} 为官方内置扩展，无需安装")
     if item and item.get("manual"):
         raise HTTPException(status_code=400, detail=f"{name} 需管理员构建进镜像后使用，请联系管理员")
+    if item and item.get("loader"):
+        job = svc.start_exec(dep, f"安装扩展 {name}", _loader_install_cmd(item["loader"]))
+        svc.log_op(db, dep.id, "deps_install", detail=f"loader:{item['loader']}")
+        db.commit()
+        return {"job_id": job.id}
     pecl = (item or {}).get("pecl", name)
     job = svc.start_exec(
-        dep, f"安装扩展 {pecl}",
-        _ext_install_cmd(pecl, (item or {}).get("deps", ""), (item or {}).get("interactive", False)))
-    svc.log_op(db, dep.id, "deps_install", detail=f"pecl:{pecl}")
+        dep, f"安装扩展 {name}",
+        _ext_install_cmd(pecl, (item or {}).get("deps", ""), (item or {}).get("interactive", False),
+                         core=bool((item or {}).get("core")),
+                         configure=(item or {}).get("configure", ""),
+                         pre=(item or {}).get("pre", "")))
+    svc.log_op(db, dep.id, "deps_install", detail=f"{'core' if (item or {}).get('core') else 'pecl'}:{pecl}")
     db.commit()
     return {"job_id": job.id}
 

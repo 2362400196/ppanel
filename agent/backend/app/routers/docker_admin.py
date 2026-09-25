@@ -5,9 +5,10 @@ import threading
 import time
 
 import docker
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from app import tasks
 from app.auth import require_admin
 from app.docker_client import get_docker, reset_docker
 from app.services import host_ops
@@ -227,16 +228,28 @@ class PullReq(BaseModel):
 
 # 拉取进度由 /ws/docker/pull 流式输出；此接口保留给 API 调用方做阻塞式拉取
 @router.post("/images/pull")
-def pull_image(body: PullReq):
-    client = get_docker()
+def pull_image(body: PullReq, request: Request = None):
+    tid = (request.headers.get("x-task-id") if request else "") or ""
     image = body.image.strip()
+    if tid:
+        tasks.start(tid, f"拉取镜像 {image}")
+        tasks.log(tid, "向仓库请求镜像层…")
     try:
-        img = client.images.pull(image)
-    except docker.errors.ImageNotFound:
-        raise HTTPException(status_code=404, detail=f"镜像 {image} 不存在于仓库")
-    except docker.errors.APIError as e:
-        raise HTTPException(status_code=502, detail=f"拉取失败：{e}")
-    return {"ok": True, "detail": f"拉取完成", "image": _image_row(img)}
+        client = get_docker()
+        try:
+            img = client.images.pull(image)
+        except docker.errors.ImageNotFound:
+            raise HTTPException(status_code=404, detail=f"镜像 {image} 不存在于仓库")
+        except docker.errors.APIError as e:
+            raise HTTPException(status_code=502, detail=f"拉取失败：{e}")
+        if tid:
+            tasks.log(tid, f"镜像层全部就位（{_fmt_size(_image_row(img).get('size') or 0)}）")
+            tasks.finish(tid, True, "✔ 拉取完成")
+        return {"ok": True, "detail": f"拉取完成", "image": _image_row(img)}
+    except Exception as e:  # noqa: BLE001
+        if tid:
+            tasks.finish(tid, False, f"✘ 拉取失败：{e}")
+        raise
 
 
 # ---------- 磁盘占用与一键清理 ----------
@@ -270,28 +283,46 @@ class PruneReq(BaseModel):
 
 
 @router.post("/system/prune")
-def system_prune(body: PruneReq):
+def system_prune(body: PruneReq, request: Request = None):
     """清理停止的容器 / 悬空镜像 / 无用网络（可选构建缓存）。不动数据卷。"""
-    client = get_docker()
-    freed = {}
-    total = 0
+    tid = (request.headers.get("x-task-id") if request else "") or ""
+    if tid:
+        tasks.start(tid, "一键清理（停止容器/悬空镜像/无用网络）")
     try:
-        c = client.containers.prune()
-        freed["containers"] = len(c.get("ContainersDeleted") or [])
-        total += c.get("SpaceReclaimed") or 0
-        i = client.images.prune(filters={"dangling": True})
-        freed["images"] = len(i.get("ImagesDeleted") or [])
-        total += i.get("SpaceReclaimed") or 0
-        n = client.networks.prune()
-        freed["networks"] = len(n.get("NetworksDeleted") or [])
-        if body.builder:
-            b = client.api.prune_builds()
-            freed["build_cache"] = len(b.get("CachesDeleted") or [])
-            total += b.get("SpaceReclaimed") or 0
-    except docker.errors.APIError as e:
-        raise HTTPException(status_code=502, detail=f"清理失败：{e}")
-    parts = "、".join(f"{k} {v} 项" for k, v in freed.items())
-    return {"ok": True, "detail": f"已清理 {parts}，释放 {_fmt_size(total)}"}
+        client = get_docker()
+        freed = {}
+        total = 0
+        try:
+            if tid:
+                tasks.log(tid, "清理停止的容器…")
+            c = client.containers.prune()
+            freed["containers"] = len(c.get("ContainersDeleted") or [])
+            total += c.get("SpaceReclaimed") or 0
+            if tid:
+                tasks.log(tid, "清理悬空镜像…")
+            i = client.images.prune(filters={"dangling": True})
+            freed["images"] = len(i.get("ImagesDeleted") or [])
+            total += i.get("SpaceReclaimed") or 0
+            if tid:
+                tasks.log(tid, "清理无用网络…")
+            n = client.networks.prune()
+            freed["networks"] = len(n.get("NetworksDeleted") or [])
+            if body.builder:
+                if tid:
+                    tasks.log(tid, "清理构建缓存…")
+                b = client.api.prune_builds()
+                freed["build_cache"] = len(b.get("CachesDeleted") or [])
+                total += b.get("SpaceReclaimed") or 0
+        except docker.errors.APIError as e:
+            raise HTTPException(status_code=502, detail=f"清理失败：{e}")
+        parts = "、".join(f"{k} {v} 项" for k, v in freed.items())
+        if tid:
+            tasks.finish(tid, True, f"✔ 已清理 {parts}，释放 {_fmt_size(total)}")
+        return {"ok": True, "detail": f"已清理 {parts}，释放 {_fmt_size(total)}"}
+    except Exception as e:  # noqa: BLE001
+        if tid:
+            tasks.finish(tid, False, f"✘ 清理失败：{e}")
+        raise
 
 
 class MirrorSettings(BaseModel):
@@ -311,43 +342,59 @@ def get_settings():
 
 
 @router.put("/settings")
-def put_settings(body: MirrorSettings):
-    mirrors = [m.strip().rstrip("/") for m in body.registry_mirrors if m.strip()]
-    data = host_ops.read_daemon_json()
-    if mirrors:
-        data["registry-mirrors"] = mirrors
-    else:
-        data.pop("registry-mirrors", None)
-    host_ops.write_daemon_json(data)
+def put_settings(body: MirrorSettings, request: Request = None):
+    tid = (request.headers.get("x-task-id") if request else "") or ""
+    if tid:
+        tasks.start(tid, "保存镜像加速配置")
+    try:
+        mirrors = [m.strip().rstrip("/") for m in body.registry_mirrors if m.strip()]
+        if tid:
+            tasks.log(tid, "写入 daemon.json…")
+        data = host_ops.read_daemon_json()
+        if mirrors:
+            data["registry-mirrors"] = mirrors
+        else:
+            data.pop("registry-mirrors", None)
+        host_ops.write_daemon_json(data)
 
-    restart_err = None
-    if body.restart:
-        reset_docker()
-
-        def _restart():
-            nonlocal restart_err
-            try:
-                host_ops.restart_dockerd()
-            except Exception as e:  # noqa: BLE001
-                restart_err = str(e)
-
-        threading.Thread(target=_restart, daemon=True).start()
-        # 等待 dockerd 回归，最多 30s
-        ok = False
-        for _ in range(60):
-            time.sleep(0.5)
+        restart_err = None
+        if body.restart:
+            if tid:
+                tasks.log(tid, "重启 Docker 守护进程（最长 30s）…")
             reset_docker()
-            try:
-                get_docker().ping()
-                ok = True
-                break
-            except HTTPException:
-                continue
-        if restart_err:
-            raise HTTPException(status_code=502, detail=f"daemon.json 已写入，但重启 Docker 失败：{restart_err}")
-        if not ok:
-            raise HTTPException(status_code=502, detail="daemon.json 已写入，但 Docker 重启后未在 30s 内恢复，请到宿主机检查")
-    return {"ok": True, "detail": "镜像加速配置已保存，Docker 已重启生效", "registry_mirrors": mirrors}
+
+            def _restart():
+                nonlocal restart_err
+                try:
+                    host_ops.restart_dockerd()
+                except Exception as e:  # noqa: BLE001
+                    restart_err = str(e)
+
+            threading.Thread(target=_restart, daemon=True).start()
+            # 等待 dockerd 回归，最多 30s
+            ok = False
+            for _ in range(60):
+                time.sleep(0.5)
+                reset_docker()
+                try:
+                    get_docker().ping()
+                    ok = True
+                    break
+                except HTTPException:
+                    continue
+            if tid:
+                tasks.log(tid, "Docker 已重启恢复响应" if ok else "Docker 30s 内未恢复响应")
+            if restart_err:
+                raise HTTPException(status_code=502, detail=f"daemon.json 已写入，但重启 Docker 失败：{restart_err}")
+            if not ok:
+                raise HTTPException(status_code=502, detail="daemon.json 已写入，但 Docker 重启后未在 30s 内恢复，请到宿主机检查")
+        if tid:
+            tasks.finish(tid, True, "✔ 镜像加速配置已保存" + ("，Docker 已重启生效" if body.restart else ""))
+        return {"ok": True, "detail": "镜像加速配置已保存，Docker 已重启生效", "registry_mirrors": mirrors}
+    except Exception as e:  # noqa: BLE001
+        if tid:
+            tasks.finish(tid, False, f"✘ 保存失败：{e}")
+        raise
 
 
 # ---------- PHP 增强镜像构建 ----------
@@ -455,9 +502,21 @@ def mysql_list(db=Depends(_get_db)):
 
 
 @router.post("/mysql/{ver}/enable")
-def mysql_enable(ver: str, db=Depends(_get_db)):
+def mysql_enable(ver: str, db=Depends(_get_db), request: Request = None):
     """启用（镜像必须已本地拉取；阻塞等待 mysqld 就绪，最长 ~90s）。"""
-    return _mysql.enable_mysql(db, ver)
+    tid = (request.headers.get("x-task-id") if request else "") or ""
+    if tid:
+        tasks.start(tid, f"启用 MySQL {ver} 服务")
+        tasks.log(tid, "检查本地镜像与端口（绝不自动拉取）…")
+    try:
+        result = _mysql.enable_mysql(db, ver, tid=tid)
+        if tid:
+            tasks.finish(tid, True, f"✔ MySQL {ver} 已启用，外网端口 {result['host_port']}")
+        return result
+    except Exception as e:  # noqa: BLE001
+        if tid:
+            tasks.finish(tid, False, f"✘ 启用失败：{e}")
+        raise
 
 
 class _MysqlDisableReq(_BaseModel):
@@ -465,8 +524,20 @@ class _MysqlDisableReq(_BaseModel):
 
 
 @router.post("/mysql/{ver}/disable")
-def mysql_disable(ver: str, body: _MysqlDisableReq | None = None, db=Depends(_get_db)):
-    return _mysql.disable_mysql(db, ver, purge=bool(body and body.purge))
+def mysql_disable(ver: str, body: _MysqlDisableReq | None = None, db=Depends(_get_db),
+                  request: Request = None):
+    tid = (request.headers.get("x-task-id") if request else "") or ""
+    if tid:
+        tasks.start(tid, f"停用 MySQL {ver} 服务" + ("（同时删除数据卷）" if body and body.purge else ""))
+    try:
+        result = _mysql.disable_mysql(db, ver, purge=bool(body and body.purge), tid=tid)
+        if tid:
+            tasks.finish(tid, True, f"✔ {result.get('detail', '已停用')}")
+        return result
+    except Exception as e:  # noqa: BLE001
+        if tid:
+            tasks.finish(tid, False, f"✘ 停用失败：{e}")
+        raise
 
 
 @router.get("/mysql/{ver}/root-password")

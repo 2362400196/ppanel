@@ -28,6 +28,8 @@ class InstanceCreate(BaseModel):
     mem_limit: int = Field(default=512, ge=64, le=32768)      # MB
     disk_quota: int = Field(default=2048, ge=256, le=1048576)  # MB
     start_cmd: str = Field(default="", max_length=512)  # 空则按镜像取默认（python main.py / php -S …）
+    expire_at: Optional[datetime] = None  # 到期时间（主控/商城开通时传入，空=长期有效）
+    traffic_gb: Optional[float] = None    # 月流量限额 GB（空/0=不限）
     # 仅 X-API-Key 调用时有效：为指定用户开通
     user_id: Optional[int] = None
 
@@ -52,6 +54,8 @@ class InstanceOut(BaseModel):
     status: str
     created_at: Optional[datetime] = None
     expire_at: Optional[datetime] = None
+    traffic_gb: Optional[float] = None
+    traffic_used_mb: float = 0.0
 
     class Config:
         from_attributes = True

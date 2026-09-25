@@ -7,6 +7,7 @@ import UIButton from './ui/UIButton.vue'
 import UIInput from './ui/UIInput.vue'
 import UISelect from './ui/UISelect.vue'
 import UITextarea from './ui/UITextarea.vue'
+import { startTask } from '../api/tasks'
 
 const props = defineProps({ open: Boolean })
 const emit = defineEmits(['update:open', 'created'])
@@ -64,6 +65,7 @@ async function submit() {
   if (!name.value.trim()) return toastErr('请输入实例名称')
   submitting.value = true
   try {
+    const tid = startTask()  // 实例创建在主控落库+节点建容器，全程终端日志
     const { data } = await api.post('/instances', {
       name: name.value.trim(),
       image: image.value,
@@ -71,7 +73,7 @@ async function submit() {
       mem_limit: parseInt(mem.value),
       disk_quota: parseInt(disk.value),
       start_cmd: startCmd.value.trim()
-    })
+    }, { headers: { 'X-Task-Id': tid } })
     toastOk(`实例「${data.name}」创建成功，外部端口 ${data.ext_port}`)
     emit('update:open', false)
     emit('created', data)

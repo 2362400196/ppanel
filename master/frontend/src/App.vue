@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from './stores/auth'
 import ToastHost from './components/ui/ToastHost.vue'
+import TaskTerminal from './components/TaskTerminal.vue'
 import UITag from './components/ui/UITag.vue'
 
 const route = useRoute()
@@ -18,6 +19,7 @@ function logout() {
 
 <template>
   <ToastHost />
+  <TaskTerminal />
   <router-view v-if="bare" />
 
   <div v-else class="layout">
@@ -31,43 +33,47 @@ function logout() {
         <!-- 用户视角：仪表盘 / 商城 / 设置 -->
         <template v-if="!auth.isAdmin">
           <router-link to="/" class="nav-item" :class="{ active: route.name === 'instances' || route.name === 'instance-detail' }">
-            <i class="nav-icon box" />
+            <svg class="nav-icon" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" /><rect x="3" y="14" width="7" height="7" rx="1.5" /><rect x="14" y="14" width="7" height="7" rx="1.5" /></svg>
             <span>仪表盘</span>
           </router-link>
           <router-link to="/shop" class="nav-item" :class="{ active: route.name === 'shop' }">
-            <i class="nav-icon docker" />
+            <svg class="nav-icon" viewBox="0 0 24 24"><path d="M6 7h12l1.5 13.5a1 1 0 0 1-1 1H5.5a1 1 0 0 1-1-1L6 7z" /><path d="M9 10V6a3 3 0 0 1 6 0v4" /></svg>
             <span>商城</span>
           </router-link>
           <router-link to="/settings" class="nav-item" :class="{ active: route.name === 'settings' }">
-            <i class="nav-icon nodes" />
+            <svg class="nav-icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.09a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.09a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>
             <span>设置</span>
           </router-link>
         </template>
 
-        <!-- 管理员视角：专注于管理（商品 / 用户 / 实例 / 节点 / Docker） -->
+        <!-- 管理员视角：仪表盘 + 管理 -->
         <template v-else>
-          <router-link to="/admin" class="nav-item" :class="{ active: route.name === 'admin' }">
-            <i class="nav-icon shield" />
-            <span>商品管理</span>
+          <router-link to="/dashboard" class="nav-item" :class="{ active: route.name === 'dashboard' }">
+            <svg class="nav-icon" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" /><rect x="3" y="14" width="7" height="7" rx="1.5" /><rect x="14" y="14" width="7" height="7" rx="1.5" /></svg>
+            <span>仪表盘</span>
           </router-link>
           <router-link to="/users" class="nav-item" :class="{ active: route.name === 'users' }">
-            <i class="nav-icon box" />
+            <svg class="nav-icon" viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v2" /><circle cx="10" cy="7" r="4" /><path d="M21 21v-2a4 4 0 0 0-3-3.87" /><path d="M16 3.13a4 4 0 0 1 0 7.75" /></svg>
             <span>用户管理</span>
           </router-link>
-          <router-link to="/manage" class="nav-item" :class="{ active: route.name === 'manage' }">
-            <i class="nav-icon docker" />
-            <span>实例管理</span>
-          </router-link>
           <router-link to="/nodes" class="nav-item" :class="{ active: route.name === 'nodes' }">
-            <i class="nav-icon nodes" />
+            <svg class="nav-icon" viewBox="0 0 24 24"><circle cx="18" cy="5" r="3" /><circle cx="6" cy="12" r="3" /><circle cx="18" cy="19" r="3" /><line x1="8.6" y1="10.5" x2="15.4" y2="6.5" /><line x1="8.6" y1="13.5" x2="15.4" y2="17.5" /></svg>
             <span>节点管理</span>
           </router-link>
+          <router-link to="/manage" class="nav-item" :class="{ active: route.name === 'manage' }">
+            <svg class="nav-icon" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="7" rx="2" /><rect x="2" y="14" width="20" height="7" rx="2" /><line x1="6" y1="6.5" x2="6.01" y2="6.5" /><line x1="6" y1="17.5" x2="6.01" y2="17.5" /></svg>
+            <span>实例管理</span>
+          </router-link>
           <router-link to="/docker" class="nav-item" :class="{ active: route.name === 'docker' }">
-            <i class="nav-icon docker" />
+            <svg class="nav-icon" viewBox="0 0 24 24"><path d="M21 8.5 12 3 3 8.5v7L12 21l9-5.5v-7z" /><line x1="3" y1="8.5" x2="12" y2="13.5" /><line x1="21" y1="8.5" x2="12" y2="13.5" /><line x1="12" y1="13.5" x2="12" y2="21" /></svg>
             <span>Docker 管理</span>
           </router-link>
+          <router-link to="/admin" class="nav-item" :class="{ active: route.name === 'admin' }">
+            <svg class="nav-icon" viewBox="0 0 24 24"><path d="M20.6 13.4 13.4 20.6a2 2 0 0 1-2.8 0l-7-7A2 2 0 0 1 3 12.2V5a2 2 0 0 1 2-2h7.2a2 2 0 0 1 1.4.6l7 7a2 2 0 0 1 0 2.8z" /><circle cx="7.5" cy="7.5" r="1.2" /></svg>
+            <span>商品管理</span>
+          </router-link>
           <router-link to="/settings" class="nav-item" :class="{ active: route.name === 'settings' }">
-            <i class="nav-icon nodes" />
+            <svg class="nav-icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.09a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.09a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>
             <span>设置</span>
           </router-link>
         </template>
@@ -126,10 +132,11 @@ function logout() {
   content: ''; position: absolute; left: 0; top: 10px; bottom: 10px; width: 3px;
   border-radius: 2px; background: var(--primary);
 }
-.nav-icon { width: 15px; height: 15px; border: 1.6px solid currentColor; border-radius: 4px; }
-.nav-icon.shield { border-radius: 4px 4px 8px 8px; }
-.nav-icon.docker { border-radius: 50%; }
-.nav-icon.nodes { border-radius: 50%; width: 9px; height: 9px; margin: 3px; box-shadow: 4px 0 0 -1.2px currentColor, -4px 0 0 -1.2px currentColor; }
+.nav-icon {
+  width: 16px; height: 16px; flex-shrink: 0;
+  fill: none; stroke: currentColor; stroke-width: 1.8;
+  stroke-linecap: round; stroke-linejoin: round;
+}
 
 .side-foot { border-top: 1px solid rgba(255,255,255,.08); padding-top: 14px; }
 .user-row { display: flex; align-items: center; gap: 10px; padding: 0 8px 10px; }

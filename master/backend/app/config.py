@@ -56,7 +56,7 @@ class Settings:
     # 认证
     jwt_secret: str = field(default_factory=lambda: _env(
         "JWT_SECRET", "ppanel-master-dev-secret-change-me"))
-    jwt_expire_minutes: int = field(default_factory=lambda: _env_int("JWT_EXPIRE_MINUTES", 720))
+    jwt_expire_minutes: int = field(default_factory=lambda: _env_int("JWT_EXPIRE_MINUTES", 43200))  # 默认30天
     # 商城对接 X-API-Key（空则 /api/open 禁用）
     api_key: str = field(default_factory=lambda: _env("MASTER_API_KEY", ""))
 

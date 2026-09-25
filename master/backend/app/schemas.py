@@ -60,6 +60,7 @@ class InstanceCreate(BaseModel):
     # 仅 X-API-Key 调用时有效：为指定用户开通
     user_id: Optional[int] = None
     expire_at: Optional[datetime] = None
+    traffic_gb: Optional[float] = None  # 月流量限额 GB；空=不限
 
 
 class InstanceUpdate(BaseModel):
@@ -80,6 +81,7 @@ class PlanIn(BaseModel):
     mem: int = Field(default=512, ge=64, le=32768)        # MB
     disk: int = Field(default=2048, ge=256, le=1048576)   # MB
     days: int = Field(default=30, ge=1, le=3650)
+    traffic_gb: int = Field(default=0, ge=0, le=10240)  # 月流量 GB；0=不限
     price_cents: int = Field(default=500, ge=0, le=100_000_000)  # 分
     sort: int = Field(default=0, ge=0, le=9999)
     node_id: Optional[int] = Field(default=None, ge=1)  # 绑定节点；空=自动分配
@@ -95,6 +97,7 @@ class PlanOut(BaseModel):
     mem: int
     disk: int
     days: int
+    traffic_gb: int = 0
     price_cents: int
     sort: int
     node_id: Optional[int] = None
@@ -116,6 +119,7 @@ class OpenInstanceCreate(BaseModel):
     mem_limit: int = Field(default=512, ge=64, le=32768)
     disk_quota: int = Field(default=2048, ge=256, le=1048576)
     expire_at: Optional[datetime] = None
+    traffic_gb: Optional[float] = None  # 月流量限额 GB；空=不限
     node_id: Optional[int] = None
 
 

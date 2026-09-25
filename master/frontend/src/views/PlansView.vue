@@ -51,7 +51,7 @@ async function loadImages() {
 }
 
 function blankPlan() {
-  return { name: '', desc: '', cpu: 1, mem: 512, disk: 2048, days: 30, price: '5.00', sort: 0, node_id: null, image: images.value[0] || 'python:3.11-slim', enabled: true }
+  return { name: '', desc: '', cpu: 1, mem: 512, disk: 2048, days: 30, traffic_gb: 0, price: '5.00', sort: 0, node_id: null, image: images.value[0] || 'python:3.11-slim', enabled: true }
 }
 
 async function loadPlans() {
@@ -94,6 +94,7 @@ async function savePlan() {
     mem: Number(f.mem),
     disk: Number(f.disk),
     days: Number(f.days),
+    traffic_gb: Number(f.traffic_gb) || 0,
     price_cents: cents,
     sort: Number(f.sort) || 0,
     node_id: f.node_id || null,
@@ -160,7 +161,7 @@ onMounted(() => {
     </div>
 
     <UITable :columns="planCols" :rows="plans">
-      <template #col-spec="{ row }">{{ row.cpu }} 核 / {{ row.mem }}MB / {{ row.disk / 1024 }}GB</template>
+      <template #col-spec="{ row }">{{ row.cpu }} 核 / {{ row.mem }}MB / {{ row.disk / 1024 }}GB / {{ row.traffic_gb ? row.traffic_gb + 'GB流量' : '流量不限' }}</template>
       <template #col-days="{ row }">{{ row.days }} 天</template>
       <template #col-price="{ row }">¥{{ priceYuan(row.price_cents) }}</template>
       <template #col-image="{ row }">
@@ -226,10 +227,14 @@ onMounted(() => {
             />
           </label>
         </div>
-        <div class="row2 row3">
+        <div class="row2 row4">
           <label class="field">
             <span>有效期（天）</span>
             <UIInput v-model="planForm.days" type="number" />
+          </label>
+          <label class="field">
+            <span>月流量（GB，0=不限）</span>
+            <UIInput v-model="planForm.traffic_gb" type="number" />
           </label>
           <label class="field">
             <span>排序（小在前）</span>
@@ -265,4 +270,5 @@ onMounted(() => {
 .field span { font-size: 12px; font-weight: 600; color: var(--text-2); }
 .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .row2.row3 { grid-template-columns: 1fr 1fr 1fr; }
+.row2.row4 { grid-template-columns: 1fr 1fr 1fr 1fr; }
 </style>

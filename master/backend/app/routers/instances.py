@@ -9,10 +9,11 @@ import uuid as uuidlib
 from datetime import timedelta
 from urllib.parse import urlsplit
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
+from app import tasks
 from app.agent_client import (_error_detail, agent_json, agent_request,
                               owned_instance, resolve_node)
 from app.auth import Principal, get_principal
@@ -43,6 +44,7 @@ def _out(inst: Instance, node: Node | None, extra: dict | None = None) -> dict:
         "status": inst.status,
         "created_at": inst.created_at.isoformat() if inst.created_at else None,
         "expire_at": inst.expire_at.isoformat() if inst.expire_at else None,
+        "traffic_gb": getattr(inst, "traffic_gb", None),
         "user_id": inst.user_id,
         "node_id": inst.node_id,
         "node_name": node.name if node else None,
@@ -75,47 +77,68 @@ def my_instances(all: int = 0, p: Principal = Depends(get_principal),
 
 @router.post("/instances")
 async def create_instance(body: InstanceCreate, p: Principal = Depends(get_principal),
-                          db: Session = Depends(get_db)):
-    if body.image not in settings.all_images:
-        raise HTTPException(status_code=400, detail="不支持的镜像版本")
+                          db: Session = Depends(get_db), request: Request = None):
+    tid = (request.headers.get("x-task-id") if request else "") or ""
+    if tid:
+        tasks.start(tid, f"开通实例 {body.name}（{body.image}）")
+    try:
+        if tid:
+            tasks.log(tid, "校验镜像与规格…")
+        if body.image not in settings.all_images:
+            raise HTTPException(status_code=400, detail="不支持的镜像版本")
 
-    if p.via_api_key:
-        if not body.user_id or not db.get(User, body.user_id):
-            raise HTTPException(status_code=400, detail="user_id 无效")
-        owner_id = body.user_id
-    else:
-        owner_id = p.user_id
+        if p.via_api_key:
+            if not body.user_id or not db.get(User, body.user_id):
+                raise HTTPException(status_code=400, detail="user_id 无效")
+            owner_id = body.user_id
+        else:
+            owner_id = p.user_id
 
-    node = resolve_node(body.node_id, db)
+        if tid:
+            tasks.log(tid, "选取节点…")
+        node = resolve_node(body.node_id, db)
 
-    # 交给被控创建（镜像预拉、端口分配、容器创建都在被控完成）
-    agent_data = agent_json(node, "POST", "/agent/instances", json={
-        "name": body.name, "image": body.image, "start_cmd": body.start_cmd,
-        "cpu_limit": body.cpu_limit, "mem_limit": body.mem_limit,
-        "disk_quota": body.disk_quota,
-    })
+        if tid:
+            tasks.log(tid, f"请求节点「{node.name}」创建容器（镜像预拉 / 端口分配 / 建容器）…")
+        # 交给被控创建（镜像预拉、端口分配、容器创建都在被控完成）
+        agent_data = agent_json(node, "POST", "/agent/instances", json={
+            "name": body.name, "image": body.image, "start_cmd": body.start_cmd,
+            "cpu_limit": body.cpu_limit, "mem_limit": body.mem_limit,
+            "disk_quota": body.disk_quota,
+            "expire_at": body.expire_at.isoformat() if body.expire_at else None,
+            "traffic_gb": body.traffic_gb,
+        })
+        if tid:
+            tasks.log(tid, f"节点创建成功：端口 {agent_data.get('ext_port', 0)}，落库…")
 
-    inst = Instance(
-        uuid=str(uuidlib.uuid4()),
-        user_id=owner_id,
-        node_id=node.id,
-        agent_iid=agent_data["id"],
-        name=body.name.strip(),
-        image=body.image,
-        start_cmd=body.start_cmd.strip() or default_start_cmd(body.image, body.mem_limit),
-        ext_port=agent_data.get("ext_port", 0),
-        cpu_limit=body.cpu_limit,
-        mem_limit=body.mem_limit,
-        disk_quota=body.disk_quota,
-        status=agent_data.get("status", "created"),
-        expire_at=body.expire_at,
-    )
-    db.add(inst)
-    db.commit()
-    _oplog(db, "create_instance", user_id=owner_id, instance_uuid=inst.uuid,
-           detail=f"node={node.name} image={inst.image} port={inst.ext_port}")
-    db.commit()
-    return _out(inst, node)
+        inst = Instance(
+            uuid=str(uuidlib.uuid4()),
+            user_id=owner_id,
+            node_id=node.id,
+            agent_iid=agent_data["id"],
+            name=body.name.strip(),
+            image=body.image,
+            start_cmd=body.start_cmd.strip() or default_start_cmd(body.image, body.mem_limit),
+            ext_port=agent_data.get("ext_port", 0),
+            cpu_limit=body.cpu_limit,
+            mem_limit=body.mem_limit,
+            disk_quota=body.disk_quota,
+            status=agent_data.get("status", "created"),
+            expire_at=body.expire_at,
+            traffic_gb=body.traffic_gb,
+        )
+        db.add(inst)
+        db.commit()
+        _oplog(db, "create_instance", user_id=owner_id, instance_uuid=inst.uuid,
+               detail=f"node={node.name} image={inst.image} port={inst.ext_port}")
+        db.commit()
+        if tid:
+            tasks.finish(tid, True, f"✔ 实例已开通（{inst.uuid[:8]}…，端口 {inst.ext_port}）")
+        return _out(inst, node)
+    except Exception as e:  # noqa: BLE001
+        if tid:
+            tasks.finish(tid, False, f"✘ 开通失败：{e}")
+        raise
 
 
 @router.get("/instances/{instance_uuid}")
@@ -155,15 +178,39 @@ def update_instance(instance_uuid: str, body: InstanceUpdate,
 
 @router.delete("/instances/{instance_uuid}")
 def delete_instance(instance_uuid: str, p: Principal = Depends(get_principal),
-                    db: Session = Depends(get_db)):
-    inst = owned_instance(instance_uuid, p.user_id, p.is_admin, db)
-    node = _node_of(db, inst)
-    agent_json(node, "DELETE", f"/agent/instances/{inst.agent_iid}?purge=1")
-    db.delete(inst)
-    _oplog(db, "delete_instance", user_id=p.user_id, instance_uuid=inst.uuid,
-           detail="被控容器与数据已一并回收")
-    db.commit()
-    return {"detail": "实例已回收"}
+                    db: Session = Depends(get_db), request: Request = None):
+    tid = (request.headers.get("x-task-id") if request else "") or ""
+    if tid:
+        tasks.start(tid, f"回收实例 {instance_uuid[:8]}…")
+    try:
+        inst = owned_instance(instance_uuid, p.user_id, p.is_admin, db)
+        node = _node_of(db, inst)
+        detail = "被控容器与数据已一并回收"
+        if tid:
+            tasks.log(tid, f"通知节点「{node.name}」回收容器与数据…")
+        try:
+            agent_json(node, "DELETE", f"/agent/instances/{inst.agent_iid}?purge=1")
+        except HTTPException as e:
+            if e.status_code != 404:
+                raise
+            # 被控已无此实例记录（容器可能已被管理员清理 / 被控重装过），
+            # 此时不能卡死用户：跳过被控回收，仅清理主控数据
+            detail = "被控已无此实例记录（容器可能已被清理），仅清理了主控数据"
+            if tid:
+                tasks.log(tid, f"节点返回 404：{detail}")
+        if tid:
+            tasks.log(tid, "清理主控记录…")
+        db.delete(inst)
+        _oplog(db, "delete_instance", user_id=p.user_id, instance_uuid=inst.uuid,
+               detail=detail)
+        db.commit()
+        if tid:
+            tasks.finish(tid, True, f"✔ 实例已回收（{detail}）")
+        return {"detail": "实例已回收"}
+    except Exception as e:  # noqa: BLE001
+        if tid:
+            tasks.finish(tid, False, f"✘ 回收失败：{e}")
+        raise
 
 
 def _action(instance_uuid: str, action: str, p: Principal, db: Session) -> dict:
@@ -337,7 +384,8 @@ def file_download(instance_uuid: str, path: str,
     resp = agent_request(node, "GET", f"/agent/instances/{inst.agent_iid}/files/download",
                          params={"path": path}, timeout=settings.agent_timeout * 4)
     if resp.status_code >= 400:
-        raise HTTPException(status_code=resp.status_code, detail="文件下载失败")
+        code = 502 if resp.status_code == 401 else resp.status_code  # 被控401不透传，防前端误判登录失效
+        raise HTTPException(status_code=code, detail="文件下载失败")
     headers = {}
     cd = resp.headers.get("content-disposition")
     if cd:
@@ -402,7 +450,8 @@ def backup_download(instance_uuid: str, p: Principal = Depends(get_principal),
     resp = agent_request(node, "GET", f"/agent/instances/{inst.agent_iid}/files/backup",
                          timeout=settings.agent_timeout * 6)
     if resp.status_code >= 400:
-        raise HTTPException(status_code=resp.status_code, detail=_error_detail(resp))
+        code = 502 if resp.status_code == 401 else resp.status_code  # 被控401不透传，防前端误判登录失效
+        raise HTTPException(status_code=code, detail=_error_detail(resp))
     headers = {"content-disposition": resp.headers.get(
         "content-disposition", 'attachment; filename="instance-backup.tar.gz"')}
     return Response(content=resp.content, media_type="application/gzip", headers=headers)
@@ -421,7 +470,8 @@ async def backup_restore(instance_uuid: str, file: UploadFile = None,
                          files={"file": (file.filename, data, "application/gzip")},
                          timeout=settings.agent_timeout * 6)
     if resp.status_code >= 400:
-        raise HTTPException(status_code=resp.status_code, detail=_error_detail(resp))
+        code = 502 if resp.status_code == 401 else resp.status_code  # 被控401不透传，防前端误判登录失效
+        raise HTTPException(status_code=code, detail=_error_detail(resp))
     try:
         return resp.json()
     except ValueError:

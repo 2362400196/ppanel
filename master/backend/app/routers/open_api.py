@@ -65,6 +65,8 @@ def open_create(body: OpenInstanceCreate, db: Session = Depends(get_db)):
             "name": body.name, "image": body.image, "start_cmd": body.start_cmd,
             "cpu_limit": body.cpu_limit, "mem_limit": body.mem_limit,
             "disk_quota": body.disk_quota,
+            "expire_at": body.expire_at.isoformat() if body.expire_at else None,
+            "traffic_gb": body.traffic_gb,
         })
     except HTTPException:
         db.delete(user)  # 自动建号但开通失败时回滚账号
@@ -85,6 +87,7 @@ def open_create(body: OpenInstanceCreate, db: Session = Depends(get_db)):
         disk_quota=body.disk_quota,
         status=agent_data.get("status", "created"),
         expire_at=body.expire_at,
+        traffic_gb=body.traffic_gb,
     )
     db.add(inst)
     db.commit()

@@ -29,6 +29,12 @@ const routes = [
     component: () => import('../views/SettingsView.vue')
   },
   {
+    path: '/dashboard',
+    name: 'dashboard',
+    component: () => import('../views/AdminDashboardView.vue'),
+    meta: { admin: true }
+  },
+  {
       path: '/admin',
       name: 'admin',
       component: () => import('../views/PlansView.vue'),
@@ -66,6 +72,18 @@ const router = createRouter({
   routes
 })
 
+// 发版后旧页面引用的 chunk 已被删除，动态导入失败时自动整页刷新拿新版本
+router.onError((err, to) => {
+  if (err?.message?.includes('Failed to fetch dynamically imported module') ||
+      err?.message?.includes('Importing a module script failed')) {
+    const key = 'ppanel_reloaded_' + (to?.fullPath || '')
+    if (!sessionStorage.getItem(key)) {
+      sessionStorage.setItem(key, '1')
+      location.assign(to?.fullPath || location.pathname)
+    }
+  }
+})
+
 router.beforeEach(async to => {
   const auth = useAuthStore()
   if (to.meta.public) return true
@@ -78,8 +96,9 @@ router.beforeEach(async to => {
     }
   }
   if (to.meta.admin && !auth.isAdmin) return '/'
-  // 管理员视角专注管理：用户功能页（仪表盘/商城）重定向到管理后台
-  if (auth.isAdmin && ['instances', 'shop'].includes(to.name)) return '/admin'
+  // 管理员视角专注管理：用户功能页（仪表盘/商城）重定向到管理后台仪表盘
+  if (auth.isAdmin && ['instances', 'shop'].includes(to.name)) return '/dashboard'
+  if (auth.isAdmin && to.path === '/') return '/dashboard'
   return true
 })
 

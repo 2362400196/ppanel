@@ -20,7 +20,7 @@ const nodeCols = [
   { key: 'base_url', label: '被控地址' },
   { key: 'health_text', label: 'Docker 概况' },
   { key: 'enabled', label: '启用', width: '80px' },
-  { key: 'ops', label: '', width: '290px' }
+  { key: 'ops', label: '', width: '330px' }
 ]
 
 // 节点管理面板
@@ -35,6 +35,49 @@ const healthText = n => {
   if (!n.online) return '-'
   const h = n.health || {}
   return `v${h.server_version || '?'} / ${h.cpus ?? '?'}C ${h.mem_total_gb ?? '?'}GB / 运行 ${h.containers_running ?? 0} 容器`
+}
+
+// 节点实例清单：这台服务器上有哪些用户的哪些实例
+const instOpen = ref(false)
+const instNode = ref(null)
+const instRows = ref([])
+const instLoading = ref(false)
+const ownerMap = ref({})
+
+const instCols = [
+  { key: 'owner', label: '归属用户', width: '120px' },
+  { key: 'name', label: '实例名称' },
+  { key: 'image', label: '镜像', width: '170px' },
+  { key: 'status', label: '状态', width: '110px' },
+  { key: 'ext_port', label: '外部端口', width: '90px' },
+  { key: 'created_at', label: '创建时间', width: '160px' }
+]
+
+async function openNodeInstances(n) {
+  instNode.value = n
+  instOpen.value = true
+  instLoading.value = true
+  try {
+    const [a, b] = await Promise.all([
+      api.get('/instances', { params: { all: 1 } }),
+      api.get('/admin/users')
+    ])
+    ownerMap.value = Object.fromEntries(b.data.map(u => [u.id, u.username]))
+    instRows.value = a.data.filter(i => String(i.node_id) === String(n.id))
+  } catch (e) {
+    toastErr(errText(e))
+  } finally {
+    instLoading.value = false
+  }
+}
+
+const instRunning = () => instRows.value.filter(i => i.status === 'running').length
+
+function fmtWhen(v) {
+  if (!v) return '-'
+  const d = new Date(v)
+  const p = n => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
 }
 
 async function loadNodes() {
@@ -63,7 +106,8 @@ function openCreate() {
 function openEdit(n) {
   editing.value = true
   editId.value = n.id
-  form.value = { name: n.name, base_url: n.base_url, token: n.token, note: n.note || '' }
+  // 后端出于安全不回传 token，编辑时留空 = 保持原 token 不变
+  form.value = { name: n.name || '', base_url: n.base_url || '', token: '', note: n.note || '' }
   editOpen.value = true
 }
 
@@ -73,13 +117,14 @@ async function save() {
     const payload = {
       name: form.value.name.trim(),
       base_url: form.value.base_url.trim(),
-      token: form.value.token.trim(),
       note: form.value.note
     }
+    if (form.value.token.trim()) payload.token = form.value.token.trim()
     if (editing.value) {
       await api.patch(`/admin/nodes/${editId.value}`, payload)
       toastOk('节点已更新')
     } else {
+      if (!payload.token) { toastErr('请填写节点 Token'); saving.value = false; return }
       await api.post('/admin/nodes', payload)
       toastOk('节点已接入')
     }
@@ -166,6 +211,7 @@ onUnmounted(() => clearInterval(timer))
       </template>
       <template #col-ops="{ row }">
         <UIButton type="text" @click="openNodeAdmin(row)">管理</UIButton>
+        <UIButton type="text" @click="openNodeInstances(row)">实例</UIButton>
         <UIButton type="text" @click="testNode(row)">测连通</UIButton>
         <UIButton type="text" @click="openEdit(row)">编辑</UIButton>
         <UIButton type="text" @click="toggleEnabled(row)">{{ row.enabled ? '停用' : '启用' }}</UIButton>
@@ -186,7 +232,7 @@ onUnmounted(() => clearInterval(timer))
         </label>
         <label class="field">
           <span>节点 Token（X-Node-Token）</span>
-          <UIInput v-model="form.token" class="mono" placeholder="与被控 .env 中 NODE_TOKEN 一致" />
+          <UIInput v-model="form.token" class="mono" :placeholder="editing ? '留空保持原 Token 不变；填写则重置' : '与被控 .env 中 NODE_TOKEN 一致'" />
         </label>
         <label class="field">
           <span>备注（可选）</span>
@@ -196,7 +242,7 @@ onUnmounted(() => clearInterval(timer))
       </div>
       <template #footer>
         <UIButton type="ghost" @click="editOpen = false">取消</UIButton>
-        <UIButton :loading="saving" :disabled="!form.name.trim() || !form.base_url.trim() || !form.token.trim()" @click="save">
+        <UIButton :loading="saving" :disabled="!form.name.trim() || !form.base_url.trim() || (!editing && !form.token.trim())" @click="save">
           {{ editing ? '保存' : '接入' }}
         </UIButton>
       </template>
@@ -210,6 +256,22 @@ onUnmounted(() => clearInterval(timer))
       danger
       @confirm="doDelete"
     />
+
+    <!-- 节点实例清单：哪些用户 / 哪些实例 -->
+    <UIModal v-model:open="instOpen" :title="`节点实例 - ${instNode?.name || ''}`" width="760px">
+      <p class="inst-summary">
+        这台服务器上共有 <b>{{ instRows.length }}</b> 个实例，<b>{{ instRunning() }}</b> 个运行中
+      </p>
+      <UITable :columns="instCols" :rows="instRows" :loading="instLoading">
+        <template #col-owner="{ row }">
+          <span class="owner">{{ ownerMap[row.user_id] || `user#${row.user_id}` }}</span>
+        </template>
+        <template #col-status="{ row }"><StatusDot :status="row.status" /></template>
+        <template #col-ext_port="{ row }"><span class="mono">{{ row.ext_port || '-' }}</span></template>
+        <template #col-created_at="{ row }"><span class="text-dim">{{ fmtWhen(row.created_at) }}</span></template>
+      </UITable>
+      <div v-if="!instLoading && !instRows.length" class="inst-empty">该节点上还没有任何实例。</div>
+    </UIModal>
 
     <!-- 节点管理面板（概览/容器/镜像/文件管理/宿主机终端） -->
     <NodeAdminModal v-model:open="adminOpen" :node="adminNode" />
@@ -225,6 +287,10 @@ onUnmounted(() => clearInterval(timer))
   padding: 42px; text-align: center; color: var(--text-dim); font-size: 13px; line-height: 1.8;
 }
 .form { display: flex; flex-direction: column; gap: 14px; }
+.inst-summary { margin: 0 0 12px; font-size: 13px; color: var(--text-2); }
+.inst-summary b { color: var(--primary-deep); font-family: var(--font-mono); }
+.owner { font-weight: 600; }
+.inst-empty { text-align: center; color: var(--text-dim); font-size: 13px; padding: 18px 0 6px; }
 .field { display: flex; flex-direction: column; gap: 6px; }
 .field span { font-size: 12px; font-weight: 600; color: var(--text-2); }
 .form-tip { font-size: 12px; color: var(--text-dim); margin: 0; line-height: 1.6; }

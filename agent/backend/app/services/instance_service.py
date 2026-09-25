@@ -4,6 +4,7 @@ import os
 import queue
 import random
 import socket
+import subprocess
 import threading
 import uuid
 from collections import deque
@@ -287,7 +288,10 @@ def container_stats(inst: Instance) -> dict:
     """单次采样 CPU/内存占用（docker stats no-stream 语义）。"""
     empty = {"running": False, "cpu_percent": 0.0, "mem_usage_mb": 0.0,
              "mem_limit_mb": inst.mem_limit, "mem_percent": 0.0,
-             "net_rx_mb": 0.0, "net_tx_mb": 0.0}
+             "net_rx_mb": 0.0, "net_tx_mb": 0.0,
+             "traffic_gb": getattr(inst, "traffic_gb", None),
+             "traffic_used_mb": round(getattr(inst, "traffic_used_mb", 0.0) or 0.0, 1),
+             "disk_used_mb": dir_size_mb(inst.host_dir)}
     client = try_get_docker()
     if client is None:
         return empty
@@ -327,7 +331,25 @@ def container_stats(inst: Instance) -> dict:
         "mem_percent": round(usage / limit * 100, 1) if limit else 0.0,
         "net_rx_mb": round(rx / 1024 / 1024, 2),
         "net_tx_mb": round(tx / 1024 / 1024, 2),
+        # 流量限额与本期累计（MB，自然月重置；gb 空=不限）
+        "traffic_gb": getattr(inst, "traffic_gb", None),
+        "traffic_used_mb": round(getattr(inst, "traffic_used_mb", 0.0) or 0.0, 1),
+        "disk_used_mb": dir_size_mb(inst.host_dir),
     }
+
+
+def dir_size_mb(path: str) -> float | None:
+    """宿主机目录大小（du -sm，5s 超时）；不可用时返回 None。"""
+    if not path or not os.path.isdir(path):
+        return None
+    try:
+        r = subprocess.run(["du", "-sm", path], capture_output=True,
+                           text=True, timeout=5)
+        if r.returncode == 0:
+            return float(r.stdout.split()[0])
+    except Exception:  # noqa: BLE001
+        pass
+    return None
 
 
 def container_logs(inst: Instance, tail: int = 200) -> str:
@@ -695,6 +717,25 @@ def log_op(db: Session, instance_id: int, action: str, detail: str = "") -> None
     db.add(AgentOpLog(instance_id=instance_id, action=action, detail=detail))
 
 
+def _accrue_traffic(inst: Instance, s: dict) -> None:
+    """按采样增量累计本期流量（MB）。
+
+    - cur 为容器生命周期累计（rx+tx）；容器重启会清零，按重启后读数续计
+    - 跨自然月：本期流量清零，当前读数作基线（不计入新月份，保守不虚增）
+    """
+    cur = (s.get("net_rx_mb", 0.0) or 0.0) + (s.get("net_tx_mb", 0.0) or 0.0)
+    month = datetime.now(timezone.utc).strftime("%Y-%m")
+    last = inst.traffic_last_mb or 0.0
+    if inst.traffic_month != month:
+        inst.traffic_used_mb = 0.0
+        inst.traffic_month = month
+    elif cur >= last:
+        inst.traffic_used_mb = round((inst.traffic_used_mb or 0.0) + (cur - last), 2)
+    else:  # 容器重启：计数器清零，重启后的读数即新增量
+        inst.traffic_used_mb = round((inst.traffic_used_mb or 0.0) + cur, 2)
+    inst.traffic_last_mb = round(cur, 2)
+
+
 def sample_all_metrics(db: Session) -> None:
     """采样所有运行中实例的 CPU/内存/网络，存本地库；保留最近 24 小时。"""
     now = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -709,6 +750,7 @@ def sample_all_metrics(db: Session) -> None:
                 net_rx_mb=s.get("net_rx_mb", 0.0),
                 net_tx_mb=s.get("net_tx_mb", 0.0),
             ))
+            _accrue_traffic(inst, s)  # 同步累计本期流量（60s 粒度）
         except Exception:  # noqa: BLE001 单实例失败不影响其他
             pass
     db.commit()

@@ -121,10 +121,10 @@ svg.chart { width: 100%; height: 260px; display: block; background: var(--bg); b
 .qmodal-head .title { font-size: 15px; font-weight: 600; color: #24292e; }
 .qmodal-body { padding: 20px; overflow-y: auto; }
 .qmodal-foot { padding: 14px 20px; border-top: 1px solid #e6e9eb; display: flex; justify-content: flex-end; gap: 10px; flex-shrink: 0; }
-.icon-close { width: 28px; height: 28px; border-radius: 6px; display: flex; align-items: center; justify-content: center;
-  cursor: pointer; color: #9aa3ab; transition: background .15s, color .15s; }
-.icon-close:hover { background: #f1f3f4; color: #24292e; }
-.icon-close svg { width: 14px; height: 14px; }
+.icon-close { width: 28px; height: 28px; border-radius: 8px; display: flex; align-items: center; justify-content: center;
+  cursor: pointer; color: #24292e; transition: background .15s, color .15s; }
+.icon-close:hover { background: rgba(220, 38, 38, .1); color: #dc2626; }
+.icon-close svg { width: 16px; height: 16px; }
 
 /* qnbt 按钮 */
 .qbtn { display: inline-flex; align-items: center; justify-content: center; gap: 5px; height: 28px; padding: 0 12px;
@@ -238,6 +238,25 @@ td .op.del:hover { color: var(--bad); }
 @keyframes termBreathe { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
 .flex-spacer { flex: 1; }
 select { height: 34px; border: 1px solid var(--line); border-radius: 9px; padding: 0 8px; background: #fff; outline: none; }
+
+/* 自绘下拉（pps-enhance 生成的按钮与列表） */
+.pps-btn { position: relative; display: inline-flex; align-items: center; text-align: left; padding-right: 28px !important;
+  height: 34px; border: 1px solid var(--line); border-radius: 9px; background: #fff; font-size: 13px; color: #24292e; }
+.pps-btn:focus-visible { border-color: #10b981; box-shadow: 0 0 0 3px rgba(16, 185, 129, .12); }
+.pps-btn .pps-txt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pps-btn .pps-arrow { position: absolute; right: 10px; top: 50%; width: 7px; height: 7px;
+  border-right: 1.5px solid #6b7480; border-bottom: 1.5px solid #6b7480;
+  transform: translateY(-70%) rotate(45deg); transition: transform .15s; pointer-events: none; }
+.pps-list { position: fixed; z-index: 1100; display: none; background: #fff; border: 1px solid #e6e9eb;
+  border-radius: 10px; box-shadow: 0 12px 32px rgba(15, 40, 34, .16), 0 2px 8px rgba(15, 40, 34, .08);
+  padding: 4px; max-height: 240px; overflow-y: auto; }
+.pps-list.on { display: block; animation: ppsIn .14s ease; }
+@keyframes ppsIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+.pps-item { display: block; width: 100%; border: none; background: transparent; cursor: pointer;
+  padding: 8px 10px; border-radius: 6px; text-align: left; font-size: 13px; font-family: inherit; color: #24292e; }
+.pps-item:hover { background: #e7f8f1; color: #047857; }
+.pps-item.sel { background: #e7f8f1; color: #047857; font-weight: 600; }
+.pps-item.mono { font-family: Consolas, monospace; font-size: 12px; }
 
 /* 域名 */
 .domain-row { display: flex; gap: 8px; margin-top: 10px; }
@@ -412,7 +431,7 @@ function showApidoc() {
       <button class="active" data-view="overview" onclick="switchView('overview')">概览</button>
       <button data-view="usage" onclick="switchView('usage')">用量统计</button>
       <button data-view="files" onclick="switchView('files')">文件管理</button>
-      <button data-view="domain" onclick="switchView('domain')">域名绑定</button>
+      <button data-view="domain" onclick="switchView('domain')">域名与 SSL</button>
       <button data-view="database" onclick="switchView('database')">数据库</button>
       <button id="navDeps" data-view="deps" onclick="switchView('deps')">依赖</button>
       <button id="navDisfn" data-view="disfn" onclick="switchView('disfn')" style="display:none">禁用函数</button>
@@ -542,6 +561,8 @@ function showApidoc() {
           <div class="meter">
             <div class="meter-row"><span class="k">CPU 占用</span><div class="bar"><i id="cpuBar"></i></div><span class="v mono" id="cpuVal">-</span></div>
             <div class="meter-row"><span class="k">内存占用</span><div class="bar"><i id="memBar"></i></div><span class="v mono" id="memVal">-</span></div>
+            <div class="meter-row" id="diskRow" style="display:none"><span class="k">磁盘用量</span><div class="bar"><i id="diskBar"></i></div><span class="v mono" id="diskVal">-</span></div>
+            <div class="meter-row" id="trafRow" style="display:none"><span class="k">本月流量</span><div class="bar"><i id="trafBar"></i></div><span class="v mono" id="trafVal">-</span></div>
           </div>
           <div class="box">
             <div class="page-title" style="margin-bottom:8px">启动命令</div>
@@ -619,9 +640,18 @@ function showApidoc() {
       <!-- 域名绑定 -->
       <div id="v-domain" class="view">
         <div class="card">
-          <div class="page-title">域名绑定</div>
+          <div class="page-title">域名与 SSL</div>
+          <div class="ssl-status-row" id="sslCaddyRow" style="margin:10px 0 4px">
+            <span class="k" style="font-size:13px;color:var(--text-2)">节点 Caddy：</span>
+            <span id="sslCaddyState" class="mono" style="font-size:13px">检测中…</span>
+          </div>
           <div id="domainBound" style="display:none">
             当前绑定：<span class="bound mono" id="domainCur">-</span>
+            <div style="margin-top:8px;display:flex;flex-direction:column;gap:6px;font-size:13px">
+              <div id="sslStateRow">SSL 状态：<span id="sslState" class="mono">-</span></div>
+              <div id="sslDnsRow">DNS 解析：<span id="sslDns" class="mono">-</span></div>
+              <div>HTTPS 访问：<a id="sslUrl" class="mono bound" href="#" target="_blank" rel="noopener" style="color:var(--mint);text-decoration:none">-</a></div>
+            </div>
           </div>
           <div id="domainNone" class="status-text" style="display:none">未绑定域名</div>
           <div class="domain-row">
@@ -629,7 +659,7 @@ function showApidoc() {
             <button class="btn" onclick="saveDomain()">绑定</button>
             <button class="btn ghost" onclick="unbindDomain()">解绑</button>
           </div>
-          <p class="hint">将域名 A 记录解析到本服务器 IP 后绑定，即可通过 http://域名:9100 直接访问你的应用（Agent 会按域名自动转发到实例端口）。</p>
+          <p class="hint">将域名 A 记录解析到本服务器 IP 后绑定，Caddy 会自动申请并续期 Let's Encrypt 证书，随后即可通过 https://你的域名 访问应用（80/443 端口需放行）。解绑后 HTTPS 访问立即失效。</p>
         </div>
       </div>
 
@@ -651,9 +681,10 @@ function showApidoc() {
               <div class="spec"><div class="k">数据库名</div><div class="v mono" id="dbName">-</div></div>
               <div class="spec"><div class="k">用户名</div><div class="v mono" id="dbUser">-</div></div>
               <div class="spec"><div class="k">密码</div><div class="v mono" id="dbPwd">-</div></div>
-              <div class="spec"><div class="k">内网地址（容器内直连）</div><div class="v mono" id="dbInternal">-</div></div>
+              <div class="spec"><div class="k">实例应用地址（应用填这个）</div><div class="v mono" id="dbInternal">-</div></div>
               <div class="spec"><div class="k">外网地址（客户端直连）</div><div class="v mono" id="dbExternal">-</div></div>
             </div>
+            <p style="font-size:12px;color:#8a9490;margin-top:8px">应用没有端口输入框时（如 WordPress），数据库主机填实例应用地址整串（如 ppanel-mysql-5.7:3306）；不要填 localhost 或 127.0.0.1（应用容器里不通）。</p>
             <div class="actions" style="margin-top:14px">
               <button class="btn ghost" onclick="copyDbDsn()">复制连接串</button>
               <button class="btn ghost" onclick="resetDbPwd()">重置密码</button>
@@ -1383,6 +1414,26 @@ async function loadStats () {
     $('memBar').style.width = memPct + '%'
     $('memBar').className = memPct > 85 ? 'hot' : ''
     $('memVal').textContent = memUsed.toFixed(0) + ' / ' + memLim + ' MB'
+    // 磁盘用量（host_dir 统计可用时显示）
+    if (s.disk_used_mb != null) {
+      const dLim = inst.disk_quota || 0
+      const dPct = dLim ? Math.min(100, s.disk_used_mb / dLim * 100) : 0
+      $('diskRow').style.display = ''
+      $('diskBar').style.width = dPct + '%'
+      $('diskBar').className = dPct > 85 ? 'hot' : ''
+      $('diskVal').textContent = s.disk_used_mb.toFixed(0) + ' / ' + (dLim / 1024).toFixed(1) + ' GB'
+    }
+    // 本月流量（商品设置了限额时显示；不限额则隐藏）
+    if (s.traffic_gb) {
+      const tLim = s.traffic_gb * 1024
+      const tPct = Math.min(100, (s.traffic_used_mb || 0) / tLim * 100)
+      $('trafRow').style.display = ''
+      $('trafBar').style.width = tPct + '%'
+      $('trafBar').className = tPct > 85 ? 'hot' : ''
+      $('trafVal').textContent = (s.traffic_used_mb / 1024).toFixed(2) + ' / ' + s.traffic_gb + ' GB'
+    } else {
+      $('trafRow').style.display = 'none'
+    }
   } catch (e) { /* 静默 */ }
 }
 async function saveCmd () {
@@ -2216,28 +2267,50 @@ async function doRestore (f) {
   })
 }
 
-// ---------- 域名绑定 ----------
+// ---------- 域名与 SSL ----------
 async function loadDomain () {
   try {
-    const { domain } = await api('GET', '/panel/instance/domain')
-    $('domainCur').textContent = domain || '-'
-    $('domainBound').style.display = domain ? 'block' : 'none'
-    $('domainNone').style.display = domain ? 'none' : 'block'
-    $('domainInput').value = domain || ''
+    const d = await api('GET', '/panel/instance/domain')
+    // Caddy 状态行（未装时给出引导提示）
+    const cs = d.caddy || {}
+    if (!cs.installed) {
+      $('sslCaddyState').textContent = '未安装（绑定域名需管理员先安装 Caddy）'
+      $('sslCaddyState').style.color = '#e05a4e'
+    } else if (!cs.active) {
+      $('sslCaddyState').textContent = '已安装 ' + (cs.version || '') + '，但服务未运行'
+      $('sslCaddyState').style.color = '#e05a4e'
+    } else {
+      $('sslCaddyState').textContent = '运行中（v' + (cs.version || '?') + '），证书自动申请/续期'
+      $('sslCaddyState').style.color = 'var(--mint)'
+    }
+    $('domainCur').textContent = d.domain || '-'
+    $('domainBound').style.display = d.domain ? 'block' : 'none'
+    $('domainNone').style.display = d.domain ? 'none' : 'block'
+    if (d.domain) {
+      $('sslState').textContent = d.ssl_active ? '已启用（HTTPS 自动签发/续期）' : '未生效（Caddy 未运行）'
+      $('sslState').style.color = d.ssl_active ? 'var(--mint)' : '#e05a4e'
+      $('sslDns').textContent = d.dns_msg || '-'
+      $('sslDns').style.color = d.dns_ok === false ? '#e05a4e' : 'var(--text-2)'
+      const u = $('sslUrl')
+      u.textContent = d.https_url
+      u.href = d.https_url
+    }
+    $('domainInput').value = d.domain || ''
   } catch (e) { /* 静默 */ }
 }
 async function saveDomain () {
   try {
-    const { domain } = await api('PUT', '/panel/instance/domain', { domain: $('domainInput').value.trim() })
-    $('domainCur').textContent = domain || '-'
-    $('domainBound').style.display = domain ? 'block' : 'none'
-    $('domainNone').style.display = domain ? 'none' : 'block'
-    toast(domain ? '已绑定 ' + domain : '已解绑', true)
+    const r = await api('PUT', '/panel/instance/domain', { domain: $('domainInput').value.trim() })
+    toast('已绑定 ' + r.domain + '，证书签发中（约 1 分钟生效）', true)
+    loadDomain()
   } catch (e) { toast(e.message, false) }
 }
 async function unbindDomain () {
-  $('domainInput').value = ''
-  saveDomain()
+  try {
+    await api('PUT', '/panel/instance/domain', { domain: '' })
+    toast('已解绑', true)
+    loadDomain()
+  } catch (e) { toast(e.message, false) }
 }
 
 // ---------- 数据库（节点共享 MySQL：一实例一库） ----------
@@ -2851,6 +2924,77 @@ setInterval(() => {
   if ($('v-overview').classList.contains('active')) loadStats()
   if ($('v-usage').classList.contains('active')) loadUsage(usageHours)
 }, 5000)
+
+/* ================= 自绘下拉（渐进增强，替换全部原生 select） ================= */
+function ppsEnhance(root) {
+  (root || document).querySelectorAll('select:not([data-pps])').forEach(sel => {
+    sel.dataset.pps = '1'
+    sel.style.display = 'none'
+    // 外观类名与内联样式继承原 select，保持各场景一致
+    const btn = document.createElement('button')
+    btn.type = 'button'
+    btn.className = (sel.className || '') + ' pps-btn'
+    btn.style.cssText = sel.style.cssText
+    const cs = getComputedStyle(sel)
+    btn.style.flexGrow = cs.flexGrow; btn.style.flexShrink = cs.flexShrink; btn.style.flexBasis = cs.flexBasis
+    const txt = document.createElement('span'); txt.className = 'pps-txt'
+    const ar = document.createElement('span'); ar.className = 'pps-arrow'
+    btn.append(txt, ar)
+    const list = document.createElement('div'); list.className = 'pps-list'
+    sel.after(list); sel.before(btn)
+
+    function sync() {
+      const o = sel.options[sel.selectedIndex]
+      txt.textContent = o ? o.textContent : '暂无选项'
+      txt.style.color = o ? '' : 'var(--text-dim)'
+      btn.disabled = sel.disabled
+    }
+    function rebuild() {
+      list.innerHTML = ''
+      ;[...sel.options].forEach(o => {
+        const it = document.createElement('button')
+        it.type = 'button'; it.className = 'pps-item' + (o.value === sel.value ? ' sel' : '')
+        it.textContent = o.textContent
+        it.onclick = e => {
+          e.stopPropagation()
+          if (o.disabled) return
+          if (sel.value !== o.value) { sel.value = o.value; sel.dispatchEvent(new Event('change')) }
+          close(); sync()
+        }
+        list.appendChild(it)
+      })
+    }
+    function place() {
+      const r = btn.getBoundingClientRect()
+      list.style.left = Math.min(r.left, innerWidth - Math.max(r.width, 160) - 8) + 'px'
+      list.style.top = (r.bottom + 4) + 'px'
+      list.style.width = r.width + 'px'
+      const h = list.scrollHeight
+      if (innerHeight - r.bottom < h + 8 && r.top > h + 8) list.style.top = (r.top - h - 6) + 'px'
+    }
+    function openList() { rebuild(); list.classList.add('on'); place() }
+    function close() { list.classList.remove('on') }
+    btn.onclick = e => {
+      e.stopPropagation()
+      if (sel.disabled) return
+      list.classList.contains('on') ? close() : openList()
+    }
+    sel.addEventListener('change', sync)
+    sel.__ppsSync = sync
+    sync()
+  })
+}
+document.addEventListener('click', e => {
+  if (!e.target.closest('.pps-list') && !e.target.closest('.pps-btn'))
+    document.querySelectorAll('.pps-list.on').forEach(l => l.classList.remove('on'))
+})
+window.addEventListener('scroll', () => document.querySelectorAll('.pps-list.on').forEach(l => l.classList.remove('on')), true)
+window.addEventListener('resize', () => document.querySelectorAll('.pps-list.on').forEach(l => l.classList.remove('on')))
+// 动态填充选项 / JS 直接赋值后的兜底同步
+setInterval(() => document.querySelectorAll('select[data-pps]').forEach(s => s.__ppsSync && s.__ppsSync()), 400)
+new MutationObserver(() => ppsEnhance()).observe(document.body, { childList: true, subtree: true })
+ppsEnhance()
+
 </script>
 </body>
 </html>

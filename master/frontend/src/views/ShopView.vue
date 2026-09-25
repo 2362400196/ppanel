@@ -5,6 +5,7 @@ import { api, errText } from '../api/client'
 import { toastErr, toastOk } from '../components/ui/toast'
 import UIButton from '../components/ui/UIButton.vue'
 import UITag from '../components/ui/UITag.vue'
+import { startTask } from '../api/tasks'
 
 const router = useRouter()
 const buying = ref('')
@@ -27,6 +28,7 @@ const priceText = p => `¥${(p.price_cents / 100).toFixed(p.price_cents % 100 ? 
 async function buy(plan) {
   buying.value = plan.id
   try {
+    const tid = startTask()  // 开通实例全程终端日志
     const suffix = Math.random().toString(36).slice(2, 6)
     const expire = new Date(Date.now() + plan.days * 86400000).toISOString()
     const { data } = await api.post('/instances', {
@@ -36,8 +38,9 @@ async function buy(plan) {
       mem_limit: plan.mem,
       disk_quota: plan.disk,
       expire_at: expire,
+      traffic_gb: plan.traffic_gb || null,  // 月流量限额，0=不限
       node_id: plan.node_id || undefined,  // 商品绑定节点则在该节点开通
-    })
+    }, { headers: { 'X-Task-Id': tid } })
     toastOk(`已开通「${data.name}」，有效期 ${plan.days} 天`)
     router.push('/')
   } catch (e) {
@@ -71,6 +74,7 @@ async function buy(plan) {
           <div class="spec"><span class="k">CPU</span><span class="v">{{ p.cpu }} 核</span></div>
           <div class="spec"><span class="k">内存</span><span class="v">{{ p.mem }}MB</span></div>
           <div class="spec"><span class="k">磁盘</span><span class="v">{{ p.disk / 1024 }}GB</span></div>
+          <div class="spec"><span class="k">月流量</span><span class="v">{{ p.traffic_gb ? p.traffic_gb + 'GB' : '不限' }}</span></div>
           <div class="spec"><span class="k">到期</span><span class="v">{{ p.days }} 天</span></div>
         </div>
         <UIButton class="buy" :loading="buying === p.id" @click="buy(p)">立即开通</UIButton>

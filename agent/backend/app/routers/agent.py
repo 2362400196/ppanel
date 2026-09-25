@@ -82,6 +82,8 @@ def agent_create(body: InstanceCreate, db: Session = Depends(get_db)):
         mem_limit=body.mem_limit,
         disk_quota=body.disk_quota,
         status="creating",
+        expire_at=body.expire_at,
+        traffic_gb=body.traffic_gb,
     )
     db.add(inst)
     db.commit()
@@ -133,6 +135,8 @@ def agent_detail(instance_id: int, db: Session = Depends(get_db)):
 def agent_delete(instance_id: int, purge: int = 0, db: Session = Depends(get_db)):
     inst = _inst(instance_id, db)
     host_dir = inst.host_dir
+    from app.services import mysql_service as mysql_svc
+    mysql_svc.drop_instance_db(db, inst)  # 联动回收实例数据库（与面板删除路径一致）
     svc.remove_container(inst)
     db.delete(inst)
     db.commit()
