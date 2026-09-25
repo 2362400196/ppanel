@@ -1,5 +1,5 @@
 <script setup>
-import { computed } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from './stores/auth'
 import ToastHost from './components/ui/ToastHost.vue'
@@ -10,6 +10,13 @@ const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
 const bare = computed(() => route.meta.bare)
+
+// 右上角用户下拉：点外部/切页自动收起
+const menuOpen = ref(false)
+function onDocClick() { menuOpen.value = false }
+onMounted(() => document.addEventListener('click', onDocClick))
+onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
+watch(() => route.fullPath, () => { menuOpen.value = false })
 
 function logout() {
   auth.logout()
@@ -60,6 +67,10 @@ function logout() {
             <svg class="nav-icon" viewBox="0 0 24 24"><circle cx="18" cy="5" r="3" /><circle cx="6" cy="12" r="3" /><circle cx="18" cy="19" r="3" /><line x1="8.6" y1="10.5" x2="15.4" y2="6.5" /><line x1="8.6" y1="13.5" x2="15.4" y2="17.5" /></svg>
             <span>节点管理</span>
           </router-link>
+          <router-link to="/backup" class="nav-item" :class="{ active: route.name === 'backup' }">
+            <svg class="nav-icon" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3" /><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5" /><path d="M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6" /></svg>
+            <span>备份中心</span>
+          </router-link>
           <router-link to="/manage" class="nav-item" :class="{ active: route.name === 'manage' }">
             <svg class="nav-icon" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="7" rx="2" /><rect x="2" y="14" width="20" height="7" rx="2" /><line x1="6" y1="6.5" x2="6.01" y2="6.5" /><line x1="6" y1="17.5" x2="6.01" y2="17.5" /></svg>
             <span>实例管理</span>
@@ -78,27 +89,34 @@ function logout() {
           </router-link>
         </template>
       </nav>
-
-      <div class="side-foot" v-if="auth.user">
-        <div class="user-row">
-          <span class="avatar">{{ auth.user.username.slice(0, 1).toUpperCase() }}</span>
-          <div class="user-meta">
-            <span class="user-name">{{ auth.user.username }}</span>
-            <UITag :tone="auth.isAdmin ? 'warn' : 'primary'">
-              {{ auth.isAdmin ? '管理员' : '用户' }}
-            </UITag>
-          </div>
-        </div>
-        <button class="logout" @click="logout">退出登录</button>
-      </div>
     </aside>
 
     <main class="main">
-      <router-view v-slot="{ Component }">
-        <Transition name="fade-slide" mode="out-in">
-          <component :is="Component" />
-        </Transition>
-      </router-view>
+      <header class="topbar" v-if="auth.user" @click="menuOpen = false">
+        <div class="top-right" @click.stop>
+          <button class="user-chip" :class="{ open: menuOpen }" @click="menuOpen = !menuOpen">
+            <span class="avatar">{{ auth.user.username.slice(0, 1).toUpperCase() }}</span>
+            <span class="chip-name">{{ auth.user.username }}</span>
+            <UITag :tone="auth.isAdmin ? 'warn' : 'primary'">{{ auth.isAdmin ? '管理员' : '用户' }}</UITag>
+            <svg class="chev" :class="{ up: menuOpen }" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9" /></svg>
+          </button>
+          <Transition name="dd">
+            <div class="user-dd" v-if="menuOpen">
+              <button class="dd-item" @click="logout">
+                <svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" /><polyline points="16 17 21 12 16 7" /><line x1="21" y1="12" x2="9" y2="12" /></svg>
+                <span>退出登录</span>
+              </button>
+            </div>
+          </Transition>
+        </div>
+      </header>
+      <div class="main-body">
+        <router-view v-slot="{ Component }">
+          <Transition name="fade-slide" mode="out-in">
+            <component :is="Component" />
+          </Transition>
+        </router-view>
+      </div>
     </main>
   </div>
 </template>
@@ -138,31 +156,58 @@ function logout() {
   stroke-linecap: round; stroke-linejoin: round;
 }
 
-.side-foot { border-top: 1px solid rgba(255,255,255,.08); padding-top: 14px; }
-.user-row { display: flex; align-items: center; gap: 10px; padding: 0 8px 10px; }
-.avatar {
-  width: 32px; height: 32px; border-radius: 50%; flex-shrink: 0;
-  background: rgba(47,181,159,.2); color: var(--primary);
-  display: flex; align-items: center; justify-content: center; font-weight: 700;
-}
-.user-meta { display: flex; flex-direction: column; gap: 3px; }
-.user-name { color: #fff; font-size: 13px; font-weight: 600; }
-.user-meta :deep(.ui-tag) { height: 18px; font-size: 11px; padding: 0 7px; align-self: flex-start; }
-.logout {
-  width: 100%; height: 32px; border: none; border-radius: 8px; cursor: pointer;
-  background: transparent; color: var(--sidebar-text); font-size: 13px; font-family: inherit;
-  transition: all .15s ease;
-}
-.logout:hover { color: #fff; background: rgba(224,82,96,.18); }
+.main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+.main-body { flex: 1; overflow-y: auto; padding: 28px 32px; }
 
-.main { flex: 1; overflow-y: auto; padding: 28px 32px; }
+/* 顶栏：右上角用户区 */
+.avatar {
+  width: 24px; height: 24px; border-radius: 50%; flex-shrink: 0;
+  background: var(--primary-soft); color: var(--primary-strong);
+  display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 11px;
+}
+.topbar {
+  height: 50px; flex-shrink: 0; display: flex; align-items: center; justify-content: flex-end;
+  padding: 0 24px; border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--panel) 82%, transparent);
+  backdrop-filter: blur(10px); position: relative; z-index: 40;
+}
+.top-right { position: relative; }
+.user-chip {
+  display: flex; align-items: center; gap: 7px; height: 33px; padding: 0 10px;
+  border: 1px solid var(--line); border-radius: 999px; cursor: pointer;
+  background: var(--panel); font-family: inherit; transition: all .18s ease;
+  box-shadow: var(--shadow);
+}
+.user-chip:hover, .user-chip.open { background: var(--primary-soft-2); border-color: var(--primary); }
+.chip-name { color: var(--text); font-size: 12.5px; font-weight: 600; }
+.user-chip :deep(.ui-tag) { height: 16px; font-size: 10.5px; padding: 0 6px; }
+.chev {
+  width: 13px; height: 13px; fill: none; stroke: var(--text-dim); stroke-width: 2;
+  stroke-linecap: round; stroke-linejoin: round; transition: transform .2s ease;
+}
+.chev.up { transform: rotate(180deg); stroke: var(--primary-strong); }
+/* 下拉与胶囊等宽右对齐：紧凑单卡，只放退出登录 */
+.user-dd {
+  position: absolute; right: 0; top: calc(100% + 7px); width: max-content; min-width: 100%;
+  border: 1px solid var(--line); border-radius: 10px; padding: 5px;
+  background: var(--panel);
+  box-shadow: var(--shadow-lg);
+}
+.dd-item {
+  display: flex; align-items: center; gap: 8px; width: 100%; height: 30px; padding: 0 10px;
+  border: none; border-radius: 7px; cursor: pointer; background: transparent;
+  color: var(--text-2); font-size: 12.5px; font-family: inherit; transition: all .14s ease; white-space: nowrap;
+}
+.dd-item svg { width: 13.5px; height: 13.5px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.dd-item:hover { background: var(--danger-soft); color: var(--danger); }
+.dd-enter-active, .dd-leave-active { transition: all .16s ease; }
+.dd-enter-from, .dd-leave-to { opacity: 0; transform: translateY(-5px) scale(.98); }
 
 @media (max-width: 720px) {
   .layout { flex-direction: column; }
   .sidebar { width: 100%; flex-direction: row; align-items: center; padding: 10px 14px; }
   .nav { flex-direction: row; flex-wrap: wrap; }
-  .side-foot { border: none; padding: 0; }
-  .user-row { padding: 0; }
-  .main { padding: 18px 16px; }
+  .main-body { padding: 18px 16px; }
+  .topbar { height: 48px; padding: 0 14px; }
 }
 </style>

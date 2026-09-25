@@ -48,6 +48,8 @@ class Instance(Base):
     disk_quota: Mapped[int] = mapped_column(Integer, default=2048)    # MB
     note: Mapped[str] = mapped_column(String(255), default="")
     status: Mapped[str] = mapped_column(String(16), default="creating")
+    # 本次启动时间（被控容器 StartedAt 快照；status 非 running 时置空，前端计运行时长）
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     expire_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     traffic_gb: Mapped[float | None] = mapped_column(Float, nullable=True)  # 月流量限额 GB，空=不限
@@ -76,6 +78,34 @@ class Metric(Base):
     mem_limit_mb: Mapped[float] = mapped_column(Float, default=0.0)
     net_rx_mb: Mapped[float] = mapped_column(Float, default=0.0)  # 累计接收
     net_tx_mb: Mapped[float] = mapped_column(Float, default=0.0)  # 累计发送
+
+
+class NodeHeartbeat(Base):
+    """节点心跳快照：主控每 60s ping 一次被控，记录可达性/延迟/资源水位。
+
+    供稳定性评分使用（在线率、资源水位）；只滚动保留 14 天。"""
+    __tablename__ = "node_heartbeats"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    node_id: Mapped[int] = mapped_column(Integer, index=True)
+    ts: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    ok: Mapped[bool] = mapped_column(Boolean, default=False)      # agent 可达
+    latency_ms: Mapped[float] = mapped_column(Float, default=0.0)
+    mem_percent: Mapped[float | None] = mapped_column(Float, nullable=True)  # 节点内存水位（可达时采样）
+    disk_percent: Mapped[float | None] = mapped_column(Float, nullable=True)  # 节点磁盘水位
+    detail: Mapped[str] = mapped_column(String(255), default="")  # 不可达原因摘要
+
+
+class InstanceEvent(Base):
+    """实例生命周期事件：崩溃 / 人为停止等，供稳定性评分区分意外与计划内。"""
+    __tablename__ = "instance_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    instance_uuid: Mapped[str] = mapped_column(String(36), index=True)
+    node_id: Mapped[int] = mapped_column(Integer, index=True)
+    ts: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    event: Mapped[str] = mapped_column(String(24))  # crash / stopped_planned / started
+    detail: Mapped[str] = mapped_column(String(255), default="")
 
 
 class Domain(Base):

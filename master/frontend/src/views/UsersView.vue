@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, ref } from 'vue'
+import { onMounted, ref, watch } from 'vue'
 import { api, errText } from '../api/client'
 import { fmtTime } from '../utils/format'
 import { toastErr, toastOk } from '../components/ui/toast'
@@ -11,6 +11,10 @@ import UIInput from '../components/ui/UIInput.vue'
 import UISelect from '../components/ui/UISelect.vue'
 
 const users = ref([])
+const total = ref(0)
+const page = ref(1)
+const pageSize = ref(20)
+const keyword = ref('')
 const userCols = [
   { key: 'id', label: 'ID', width: '60px' },
   { key: 'username', label: '用户名' },
@@ -23,12 +27,25 @@ const creatingUser = ref(false)
 
 async function loadUsers() {
   try {
-    const { data } = await api.get('/admin/users')
-    users.value = data
+    const { data } = await api.get('/admin/users', {
+      params: { page: page.value, page_size: pageSize.value, keyword: keyword.value.trim() }
+    })
+    users.value = data.items || []
+    total.value = data.total || 0
   } catch (e) {
     toastErr(errText(e))
   }
 }
+
+// 用户名搜索（后端下推），300ms 防抖
+let kwTimer
+watch(keyword, () => {
+  clearTimeout(kwTimer)
+  kwTimer = setTimeout(() => {
+    page.value = 1
+    loadUsers()
+  }, 300)
+})
 
 async function doCreateUser() {
   creatingUser.value = true
@@ -62,11 +79,16 @@ onMounted(loadUsers)
     </div>
 
     <div class="sec-head">
-      <span class="text-dim">共 {{ users.length }} 个用户</span>
-      <UIButton @click="createUserOpen = true">新建用户</UIButton>
+      <span class="text-dim">共 {{ total }} 个用户</span>
+      <div class="sec-right">
+        <UIInput v-model="keyword" style="width:220px" placeholder="搜索用户名" />
+        <UIButton @click="createUserOpen = true">新建用户</UIButton>
+      </div>
     </div>
 
-    <UITable :columns="userCols" :rows="users">
+    <UITable :columns="userCols" :rows="users"
+             :total="total" v-model:page="page" v-model:pageSize="pageSize"
+             @change="loadUsers">
       <template #col-role="{ row }">
         <UITag :tone="row.role === 'admin' ? 'warn' : 'primary'">{{ row.role === 'admin' ? '管理员' : '用户' }}</UITag>
       </template>
@@ -99,6 +121,7 @@ onMounted(loadUsers)
 
 <style scoped>
 .sec-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; font-size: 13px; }
+.sec-right { display: flex; align-items: center; gap: 10px; }
 .form { display: flex; flex-direction: column; gap: 14px; }
 .field { display: flex; flex-direction: column; gap: 6px; }
 .field span { font-size: 12px; font-weight: 600; color: var(--text-2); }

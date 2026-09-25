@@ -6,6 +6,7 @@ import UIButton from './ui/UIButton.vue'
 import UIInput from './ui/UIInput.vue'
 import UIModal from './ui/UIModal.vue'
 import UISelect from './ui/UISelect.vue'
+import UIPager from './ui/UIPager.vue'
 import UITable from './ui/UITable.vue'
 import UITag from './ui/UITag.vue'
 import StatusDot from './ui/StatusDot.vue'
@@ -28,6 +29,16 @@ const np = () => ({ node: String(props.node?.id || '') })
 const info = ref(null)
 const stats = ref(null)
 const RING_C = 2 * Math.PI * 52
+
+// ---------- 稳定性评分 ----------
+const stab = ref(null)
+const stabWin = ref(7)
+const stabTone = g => ({ excellent: 'ok', good: 'ok', fair: 'warn', poor: 'warn', observing: 'dim' }[g] || 'dim')
+async function loadStability() {
+  if (!props.node?.id) return
+  try { stab.value = (await api.get(`/admin/nodes/${props.node.id}/stability`, { params: { window: stabWin.value } })).data }
+  catch (e) { stab.value = null }
+}
 
 function fmtUptime(sec) {
   if (!sec) return '-'
@@ -332,6 +343,10 @@ function fmtTime(ts) {
   const p = x => String(x).padStart(2, '0')
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
 }
+function fmtIso(iso) {
+  if (!iso) return '-'
+  return fmtTime(new Date(iso).getTime() / 1000)
+}
 function joinPath(dir, name) { return dir === '/' ? `/${name}` : `${dir}/${name}` }
 function parentOf(p) {
   if (!p || p === '/') return '/'
@@ -359,26 +374,7 @@ async function loadFiles(path) {
 }
 function go(p) { loadFiles(p) }
 
-// ---------- 选择（单击选中 / Ctrl 多选 / Shift 范围选） ----------
-function rowClick(name, ev) {
-  if (ev.shiftKey && anchorName.value && anchorName.value !== name) {
-    const names = entries.value.map(f => f.name)
-    const a = names.indexOf(anchorName.value), b = names.indexOf(name)
-    if (a > -1 && b > -1) {
-      const [s, t] = a < b ? [a, b] : [b, a]
-      selection.clear()
-      names.slice(s, t + 1).forEach(n => selection.add(n))
-      return
-    }
-  }
-  if (ev.ctrlKey || ev.metaKey) {
-    selection.has(name) ? selection.delete(name) : selection.add(name)
-  } else {
-    selection.clear()
-    selection.add(name)
-  }
-  anchorName.value = name
-}
+// ---------- 选择（仅点击勾选框选中；行点击不选中，双击打开，右键操作当前行） ----------
 function toggleRow(name) {
   selection.has(name) ? selection.delete(name) : selection.add(name)
   anchorName.value = name
@@ -411,9 +407,8 @@ function closeCtx() { ctxOpen.value = false }
 function rowMenu(ev, it) {
   ev.preventDefault()
   ev.stopPropagation()
-  if (!selection.has(it.name)) { selection.clear(); selection.add(it.name) }
-  anchorName.value = it.name
-  const names = [...selection]
+  // 右键未选中的行：只对当前行操作，不改勾选状态；已勾选则按整批操作
+  const names = selection.has(it.name) ? [...selection] : [it.name]
   const multi = names.length > 1
   const items = []
   if (it.is_dir) {
@@ -833,6 +828,7 @@ watch(() => props.open, v => {
   view.value = 'overview'
   ensureIconfont()
   syncPoll()
+  loadStability()
 })
 watch(view, v => {
   if (v === 'containers') loadContainers()
@@ -842,7 +838,7 @@ watch(view, v => {
   else if (v === 'firewall') loadFirewall()
   else if (v === 'sec') loadSec()
   else if (v === 'mysql') loadMysql()
-  else if (v === 'backup') { loadBackups(); loadBkDbs(); if (!containers.value.length) loadContainers(); loadMysql() }
+  else if (v === 'backup') { bkPage.value = 1; loadBackups(); loadBkDbs(); loadBjJobs(); if (!containers.value.length) loadContainers(); loadMysql() }
   syncPoll()
 })
 
@@ -918,6 +914,9 @@ async function showRootPwd(v) {
 // ---------- 备份（容器导出 / 实例数据库导出） ----------
 const backups = ref([])            // [{ file, kind, size, created_at }]
 const backupsLoading = ref(false)
+const bkTotal = ref(0)
+const bkPage = ref(1)
+const bkPageSize = ref(20)
 const bkDbs = ref([])              // [{ version, db_name, running }]
 const bkContainer = ref('')        // 选中要备份的容器 id
 const bkDb = ref('')               // 选中 "version|db_name"
@@ -951,8 +950,16 @@ const bkVerOpts = computed(() => mysqlRows.value
 async function loadBackups() {
   backupsLoading.value = true
   try {
-    const { data } = await api.get('/host/backups', { params: np() })
+    const { data } = await api.get('/host/backups', {
+      params: { ...np(), page: bkPage.value, page_size: bkPageSize.value }
+    })
     backups.value = data.backups || []
+    bkTotal.value = data.total || 0
+    // 删除后当前页空了 → 回退到最后一页
+    if (!backups.value.length && bkPage.value > 1 && bkTotal.value > 0) {
+      bkPage.value = Math.ceil(bkTotal.value / bkPageSize.value)
+      return loadBackups()
+    }
   } catch (e) {
     const s = e?.response?.status
     if (s !== 404) toastErr(errText(e))
@@ -1029,6 +1036,126 @@ async function loadTables() {
   } catch (e) {
     bkTableOpts.value = []
   } finally { bkTblLoading.value = false }
+}
+
+// ---------- 定时备份任务（管理员 cron：容器 / 目录 / 数据库整库或表级） ----------
+const bjJobs = ref([])
+const bjLoading = ref(false)
+const bjOpen = ref(false)
+const bjSchedule = ref('0 3 * * *')
+const bjKind = ref('db_full')
+const bjContainer = ref('')
+const bjDirPath = ref('/app')
+const bjDb = ref('')               // "version|db_name"
+const bjTable = ref('')            // 表级：单选表（空 = 整库）
+const bjTableOpts = ref([])
+const bjKeep = ref(5)
+const bjBusy = ref(false)
+const bjMeta = ref({ containers: [], mysql: [] })
+
+const BJ_KIND_LABEL = { container: '容器', dir: '目录', db_full: '数据库整库', db_table: '数据库表级' }
+const BJ_PRESETS = [
+  { value: '0 3 * * *', label: '每天 03:00' },
+  { value: '0 4 * * 1', label: '每周一 04:00' },
+  { value: '0 */6 * * *', label: '每 6 小时' },
+  { value: '30 2 1 * *', label: '每月 1 日 02:30' },
+]
+const bjKindOpts = Object.entries(BJ_KIND_LABEL).map(([value, label]) => ({ value, label }))
+const bjContainerOpts = computed(() => (bjMeta.value.containers || [])
+  .map(c => ({ value: c.name, label: `${c.name}（${c.image}${c.status === 'running' ? '' : '，已停止'}）` })))
+const bjDbOpts = computed(() => (bjMeta.value.mysql || []).filter(m => m.running).flatMap(m =>
+  m.dbs.map(d => ({ value: `${m.version}|${d}`, label: `${d}（MySQL ${m.version}）` }))))
+const canSaveBj = computed(() => {
+  if (!bjSchedule.value.trim()) return false
+  if (bjKind.value === 'container' || bjKind.value === 'dir') return !!bjContainer.value
+  return !!bjDb.value
+})
+function bjSchedLabel(s) { return (BJ_PRESETS.find(p => p.value === s) || {}).label || s }
+function bjTargetLabel(j) {
+  if (j.kind === 'container' || j.kind === 'dir')
+    return `${j.target}:${j.dir_path || '/app'}`
+  return j.kind === 'db_table' && j.table_name ? `${j.target.split(':')[1]}.${j.table_name}` : j.target.replace(':', ' / ')
+}
+function fmtISO(s) {
+  if (!s) return ''
+  const d = new Date(s.endsWith('Z') ? s : s + 'Z')  // 被控存 UTC
+  const p = x => String(x).padStart(2, '0')
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
+
+async function loadBjJobs() {
+  bjLoading.value = true
+  try {
+    const [jobsR, metaR] = await Promise.all([
+      api.get('/host/backup-jobs', { params: np() }),
+      api.get('/host/backup-jobs/meta', { params: np() }).catch(() => null),
+    ])
+    bjJobs.value = jobsR.data.jobs || []
+    if (metaR) bjMeta.value = metaR.data
+  } catch (e) {
+    const s = e?.response?.status
+    if (s !== 404) toastErr(errText(e))
+    bjJobs.value = []
+  } finally { bjLoading.value = false }
+}
+
+watch(bjDb, async v => {
+  bjTable.value = ''
+  bjTableOpts.value = []
+  if (!v) return
+  const [version, db_name] = v.split('|')
+  try {
+    const { data } = await api.get('/host/backups/tables', { params: { ...np(), version, db_name } })
+    bjTableOpts.value = data.tables || []
+  } catch { bjTableOpts.value = [] }
+})
+
+async function saveBjJob() {
+  bjBusy.value = true
+  try {
+    const payload = { schedule: bjSchedule.value.trim(), kind: bjKind.value, keep: bjKeep.value || 5 }
+    if (bjKind.value === 'container' || bjKind.value === 'dir') {
+      payload.target = bjContainer.value
+      payload.dir_path = bjDirPath.value.trim() || '/app'
+    } else {
+      const [version, db_name] = bjDb.value.split('|')
+      payload.target = `${version}:${db_name}`
+      payload.table_name = bjKind.value === 'db_table' ? bjTable.value : ''
+    }
+    const { data } = await api.post('/host/backup-jobs', payload, { params: np() })
+    toastOk(`定时任务已创建（${BJ_KIND_LABEL[data.kind]}），首份备份执行中`)
+    bjOpen.value = false
+    loadBjJobs()
+    loadBackups()
+  } catch (e) { toastErr(errText(e)) }
+  finally { bjBusy.value = false }
+}
+
+async function toggleBjJob(j) {
+  try {
+    await api.patch(`/host/backup-jobs/${j.id}`, { enabled: !j.enabled }, { params: np() })
+    j.enabled = !j.enabled
+    toastOk(j.enabled ? '任务已启用' : '任务已暂停')
+  } catch (e) { toastErr(errText(e)) }
+}
+
+async function runBjJob(j) {
+  try {
+    const tid = startTask(props.node?.id)
+    const { data } = await api.post(`/host/backup-jobs/${j.id}/run`, {},
+      { params: np(), timeout: 600000, headers: { 'X-Task-Id': tid } })
+    toastOk(data.detail || '执行完成')
+    loadBjJobs()
+    loadBackups()
+  } catch (e) { toastErr(errText(e)); loadBjJobs() }
+}
+
+async function delBjJob(j) {
+  try {
+    await api.delete(`/host/backup-jobs/${j.id}`, { params: np() })
+    toastOk('定时任务已删除')
+    loadBjJobs()
+  } catch (e) { toastErr(errText(e)) }
 }
 
 function toggleTable(t) {
@@ -1317,6 +1444,42 @@ onUnmounted(() => {
             </div>
           </div>
           <p class="hint-text">资源数据每 5 秒自动刷新。</p>
+
+          <!-- 稳定性评分 -->
+          <div class="stab-card">
+            <div class="bar">
+              <span class="hint-text">稳定性评分</span>
+              <div class="win-chips">
+                <button v-for="w in [1, 7, 30]" :key="w" class="win-chip"
+                        :class="{ active: stabWin === w }" @click="stabWin = w; loadStability()">
+                  {{ w === 1 ? '24小时' : w + '天' }}
+                </button>
+              </div>
+            </div>
+            <template v-if="stab">
+              <div class="stab-head">
+                <span class="stab-score mono" :class="'st-' + stab.grade">{{ stab.score != null ? stab.score : '--' }}</span>
+                <div class="stab-meta">
+                  <UITag :tone="stabTone(stab.grade)">{{ stab.grade_label }}</UITag>
+                  <span class="dim">近 {{ stab.window_days }} 天 · {{ stab.instances }} 个实例</span>
+                </div>
+                <div class="stab-parts">
+                  <div class="sp"><i>崩溃</i><b class="mono">{{ stab.parts.crash ?? '-' }}</b></div>
+                  <div class="sp"><i>在线</i><b class="mono">{{ stab.parts.online ?? '-' }}</b></div>
+                  <div class="sp"><i>资源</i><b class="mono">{{ stab.parts.resource ?? '-' }}</b></div>
+                  <div class="sp"><i>服务</i><b class="mono">{{ stab.parts.service ?? '-' }}</b></div>
+                </div>
+              </div>
+              <div class="stab-facts mono dim">
+                <span>崩溃 {{ stab.crashes }} 次</span>
+                <span>在线率 {{ stab.online_rate != null ? stab.online_rate + '%' : '--' }}</span>
+                <span>内存峰值 {{ stab.mem_peak != null ? stab.mem_peak + '%' : '--' }}</span>
+                <span>磁盘峰值 {{ stab.disk_peak != null ? stab.disk_peak + '%' : '--' }}</span>
+                <span>最近崩溃 {{ stab.last_crash_at ? fmtIso(stab.last_crash_at) : '无' }}</span>
+              </div>
+            </template>
+            <p v-else class="hint-text">评分数据加载中…</p>
+          </div>
         </div>
 
         <!-- 容器 -->
@@ -1424,7 +1587,6 @@ onUnmounted(() => {
               <tbody>
                 <tr v-for="it in entries" :key="it.name" :data-kind="it.is_dir ? 'dir' : 'file'"
                     :class="{ selected: selection.has(it.name) }"
-                    @click="rowClick(it.name, $event)"
                     @dblclick="it.is_dir ? go(joinPath(curPath, it.name)) : (isImage(it.name) ? previewImg(it.name) : (isZip(it.name) ? openUnzip(it.name) : openFile(joinPath(curPath, it.name))))"
                     @contextmenu="rowMenu($event, it)">
                   <td>
@@ -1634,6 +1796,74 @@ onUnmounted(() => {
               数据库备份 = mysqldump（sql.gz）。文件保存在被控 /opt/ppanel/backups/。</p>
           </div>
 
+          <!-- 定时备份任务 -->
+          <div class="set-card" style="margin-top:14px">
+            <div class="bar">
+              <h3 class="set-title" style="margin:0">定时备份</h3>
+              <span class="sp" />
+              <UIButton type="ghost" size="sm" :loading="bjLoading" @click="loadBjJobs">刷新</UIButton>
+              <UIButton size="sm" @click="bjOpen = !bjOpen">{{ bjOpen ? '收起' : '新建任务' }}</UIButton>
+            </div>
+            <div v-if="bjOpen" style="margin-top:10px">
+              <div class="bk-line">
+                <span class="bk-label">周期</span>
+                <UIInput v-model="bjSchedule" style="width:190px" class="mono"
+                         placeholder="cron：分 时 日 月 周" />
+                <span v-for="p in BJ_PRESETS" :key="p.value" class="tbl-chip"
+                      :class="{ on: bjSchedule === p.value }" @click="bjSchedule = p.value">{{ p.label }}</span>
+              </div>
+              <div class="bk-line">
+                <span class="bk-label">类型</span>
+                <UISelect v-model="bjKind" style="width:170px" :options="bjKindOpts" />
+                <UISelect v-if="bjKind === 'container' || bjKind === 'dir'"
+                          v-model="bjContainer" style="width:250px"
+                          :options="bjContainerOpts" placeholder="选择容器" />
+                <UISelect v-else v-model="bjDb" style="width:250px"
+                          :options="bjDbOpts" placeholder="选择数据库" />
+                <UIInput v-if="bjKind === 'dir'" v-model="bjDirPath" style="width:170px" class="mono"
+                         placeholder="容器内目录，默认 /app" />
+              </div>
+              <div v-if="bjKind === 'db_table' && bjDb" class="bk-line" style="padding-left:70px">
+                <template v-if="bjTableOpts.length">
+                  <span class="hint-text" style="font-size:12px">选择单表（不选 = 整库）：</span>
+                  <span v-for="t in bjTableOpts" :key="t" class="tbl-chip"
+                        :class="{ on: bjTable === t }" @click="bjTable = bjTable === t ? '' : t">{{ t }}</span>
+                </template>
+                <span v-else class="hint-text" style="font-size:12px">该库暂无数据表，可改用整库备份</span>
+              </div>
+              <div class="bk-line">
+                <span class="bk-label">保留</span>
+                <UIInput v-model.number="bjKeep" style="width:80px" placeholder="5" />
+                <span class="hint-text" style="font-size:12px">份（超出自动删最旧）</span>
+                <UIButton size="sm" :loading="bjBusy" :disabled="!canSaveBj" @click="saveBjJob">创建并跑首份</UIButton>
+              </div>
+              <p class="form-tip">按周期自动备份，到点在被控后台执行；整库与表级任务互不干扰、各算各的保留份数。</p>
+            </div>
+            <table class="ftable" style="margin-top:12px">
+              <thead><tr><th>周期</th><th>类型</th><th>目标</th><th>最近执行</th><th /></tr></thead>
+              <tbody>
+                <tr v-for="j in bjJobs" :key="j.id">
+                  <td class="mono">{{ bjSchedLabel(j.schedule) }}</td>
+                  <td><UITag tone="primary">{{ BJ_KIND_LABEL[j.kind] || j.kind }}</UITag></td>
+                  <td class="mono">{{ bjTargetLabel(j) }}</td>
+                  <td>
+                    <UITag :tone="j.last_status === 'ok' ? 'ok' : j.last_status === 'fail' ? 'warn' : j.last_status === 'running' ? 'primary' : 'dim'">
+                      {{ j.last_status === 'ok' ? '成功' : j.last_status === 'fail' ? '失败' : j.last_status === 'running' ? '执行中' : '未执行' }}
+                    </UITag>
+                    <span class="dim" style="font-size:12px;margin-left:6px">{{ fmtISO(j.last_run) }}</span>
+                    <div v-if="j.last_output" class="hint-text" style="font-size:12px">{{ j.last_output.slice(0, 70) }}</div>
+                  </td>
+                  <td class="ops">
+                    <UIButton type="text" @click="toggleBjJob(j)">{{ j.enabled ? '暂停' : '启用' }}</UIButton>
+                    <UIButton type="text" @click="runBjJob(j)">立即执行</UIButton>
+                    <UIButton type="text" class="danger" @click="delBjJob(j)">删除</UIButton>
+                  </td>
+                </tr>
+                <tr v-if="!bjJobs.length"><td colspan="5" class="empty">暂无定时任务，点击「新建任务」创建</td></tr>
+              </tbody>
+            </table>
+          </div>
+
           <!-- 恢复面板 -->
           <div v-if="bkRestore" class="set-card" style="margin-top:14px;border-color:var(--danger, #e5484d)">
             <template v-if="bkRestore.kind === 'container'">
@@ -1674,7 +1904,7 @@ onUnmounted(() => {
           </div>
 
           <div class="bar" style="margin-top:14px">
-            <span class="hint-text">共 {{ backups.length }} 个备份文件</span>
+            <span class="hint-text">共 {{ bkTotal }} 个备份文件</span>
             <span class="sp" />
             <UIButton type="ghost" size="sm" :loading="backupsLoading" @click="loadBackups">刷新</UIButton>
           </div>
@@ -1699,6 +1929,9 @@ onUnmounted(() => {
               <tr v-if="!backups.length"><td colspan="5" class="empty">暂无备份，可从上方创建</td></tr>
             </tbody>
           </table>
+          <UIPager v-if="bkTotal > 0" class="bk-pager"
+                   :total="bkTotal" v-model:page="bkPage" v-model:pageSize="bkPageSize"
+                   @change="loadBackups" />
         </div>
 
         <!-- 设置：磁盘占用 / 一键清理 / 镜像加速 -->
@@ -1998,6 +2231,26 @@ onUnmounted(() => {
 .ov-cell .k { font-size: 12px; color: var(--text-dim); }
 .ov-cell .v { font-size: 14px; color: var(--text-1); }
 
+/* 稳定性评分卡 */
+.stab-card { margin-top: 18px; border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; }
+.stab-card .bar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.win-chips { display: flex; gap: 6px; }
+.win-chip { border: 1px solid var(--line); background: transparent; color: var(--text-dim); border-radius: 999px; padding: 3px 12px; font-size: 12px; cursor: pointer; transition: all .2s; }
+.win-chip.active { border-color: var(--brand, #d4b878); color: var(--text-1); background: rgba(212, 184, 120, .12); }
+.stab-head { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+.stab-score { font-size: 34px; font-weight: 700; line-height: 1; }
+.st-excellent, .st-good { color: #30a46c; }
+.st-fair { color: #d9a03f; }
+.st-poor { color: #e5484d; }
+.st-observing { color: var(--text-dim); }
+.stab-meta { display: flex; flex-direction: column; gap: 4px; }
+.stab-meta .dim { font-size: 12px; color: var(--text-dim); }
+.stab-parts { display: flex; gap: 18px; margin-left: auto; }
+.sp { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+.sp i { font-style: normal; font-size: 11px; color: var(--text-dim); }
+.sp b { font-size: 15px; font-weight: 600; color: var(--text-1); }
+.stab-facts { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 12px; padding-top: 10px; border-top: 1px dashed var(--line); font-size: 12px; }
+
 /* 仪表盘圆环 */
 .dash-row { display: flex; flex-wrap: wrap; gap: 18px; margin-bottom: 18px; }
 .gauge-card { display: flex; flex-direction: column; align-items: center; gap: 8px; }
@@ -2020,6 +2273,7 @@ table.ftable { width: 100%; border-collapse: collapse; font-size: 13px; }
 .ftable tbody tr:hover td { background: color-mix(in srgb, var(--primary) 4%, transparent); }
 .ftable tbody tr.selected td { background: color-mix(in srgb, var(--primary) 10%, transparent); }
 .empty { text-align: center; color: var(--text-dim); padding: 26px 0 !important; }
+.bk-pager { justify-content: flex-end; margin-top: 10px; }
 .ops { white-space: nowrap; text-align: right; }
 .dim { color: var(--text-dim); }
 .link { border: none; background: none; font-family: inherit; font-size: 12.5px; color: var(--primary); cursor: pointer; padding: 0 4px; }

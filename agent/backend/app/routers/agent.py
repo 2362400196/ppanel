@@ -115,19 +115,24 @@ def _rollback(db: Session, inst: Instance) -> None:
 @router.get("/instances")
 def agent_list(db: Session = Depends(get_db)):
     instances = db.query(Instance).order_by(Instance.id.desc()).all()
+    out = []
     for inst in instances:
-        svc.sync_status(inst)
-    db.commit()
-    return [InstanceOut.model_validate(i).model_dump() for i in instances]
+        started_at = svc.sync_status(inst)
+        db.commit()
+        data = InstanceOut.model_validate(inst).model_dump()
+        data["started_at"] = started_at  # 容器本次启动时间（running 时有值）
+        out.append(data)
+    return out
 
 
 @router.get("/instances/{instance_id}")
 def agent_detail(instance_id: int, db: Session = Depends(get_db)):
     inst = _inst(instance_id, db)
-    svc.sync_status(inst)
+    started_at = svc.sync_status(inst)
     db.commit()
     data = InstanceOut.model_validate(inst).model_dump()
     data["host_dir"] = inst.host_dir
+    data["started_at"] = started_at
     return data
 
 

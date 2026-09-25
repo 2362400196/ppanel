@@ -1,5 +1,6 @@
 import asyncio
 import os
+import threading
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
@@ -12,10 +13,12 @@ from app.config import settings
 from app.database import Base, SessionLocal, engine
 from app.domain_proxy import try_domain_proxy
 from app.metrics_sampler import metrics_loop
-from app.models import Domain, Instance, Metric, Node, OpLog, Plan, User  # noqa: F401 确保模型注册
+from app.models import (Domain, Instance, InstanceEvent, Metric, Node,
+                        NodeHeartbeat, OpLog, Plan, User)  # noqa: F401 确保模型注册
 from app.routers import (auth_router, docker_proxy, host_proxy, instances,
                          nodes_admin, open_api, plans_admin, users_admin,
                          ws_proxy, tasks_router)
+from app.stability import heartbeat_loop
 
 
 @asynccontextmanager
@@ -25,6 +28,8 @@ async def lifespan(_app: FastAPI):
     _seed_admin()
     _seed_plans()
     sampler = asyncio.create_task(metrics_loop())
+    threading.Thread(target=heartbeat_loop, daemon=True,
+                     name="node-heartbeat").start()
     yield
     sampler.cancel()
     with suppress(asyncio.CancelledError):
@@ -48,6 +53,9 @@ def _migrate() -> None:
         icols = {r[1] for r in conn.execute(text("PRAGMA table_info(instances)"))}
         if "traffic_gb" not in icols:
             conn.execute(text("ALTER TABLE instances ADD COLUMN traffic_gb REAL"))
+            conn.commit()
+        if "started_at" not in icols:
+            conn.execute(text("ALTER TABLE instances ADD COLUMN started_at DATETIME"))
             conn.commit()
 
 

@@ -17,13 +17,11 @@ const root = ref(null)
 const listEl = ref(null)
 const style = ref({})
 
-async function toggle() {
-  if (props.disabled) return
-  open.value = !open.value
-  if (!open.value) return
-  await nextTick()
-  const r = root.value.getBoundingClientRect()
-  const h = Math.min(listEl.value.scrollHeight, 240)
+function reposition() {
+  const el = root.value, list = listEl.value
+  if (!el || !list) return
+  const r = el.getBoundingClientRect()
+  const h = Math.min(list.scrollHeight, 240)
   const below = window.innerHeight - r.bottom
   const up = below < h + 8 && r.top > h + 8
   style.value = {
@@ -31,6 +29,14 @@ async function toggle() {
     top: (up ? r.top - h - 6 : r.bottom + 4) + 'px',
     width: r.width + 'px'
   }
+}
+
+async function toggle() {
+  if (props.disabled) return
+  open.value = !open.value
+  if (!open.value) return
+  await nextTick()
+  reposition()
 }
 
 function pick(o) {
@@ -46,7 +52,14 @@ function onDoc(e) {
   if (listEl.value && listEl.value.contains(t)) return
   open.value = false
 }
-function onScroll() { if (open.value) open.value = false }
+function onScroll(e) {
+  if (!open.value) return
+  // 下拉列表自身的滚动（滚轮滑列表）不关闭——否则列表永远滚不动、选不到
+  if (e && e.target && listEl.value &&
+      (e.target === listEl.value || listEl.value.contains(e.target))) return
+  // 页面/弹窗滚动：浮层是 fixed 定位，跟随重新定位而非关闭，避免选择被打断
+  reposition()
+}
 
 onMounted(() => {
   document.addEventListener('mousedown', onDoc)

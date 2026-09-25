@@ -11,9 +11,18 @@ router = APIRouter(tags=["admin"], dependencies=[Depends(require_admin)])
 
 
 @router.get("/admin/users")
-def list_users(db: Session = Depends(get_db)):
-    users = db.query(User).order_by(User.id).all()
-    return [UserOut.model_validate(u).model_dump() for u in users]
+def list_users(page: int = 0, page_size: int = 20, keyword: str = "",
+               db: Session = Depends(get_db)):
+    """用户列表。带 page 参数返回 {items, total}（分页视图）；否则全量数组（旧调用兼容）。"""
+    q = db.query(User).order_by(User.id)
+    k = (keyword or "").strip()
+    if k:
+        q = q.filter(User.username.ilike(f"%{k}%"))
+    if page >= 1:
+        total = q.count()
+        users = q.offset((page - 1) * page_size).limit(page_size).all()
+        return {"items": [UserOut.model_validate(u).model_dump() for u in users], "total": total}
+    return [UserOut.model_validate(u).model_dump() for u in q.all()]
 
 
 @router.post("/admin/users")

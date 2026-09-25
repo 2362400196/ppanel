@@ -7,6 +7,7 @@
 """
 import asyncio
 import os
+import threading
 import time
 from contextlib import asynccontextmanager
 
@@ -17,14 +18,17 @@ from app.agent_auth import require_node
 from app.auth import hash_password
 from app.config import settings
 from app.database import Base, SessionLocal, engine
-from app.models import Instance, User  # noqa: F401
-from app.routers import agent, agent_ws, backup, host_files, host_tasks, open_api, panel, security
+from app.models import Instance, InstanceCron, InstanceSite, User  # noqa: F401
+from app.routers import (agent, agent_ws, backup, host_files, host_tasks,
+                         open_api, panel, panel_ops, security)
 from app.services import instance_service as svc
+from app.services import cron_service
 
 
 async def _metrics_loop():
     """每 60s 采样运行中实例的用量，供独立面板画历史曲线（被控自持数据）；
-    顺带检查实例状态变化与到期，触发商城 webhook 通知。"""
+    顺带检查实例状态变化与到期，触发商城 webhook 通知；
+    并对账清理孤儿容器（docker 有、登记无）。"""
     while True:
         await asyncio.sleep(60)
         try:
@@ -33,6 +37,10 @@ async def _metrics_loop():
             pass
         try:
             await asyncio.to_thread(_watch_once)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            await asyncio.to_thread(svc.reconcile_orphans)
         except Exception:  # noqa: BLE001
             pass
 
@@ -111,7 +119,8 @@ async def lifespan(_app):
                 "ALTER TABLE instances ADD COLUMN traffic_gb REAL",
                 "ALTER TABLE instances ADD COLUMN traffic_used_mb REAL DEFAULT 0",
                 "ALTER TABLE instances ADD COLUMN traffic_last_mb REAL DEFAULT 0",
-                "ALTER TABLE instances ADD COLUMN traffic_month VARCHAR(7) DEFAULT ''"):
+                "ALTER TABLE instances ADD COLUMN traffic_month VARCHAR(7) DEFAULT ''",
+                "ALTER TABLE host_backup_jobs ADD COLUMN dest VARCHAR(8) DEFAULT 'local'"):
             try:
                 conn.exec_driver_sql(ddl)
             except Exception:  # noqa: BLE001 列已存在
@@ -135,6 +144,8 @@ async def lifespan(_app):
     else:
         print("[agent] 开通接口未启用（未配置 OPEN_API_KEY）")
     task = asyncio.create_task(_metrics_loop())
+    threading.Thread(target=cron_service.cron_loop, daemon=True,
+                     name="ppanel-cron").start()
     yield
     task.cancel()
 
@@ -147,6 +158,9 @@ app.include_router(host_files.router, prefix="/agent")  # 宿主机文件管理�
 app.include_router(security.router, prefix="/agent")  # 宿主机安全防护：X-Node-Token 或 X-API-Key
 app.include_router(backup.router, prefix="/agent")  # 节点备份：容器导出 / 数据库导出，X-Node-Token 或 X-API-Key
 app.include_router(host_tasks.router, prefix="/agent")  # 任务日志增量拉取（配合 X-Task-Id）
+app.include_router(panel_ops.router)  # 面板扩展：自助备份/定时任务/站点防护/phpMyAdmin
+# 注意：panel_ops 必须先于 panel 挂载——panel 里有 POST /panel/instance/{action} 通配路由，
+# 后注册的多段路由会被单段通配截胡（如 POST /panel/instance/crons）
 app.include_router(panel.router)  # 独立单容器面板：自带令牌鉴权
 app.include_router(open_api.router)  # 开放开通面：X-API-Key，供第三方商城直连
 

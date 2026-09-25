@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
 from fastapi.responses import Response
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app import tasks
@@ -42,6 +43,7 @@ def _out(inst: Instance, node: Node | None, extra: dict | None = None) -> dict:
         "disk_quota": inst.disk_quota,
         "note": inst.note,
         "status": inst.status,
+        "started_at": inst.started_at.isoformat() + "Z" if inst.started_at else None,
         "created_at": inst.created_at.isoformat() if inst.created_at else None,
         "expire_at": inst.expire_at.isoformat() if inst.expire_at else None,
         "traffic_gb": getattr(inst, "traffic_gb", None),
@@ -64,15 +66,38 @@ def list_images(p: Principal = Depends(get_principal)):
 
 
 @router.get("/instances")
-def my_instances(all: int = 0, p: Principal = Depends(get_principal),
+def my_instances(all: int = 0, page: int = 0, page_size: int = 20, keyword: str = "",
+                 p: Principal = Depends(get_principal),
                  db: Session = Depends(get_db)):
+    """实例列表。带 page 参数（管理端分页视图）返回 {items, total}；
+    不带则返回全量数组（用户端列表量小，由前端 UITable 自动分页）。"""
     sync_instances_status(db)
     q = db.query(Instance)
     if not (p.is_admin and all == 1):
         q = q.filter(Instance.user_id == p.user_id)
-    instances = q.order_by(Instance.created_at.desc()).all()
+    # 搜索下推：实例名 / 节点名 / 归属用户名
+    k = (keyword or "").strip()
+    if k:
+        node_ids = [n.id for n in db.query(Node).filter(Node.name.ilike(f"%{k}%")).all()]
+        user_ids = [u.id for u in db.query(User).filter(User.username.ilike(f"%{k}%")).all()]
+        cond = [Instance.name.ilike(f"%{k}%")]
+        if node_ids:
+            cond.append(Instance.node_id.in_(node_ids))
+        if user_ids:
+            cond.append(Instance.user_id.in_(user_ids))
+        q = q.filter(or_(*cond))
+    q = q.order_by(Instance.created_at.desc())
+    if page >= 1:
+        total = q.count()
+        items = q.offset((page - 1) * page_size).limit(page_size).all()
+        nodes = {n.id: n for n in db.query(Node).all()}
+        uids = list({i.user_id for i in items}) or [0]
+        users_map = {u.id: u.username for u in db.query(User).filter(User.id.in_(uids)).all()}
+        return {"items": [_out(i, nodes.get(i.node_id),
+                               {"owner": users_map.get(i.user_id)}) for i in items],
+                "total": total}
     nodes = {n.id: n for n in db.query(Node).all()}
-    return [_out(i, nodes.get(i.node_id)) for i in instances]
+    return [_out(i, nodes.get(i.node_id)) for i in q.all()]
 
 
 @router.post("/instances")
@@ -220,6 +245,9 @@ def _action(instance_uuid: str, action: str, p: Principal, db: Session) -> dict:
     if data.get("status"):
         inst.status = data["status"]
     _oplog(db, action, user_id=p.user_id, instance_uuid=inst.uuid)
+    if action == "stop":  # 人为停止：供稳定性评分排除崩溃误判
+        from app.stability import record_event
+        record_event(db, inst, "stopped_planned", f"user={p.user_id}")
     db.commit()
     return data
 

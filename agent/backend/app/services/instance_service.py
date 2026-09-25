@@ -99,6 +99,18 @@ def is_php(image: str) -> bool:
     return img.startswith("php:") or img.startswith("ppanel-php:")
 
 
+def runtime_kind(image: str) -> str:
+    """运行时类型：php / node / go / python（缺省）。同类型内才允许互相切换。"""
+    img = image or ""
+    if img.startswith("node:"):
+        return "node"
+    if img.startswith("golang:"):
+        return "go"
+    if is_php(img):
+        return "php"
+    return "python"
+
+
 def built_images(client: docker.DockerClient | None = None) -> list[str]:
     """节点本地已构建的增强镜像（ppanel-php:8.x-full），构建完成即自动入白名单。"""
     client = client or try_get_docker()
@@ -118,7 +130,13 @@ def allowed_images(client: docker.DockerClient | None = None) -> list[str]:
 
 def default_start_cmd(image: str, mem_limit_mb: int | None = None) -> str:
     """新实例默认启动命令：PHP 用内置服务器，-d 注入禁用函数/上传上限/内存限额
-    （烧进容器入口，重建不丢）；Python 跑 main.py。"""
+    （烧进容器入口，重建不丢）；Node 跑 index.js；Go 先 build 再跑（产物持久）；
+    Python 跑 main.py。"""
+    if runtime_kind(image) == "node":
+        return "node index.js"
+    if runtime_kind(image) == "go":
+        # 无 go.mod 自动 init（零依赖示例可跑）；build 产物 /app/app 持久，重启增量编译秒级
+        return "[ -f go.mod ] || go mod init ppanel-app; go build -o app . && ./app"
     if not is_php(image):
         return "python main.py"
     parts = ["php"]
@@ -134,8 +152,15 @@ def default_start_cmd(image: str, mem_limit_mb: int | None = None) -> str:
 
 
 def entry_filename(image: str) -> str:
-    """入口文件名：php 镜像找 index.php，其余找 main.py。"""
-    return "index.php" if is_php(image) else "main.py"
+    """入口文件名：php 镜像找 index.php，node 找 index.js，go 找 main.go，其余找 main.py。"""
+    kind = runtime_kind(image)
+    if kind == "php":
+        return "index.php"
+    if kind == "node":
+        return "index.js"
+    if kind == "go":
+        return "main.go"
+    return "main.py"
 
 
 _DISABLE_RE = None
@@ -197,12 +222,49 @@ echo "PPanel PHP instance is running. Edit /app/index.php and restart.\\n";
 echo "PHP version: " . PHP_VERSION . "\\n";
 '''
 
+_DEFAULT_INDEX_JS = '''// PPanel Node 实例示例入口：开箱即跑，改完代码点重启生效
+const http = require("http");
+
+http.createServer((req, res) => {
+  res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
+  res.end(`PPanel Node instance is running. Edit /app/index.js and restart.\\nNode version: ${process.version}\\n`);
+}).listen(8000, "0.0.0.0", () => console.log("PPanel instance starting on 0.0.0.0:8000 ..."));
+'''
+
+_DEFAULT_MAIN_GO = '''// PPanel Go 实例示例入口：零第三方依赖，开箱即跑。
+// 默认命令 go build -o app . && ./app——首次启动编译约 1-3 分钟（受 CPU 限额影响），之后重启秒级。
+// 需要第三方库时：面板「依赖」页一键同步（go mod tidy），或本地上传带 go.mod 的项目。
+package main
+
+import (
+	"fmt"
+	"net/http"
+	"runtime"
+)
+
+func main() {
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "PPanel Go instance is running. Edit /app/main.go and restart.\\nGo version: %s\\n", runtime.Version())
+	})
+	fmt.Println("PPanel instance starting on 0.0.0.0:8000 ...")
+	http.ListenAndServe("0.0.0.0:8000", nil)
+}
+'''
+
 
 def ensure_entry_file(host_dir: str, image: str) -> None:
     """创建实例时写入开箱即跑的示例入口（已存在则跳过）。"""
     name = entry_filename(image)
     if not os.path.exists(os.path.join(host_dir, name)):
-        content = _DEFAULT_INDEX_PHP if is_php(image) else _DEFAULT_MAIN_PY
+        kind = runtime_kind(image)
+        if kind == "php":
+            content = _DEFAULT_INDEX_PHP
+        elif kind == "node":
+            content = _DEFAULT_INDEX_JS
+        elif kind == "go":
+            content = _DEFAULT_MAIN_GO
+        else:
+            content = _DEFAULT_MAIN_PY
         fs.write_text(host_dir, f"/{name}", content)
 
 
@@ -218,8 +280,9 @@ def create_container(inst: Instance) -> str:
     """安全红线 2：CPU/内存/memswap/pids 全部硬限制，绝不 privileged。"""
     client = get_docker()
     ensure_network(client)
-    try:
-        container = client.containers.create(
+
+    def _do_create():
+        return client.containers.create(
             image=inst.image,
             name=container_name(inst.id),
             command=_entry_cmd(inst),
@@ -238,8 +301,19 @@ def create_container(inst: Instance) -> str:
             stdin_open=False,
             tty=False,
         )
-        return container.id
+
+    try:
+        return _do_create().id
     except docker.errors.APIError as e:
+        msg = str(e)
+        if "already in use" in msg or "Conflict" in msg:
+            # 容器名冲突 = 被控登记丢失后的孤儿残留（面板重装 / 记录被清）。
+            # 数据目录在宿主机按 id 保留，移除孤儿容器重建后用户文件不丢。
+            try:
+                client.containers.get(container_name(inst.id)).remove(force=True)
+                return _do_create().id
+            except docker.errors.APIError as e2:
+                raise HTTPException(status_code=502, detail=f"创建容器失败：{e2}")
         raise HTTPException(status_code=502, detail=f"创建容器失败：{e}")
 
 
@@ -266,22 +340,28 @@ def get_container(inst: Instance) -> docker.models.containers.Container:
         raise HTTPException(status_code=502, detail=f"Docker 调用失败：{e}")
 
 
-def sync_status(inst: Instance) -> None:
-    """用 Docker 真实状态校正 DB 里的 status（Docker 不可用时保持原值）。"""
+def sync_status(inst: Instance) -> str | None:
+    """用 Docker 真实状态校正 DB 里的 status（Docker 不可用时保持原值）。
+
+    返回容器本次启动时间（running 时 ISO 字符串，Docker 重启自动更新；
+    未运行/容器不存在返回 None）。调用方原本不使用返回值，兼容安全。"""
     client = try_get_docker()
     if client is None:
-        return
+        return None
     try:
         c = client.containers.get(container_name(inst.id))
     except docker.errors.NotFound:
-        return
+        return None
     except docker.errors.APIError:
-        return
+        return None
     new_status = "running" if c.status == "running" else "exited"
     if inst.status != new_status:
         inst.status = new_status
     if inst.container_id != c.id:
         inst.container_id = c.id
+    if c.status != "running":
+        return None
+    return c.attrs.get("State", {}).get("StartedAt") or None
 
 
 def container_stats(inst: Instance) -> dict:
@@ -463,10 +543,11 @@ def restart_instance(inst: Instance) -> None:
 
 def runtime_versions(inst: Instance) -> dict:
     """运行环境卡：当前镜像 + 节点本地已拉取的同类型版本（未拉取的不展示，用户无感不可选）。
-    同环境内切换：Python 实例只见 Python 版本，PHP 实例只见 PHP 版本（含 ppanel-php 增强版）。"""
+    同环境内切换：Python 实例只见 Python 版本，PHP/Node 实例同理（PHP 含 ppanel-php 增强版）。"""
     client = get_docker()
     local = {t for img in client.images.list() for t in (img.tags or [])}
-    versions = [v for v in allowed_images(client) if v in local and is_php(v) == is_php(inst.image)]
+    kind = runtime_kind(inst.image)
+    versions = [v for v in allowed_images(client) if v in local and runtime_kind(v) == kind]
     if inst.image not in versions:
         versions.insert(0, inst.image)  # 当前版本始终展示（历史镜像可能不在白名单内）
     return {"image": inst.image, "versions": versions}
@@ -474,12 +555,12 @@ def runtime_versions(inst: Instance) -> dict:
 
 def switch_runtime(inst: Instance, img: str, db: Session) -> dict:
     """面板切换运行环境（异步任务）：过程逐行写入 ExecJob，经 /panel/ws/install 实时回显。
-    仅限同类型环境内切换（Python↔Python / PHP↔PHP）；本地无镜像直接拒绝，绝不自动拉取。"""
+    仅限同类型环境内切换（Python/PHP/Node 各自的版本间）；本地无镜像直接拒绝，绝不自动拉取。"""
     img = (img or "").strip()
     if img not in allowed_images():
         raise HTTPException(status_code=400, detail="不支持的镜像版本")
-    if is_php(img) != is_php(inst.image):
-        raise HTTPException(status_code=400, detail="仅支持同类型运行环境内切换（Python 或 PHP 各自的版本间）")
+    if runtime_kind(img) != runtime_kind(inst.image):
+        raise HTTPException(status_code=400, detail="仅支持同类型运行环境内切换（Python / PHP / Node 各自的版本间）")
     if img == inst.image:
         return {"status": inst.status, "image": img, "detail": "当前已是该版本"}
 
@@ -567,20 +648,54 @@ def _runtime_worker(job: "ExecJob", instance_id: int, img: str) -> None:
 
 
 def remove_container(inst: Instance) -> None:
+    """删除容器。失败必须抛错阻止上层删登记，否则 docker 故障期间删实例会留下孤儿容器。"""
     client = try_get_docker()
     if client is None:
-        return
+        raise HTTPException(status_code=502, detail="Docker 不可用，为避免产生孤儿容器已中止删除，请稍后重试")
+    name = container_name(inst.id)
     try:
-        c = client.containers.get(container_name(inst.id))
-        c.stop(timeout=5)
+        c = client.containers.get(name)
+        try:
+            c.stop(timeout=5)
+        except docker.errors.APIError:
+            pass  # 停不掉也要尝试删除
+        client.containers.get(name).remove(force=True)
     except docker.errors.NotFound:
-        return
-    except docker.errors.APIError:
-        pass  # 停不掉也要尝试删除
+        return  # 容器已不存在（管理员手动删过）→ 视为回收成功
+    except docker.errors.APIError as e:
+        raise HTTPException(status_code=502, detail=f"容器删除失败（登记未删除，可重试）：{e}")
+
+
+def reconcile_orphans() -> int:
+    """对账兜底：清理 docker 中已无登记的实例容器（孤儿，如重装面板/登记丢失/异常残留）。
+    只匹配 {前缀}{纯数字} 命名，服务容器（mysql/caddy/恢复镜像等）不受影响；数据目录保留。"""
+    client = try_get_docker()
+    if client is None:
+        return 0
+    import re
+    from app.database import SessionLocal
+
+    prefix = container_prefix()
+    pat = re.compile(rf"^{re.escape(prefix)}(\d+)$")
+    db = SessionLocal()
     try:
-        client.containers.get(container_name(inst.id)).remove(force=True)
-    except (docker.errors.NotFound, docker.errors.APIError):
+        known = {f"{prefix}{i}" for (i,) in db.query(Instance.id).all()}
+    finally:
+        db.close()
+    removed = 0
+    try:
+        for c in client.containers.list(all=True, ignore_removed=True):
+            if not pat.match(c.name or "") or c.name in known:
+                continue
+            try:
+                c.remove(force=True)
+                removed += 1
+                print(f"[reconcile] 已清理孤儿容器 {c.name}（无登记记录，数据目录保留）")
+            except docker.errors.APIError:
+                pass
+    except docker.errors.APIError:
         pass
+    return removed
 
 
 # ---------- 依赖安装 ----------

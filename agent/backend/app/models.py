@@ -103,6 +103,69 @@ class InstanceDb(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class InstanceCron(Base):
+    """实例定时任务（宿主调度，docker exec 进实例容器执行）。"""
+    __tablename__ = "instance_crons"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    instance_id: Mapped[int] = mapped_column(Integer, index=True)
+    schedule: Mapped[str] = mapped_column(String(64))          # 5 段 cron 表达式
+    command: Mapped[str] = mapped_column(String(512))
+    enabled: Mapped[int] = mapped_column(Integer, default=1)   # 1/0
+    last_run: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_status: Mapped[str] = mapped_column(String(16), default="")   # ok/fail/timeout
+    last_output: Mapped[str] = mapped_column(Text, default="")  # 最近一次输出（截断保存）
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class HostBackupJob(Base):
+    """节点管理员定时备份任务（宿主级：任意容器 / 容器目录 / 数据库整库或表级）。"""
+    __tablename__ = "host_backup_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    schedule: Mapped[str] = mapped_column(String(64))           # 5 段 cron 表达式
+    kind: Mapped[str] = mapped_column(String(16))               # container / dir / db_full / db_table
+    target: Mapped[str] = mapped_column(String(128))            # 容器名；或 "版本:库名"（如 5.7:ppanel_1）
+    dir_path: Mapped[str] = mapped_column(String(255), default="")   # kind=dir：容器内目录
+    table_name: Mapped[str] = mapped_column(String(64), default="")  # kind=db_table：表名（空=整库）
+    keep: Mapped[int] = mapped_column(Integer, default=5)       # 保留最近 N 份，超出自动删最旧
+    dest: Mapped[str] = mapped_column(String(8), default="local")    # local / cos / both
+    enabled: Mapped[int] = mapped_column(Integer, default=1)
+    last_run: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_status: Mapped[str] = mapped_column(String(16), default="")   # running/ok/fail
+    last_output: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class CosConfig(Base):
+    """节点级腾讯云 COS 备份配置（单行，id=1；secret_key 读取时掩码）。"""
+    __tablename__ = "cos_config"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    secret_id: Mapped[str] = mapped_column(String(128), default="")
+    secret_key: Mapped[str] = mapped_column(String(128), default="")
+    bucket: Mapped[str] = mapped_column(String(128), default="")
+    region: Mapped[str] = mapped_column(String(64), default="")     # 如 ap-guangzhou
+    prefix: Mapped[str] = mapped_column(String(128), default="ppanel-backups")  # 对象 key 前缀
+    keep_local: Mapped[int] = mapped_column(Integer, default=1)     # 上传后是否保留本地副本
+    enabled: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class InstanceSite(Base):
+    """实例站点配置（Caddy 防护与静态托管；domain 挂在 instances 表）。"""
+    __tablename__ = "instance_sites"
+
+    instance_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    mode: Mapped[str] = mapped_column(String(16), default="proxy")      # proxy/static
+    static_dir: Mapped[str] = mapped_column(String(255), default="public_html")  # 容器 /app 下相对目录
+    auth_user: Mapped[str] = mapped_column(String(64), default="")
+    auth_hash: Mapped[str] = mapped_column(String(128), default="")     # bcrypt（caddy hash-password 生成）
+    ip_whitelist: Mapped[str] = mapped_column(Text, default="")         # 空格分隔 CIDR
+    ip_blacklist: Mapped[str] = mapped_column(Text, default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class OpLog(Base):
     __tablename__ = "op_logs"
 

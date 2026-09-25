@@ -64,6 +64,12 @@ const routes = [
     component: () => import('../views/NodesView.vue'),
     meta: { admin: true }
   },
+  {
+    path: '/backup',
+    name: 'backup',
+    component: () => import('../views/BackupCenterView.vue'),
+    meta: { admin: true }
+  },
   { path: '/:pathMatch(.*)*', redirect: '/' }
 ]
 

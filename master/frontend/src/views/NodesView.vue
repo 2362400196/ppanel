@@ -18,6 +18,7 @@ const nodeCols = [
   { key: 'online', label: '状态', width: '110px' },
   { key: 'name', label: '节点名称', width: '160px' },
   { key: 'base_url', label: '被控地址' },
+  { key: 'stability', label: '稳定性', width: '150px' },
   { key: 'health_text', label: 'Docker 概况' },
   { key: 'enabled', label: '启用', width: '80px' },
   { key: 'ops', label: '', width: '330px' }
@@ -82,12 +83,34 @@ function fmtWhen(v) {
 
 async function loadNodes() {
   try {
-    const { data } = await api.get('/admin/nodes')
-    nodes.value = data
+    const [a, s] = await Promise.all([
+      api.get('/admin/nodes'),
+      api.get('/admin/nodes/stability', { params: { window: 7 } }).catch(() => null),
+    ])
+    nodes.value = a.data
+    stab.value = s?.data || {}
     loaded.value = true
   } catch (e) {
     toastErr(errText(e))
   }
+}
+
+// 稳定性评分（7 天窗口）：徽标 + 悬停四维拆分
+const stab = ref({})
+const stabTone = g => ({ excellent: 'ok', good: 'ok', fair: 'warn', poor: 'warn', observing: 'dim' }[g] || 'dim')
+const stabText = s => {
+  if (!s) return ''
+  const p = s.parts || {}
+  const seg = []
+  if (s.score != null) seg.push(`综合 ${s.score}`)
+  if (p.crash != null) seg.push(`崩溃 ${p.crash}`)
+  if (p.online != null) seg.push(`在线 ${p.online}`)
+  if (p.resource != null) seg.push(`资源 ${p.resource}`)
+  if (p.service != null) seg.push(`服务 ${p.service}`)
+  if (s.crashes) seg.push(`崩溃 ${s.crashes} 次`)
+  if (s.mem_peak != null) seg.push(`内存峰值 ${s.mem_peak}%`)
+  if (s.disk_peak != null) seg.push(`磁盘峰值 ${s.disk_peak}%`)
+  return `近 ${s.window_days} 天：${seg.join(' / ')}`
 }
 
 // 新增 / 编辑
@@ -203,6 +226,12 @@ onUnmounted(() => clearInterval(timer))
         <UITag v-if="row.note" tone="dim" class="ml6">{{ row.note }}</UITag>
       </template>
       <template #col-base_url="{ row }"><span class="mono text-dim">{{ row.base_url }}</span></template>
+      <template #col-stability="{ row }">
+        <UITag v-if="stab[row.id]" :tone="stabTone(stab[row.id].grade)" :title="stabText(stab[row.id])">
+          {{ stab[row.id].score != null ? `${stab[row.id].score} 分 · ${stab[row.id].grade_label}` : stab[row.id].grade_label }}
+        </UITag>
+        <span v-else class="text-dim">—</span>
+      </template>
       <template #col-health_text="{ row }">
         <span class="text-dim">{{ healthText(row) }}</span>
       </template>

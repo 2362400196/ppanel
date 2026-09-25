@@ -104,6 +104,14 @@ class Settings:
         "PHP_IMAGES",
         ["php:8.2-cli", "php:8.3-cli", "php:8.4-cli"],
     ))
+    node_images: list = field(default_factory=lambda: _env_list(
+        "NODE_IMAGES",
+        ["node:20-slim", "node:22-slim"],
+    ))
+    go_images: list = field(default_factory=lambda: _env_list(
+        "GO_IMAGES",
+        ["golang:1.23-alpine", "golang:1.24-alpine"],
+    ))
     # PHP 安全：默认禁用的危险函数（烧进入口命令，容器重建依然生效）；置空可关闭
     php_disable_functions: str = field(default_factory=lambda: _env(
         "PHP_DISABLE_FUNCTIONS",
@@ -116,7 +124,7 @@ class Settings:
     @property
     def all_images(self) -> list:
         """全部允许的运行环境（白名单校验统一入口）。"""
-        return self.python_images + self.php_images
+        return self.python_images + self.php_images + self.node_images + self.go_images
 
 
 settings = Settings()

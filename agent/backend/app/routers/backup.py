@@ -3,9 +3,11 @@
 备份文件统一落 /opt/ppanel/backups/（自动创建）：
   容器：  <容器名>_<时间戳>.tar     docker export 文件系统整体导出（流式落盘）
   数据库：<库名>_<时间戳>.sql.gz    mysqldump --single-transaction 管道 gzip
+  目录：  <容器名>_<目录名>_<时间戳>.tar.gz   容器内 tar 打包指定目录
 恢复：
   容器：  tar → docker import 为镜像（注入 sleep 入口）→ 创建新容器（找回数据用）
   数据库：sql.gz → put_archive 进 MySQL 容器 → CREATE IF NOT EXISTS + 导入（覆盖目标库）
+定时备份：/host/backup-jobs（管理员 cron 任务，调度在 host_backup_service）。
 鉴权与 security 一致：X-Node-Token（主控）或 X-API-Key（开放对接）任一即可。
 """
 import io
@@ -13,6 +15,7 @@ import os
 import re as _re
 import shutil
 import tarfile
+import threading
 import time
 from datetime import datetime
 
@@ -24,8 +27,8 @@ from sqlalchemy.orm import Session
 
 from app import tasks
 from app.agent_auth import require_node_or_api
-from app.database import get_db
-from app.docker_client import get_docker
+from app.database import SessionLocal, get_db
+from app.docker_client import get_docker, get_docker_long
 from app.models import InstanceDb, MySqlService
 from app.services import mysql_service as mysql_svc
 
@@ -75,7 +78,9 @@ class DbIn(BaseModel):
 # ---------- 备份列表 / 下载 / 删除 ----------
 
 @router.get("/host/backups")
-def list_backups():
+def list_backups(page: int = 0, page_size: int = 20):
+    """备份文件列表（按时间倒序）。带 page 参数返回 {backups(当前页), total, dir}；
+    不带则返回全量（旧调用兼容）。主控经 host_proxy 原样透传分页参数。"""
     os.makedirs(BACKUP_DIR, exist_ok=True)
     items = []
     for name in os.listdir(BACKUP_DIR):
@@ -91,6 +96,10 @@ def list_backups():
             "created_at": datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M"),
         })
     items.sort(key=lambda x: x["created_at"], reverse=True)
+    if page >= 1:
+        start = (page - 1) * page_size
+        return {"backups": items[start:start + page_size], "total": len(items),
+                "dir": BACKUP_DIR}
     return {"backups": items, "dir": BACKUP_DIR}
 
 
@@ -138,7 +147,7 @@ def list_tables(version: str = "", db_name: str = "", db: Session = Depends(get_
     if not svc_row:
         raise HTTPException(status_code=404, detail=f"MySQL {version} 服务未启用")
     try:
-        c = get_docker().containers.get(mysql_svc.svc_name(version))
+        c = get_docker_long().containers.get(mysql_svc.svc_name(version))
     except docker.errors.NotFound:
         raise HTTPException(status_code=404, detail="MySQL 容器不存在，请重新启用服务")
     if c.status != "running":
@@ -163,7 +172,7 @@ def backup_dir(body: DirIn, request: Request = None):
     if ".." in p or not _PATH_RE.fullmatch(p):
         raise HTTPException(status_code=400, detail="目录路径无效（需为容器内绝对路径）")
     try:
-        c = get_docker().containers.get(cname)
+        c = get_docker_long().containers.get(cname)
     except docker.errors.NotFound:
         raise HTTPException(status_code=404, detail="容器不存在或已被删除")
     except docker.errors.APIError as e:
@@ -244,7 +253,7 @@ def restore_dir(body: DirRestoreIn, request: Request = None):
     if ".." in p or not _PATH_RE.fullmatch(p):
         raise HTTPException(status_code=400, detail="目标目录无效（需为容器内绝对路径）")
     try:
-        c = get_docker().containers.get(cname)
+        c = get_docker_long().containers.get(cname)
     except docker.errors.NotFound:
         raise HTTPException(status_code=404, detail="目标容器不存在或已被删除")
     except docker.errors.APIError as e:
@@ -293,7 +302,7 @@ def backup_container(body: ContainerIn, request: Request):
         tasks.start(tid, f"备份容器 {body.container_id[:12]}")
         tasks.log(tid, "查找容器…")
     try:
-        client = get_docker()
+        client = get_docker_long()
         try:
             c = client.containers.get(body.container_id)
         except docker.errors.NotFound:
@@ -380,7 +389,7 @@ def backup_database(body: DbIn, db: Session = Depends(get_db), request: Request 
         if not svc_row:
             raise HTTPException(status_code=404, detail=f"MySQL {ver} 服务未启用")
         try:
-            c = get_docker().containers.get(mysql_svc.svc_name(ver))
+            c = get_docker_long().containers.get(mysql_svc.svc_name(ver))
         except docker.errors.NotFound:
             raise HTTPException(status_code=404, detail="MySQL 容器不存在，请重新启用服务")
         except docker.errors.APIError as e:
@@ -407,7 +416,9 @@ def backup_database(body: DbIn, db: Session = Depends(get_db), request: Request 
 
         tmp_sql = f"/tmp/ppanel_bk_{_ts()}_{os.urandom(3).hex()}.sql"
         tmp_gz = tmp_sql + ".gz"
-        fname = f"{dbname}_{_ts()}.sql.gz"
+        # 表级备份文件名带表名（多表取首个+_m 标记），与整库备份可区分（定时任务的保留策略按此筛选）
+        fname = (f"{dbname}_{tables[0]}{'_m' if len(tables) > 1 else ''}_{_ts()}.sql.gz"
+                 if tables else f"{dbname}_{_ts()}.sql.gz")
         os.makedirs(BACKUP_DIR, exist_ok=True)
         dest = os.path.join(BACKUP_DIR, fname)
 
@@ -469,7 +480,7 @@ def backup_db_options(db: Session = Depends(get_db)):
             .order_by(InstanceDb.version, InstanceDb.db_name).all())
     client = None
     try:
-        client = get_docker()
+        client = get_docker_long()
     except HTTPException:
         pass
     # 登记表可能残留已删除的库（如实例被清理后 InstanceDb 未同步），
@@ -519,7 +530,7 @@ def restore_container(body: RestoreContainerIn, request: Request):
         name = (body.name or "").strip()
         if not _CNAME_RE.fullmatch(name):
             raise HTTPException(status_code=400, detail="容器名无效（字母数字开头，可含 _ . -）")
-        client = get_docker()
+        client = get_docker_long()
         try:
             client.containers.get(name)
             raise HTTPException(status_code=409, detail=f"容器 {name} 已存在，请换一个名字")
@@ -584,7 +595,7 @@ def restore_database(body: RestoreDbIn, db: Session = Depends(get_db), request: 
         if not svc_row:
             raise HTTPException(status_code=404, detail=f"MySQL {body.version} 服务未启用")
         try:
-            c = get_docker().containers.get(mysql_svc.svc_name(body.version))
+            c = get_docker_long().containers.get(mysql_svc.svc_name(body.version))
         except docker.errors.NotFound:
             raise HTTPException(status_code=404, detail="MySQL 容器不存在，请重新启用服务")
         except docker.errors.APIError as e:
@@ -631,3 +642,252 @@ def restore_database(body: RestoreDbIn, db: Session = Depends(get_db), request: 
         if tid:
             tasks.finish(tid, False, f"✘ 数据库恢复失败：{e}")
         raise
+
+
+# ---------- 定时备份任务：管理员 cron，任意容器 / 目录 / 数据库（整库或表级） ----------
+
+from app.models import HostBackupJob, MySqlService  # noqa: E402
+from app.services import cron_service as _cron_svc  # noqa: E402
+from app.services import cos_service as _cos_svc  # noqa: E402
+
+_BK_KINDS = ("container", "dir", "db_full", "db_table")
+_SYSTEM_DBS = {"information_schema", "mysql", "performance_schema", "sys"}
+
+
+# ---------- 腾讯云 COS 存储设置（节点级，单行配置） ----------
+
+class CosIn(BaseModel):
+    secret_id: str = ""
+    secret_key: str = ""          # 传空 = 沿用已保存的密钥
+    bucket: str = ""
+    region: str = ""
+    prefix: str = "ppanel-backups"
+    keep_local: int = 1
+    enabled: int = 0
+
+
+@router.get("/host/cos")
+def get_cos():
+    cfg = _cos_svc.get_config()
+    key = cfg.secret_key or ""
+    masked = (key[:4] + "****" + key[-4:]) if len(key) > 8 else ("****" if key else "")
+    return {"secret_id": cfg.secret_id, "secret_key_masked": masked,
+            "has_key": bool(key), "bucket": cfg.bucket, "region": cfg.region,
+            "prefix": cfg.prefix, "keep_local": bool(cfg.keep_local),
+            "enabled": bool(cfg.enabled)}
+
+
+@router.put("/host/cos")
+def put_cos(body: CosIn, request: Request = None):
+    db = SessionLocal()
+    try:
+        cfg = _cos_svc.get_config(db)
+        if body.secret_id.strip():
+            cfg.secret_id = body.secret_id.strip()
+        if body.secret_key.strip():  # 留空 = 沿用旧密钥
+            cfg.secret_key = body.secret_key.strip()
+        cfg.bucket = body.bucket.strip()
+        cfg.region = body.region.strip()
+        cfg.prefix = body.prefix.strip() or "ppanel-backups"
+        cfg.keep_local = 1 if body.keep_local else 0
+        cfg.enabled = 1 if body.enabled else 0
+        db.commit()
+        if cfg.enabled:
+            try:
+                r = _cos_svc.test_conn(cfg)
+            except Exception as e:  # noqa: BLE001
+                cfg.enabled = 0  # 启用时连通性校验失败 → 保持关闭，避免"看似启用实际传不上去"
+                db.commit()
+                raise HTTPException(status_code=400, detail=f"配置已保存，但连通性校验失败，未启用：{e}")
+            return {"ok": True, "message": r["message"]}
+        return {"ok": True, "message": "配置已保存（未启用）"}
+    finally:
+        db.close()
+
+
+class BackupJobIn(BaseModel):
+    schedule: str
+    kind: str                     # container / dir / db_full / db_table
+    target: str                   # 容器名；或 "版本:库名"
+    dir_path: str = ""            # kind=dir：容器内目录（默认 /app）
+    table_name: str = ""          # kind=db_table：表名（空=整库）
+    keep: int = 5                 # 保留最近 N 份
+    dest: str = "local"           # local / cos / both
+
+
+_DESTS = ("local", "cos", "both")
+
+
+def _job_out(j: HostBackupJob) -> dict:
+    return {"id": j.id, "schedule": j.schedule, "kind": j.kind, "target": j.target,
+            "dir_path": j.dir_path, "table_name": j.table_name, "keep": j.keep,
+            "dest": j.dest or "local",
+            "enabled": bool(j.enabled), "last_run": j.last_run.isoformat() if j.last_run else None,
+            "last_status": j.last_status, "last_output": j.last_output or ""}
+
+
+def _validate_job_in(body: BackupJobIn) -> None:
+    if _cron_svc.validate(body.schedule.strip()):
+        raise HTTPException(status_code=400, detail=_cron_svc.validate(body.schedule.strip()))
+    if body.kind not in _BK_KINDS:
+        raise HTTPException(status_code=400, detail="备份类型无效")
+    if body.dest not in _DESTS:
+        raise HTTPException(status_code=400, detail="备份目的地无效")
+    if body.dest in ("cos", "both"):
+        cfg = _cos_svc.get_config()
+        if not cfg or not cfg.enabled:
+            raise HTTPException(status_code=400,
+                                detail="腾讯云 COS 未启用，请先在「存储设置」中保存并启用")
+    if not (1 <= body.keep <= 100):
+        raise HTTPException(status_code=400, detail="保留份数应为 1-100")
+    if body.kind in ("container", "dir"):
+        if not _CNAME_RE.fullmatch(body.target):
+            raise HTTPException(status_code=400, detail="容器名格式无效")
+        if body.kind == "dir":
+            p = body.dir_path.strip() or "/app"
+            if not p.startswith("/") or ".." in p.split("/"):
+                raise HTTPException(status_code=400, detail="目录必须是容器内绝对路径且不能含 ..")
+    else:
+        ver, _, dbname = body.target.partition(":")
+        if not ver or not dbname:
+            raise HTTPException(status_code=400, detail="目标格式应为 版本:库名（如 5.7:ppanel_1）")
+        if not _DB_RE.fullmatch(dbname):
+            raise HTTPException(status_code=400, detail="库名格式无效")
+        db2 = SessionLocal()
+        try:
+            if not db2.get(MySqlService, ver):
+                raise HTTPException(status_code=404, detail=f"MySQL {ver} 服务未启用")
+        finally:
+            db2.close()
+        if body.kind == "db_table" and body.table_name and not _TBL_RE.fullmatch(body.table_name):
+            raise HTTPException(status_code=400, detail=f"表名无效：{body.table_name}")
+
+
+@router.get("/host/backup-jobs")
+def list_backup_jobs():
+    db = SessionLocal()
+    try:
+        rows = db.query(HostBackupJob).order_by(HostBackupJob.created_at).all()
+        return {"jobs": [_job_out(j) for j in rows]}
+    finally:
+        db.close()
+
+
+@router.get("/host/backup-jobs/meta")
+def backup_jobs_meta():
+    """新建任务的候选清单：全部容器 + 各 MySQL 版本的库列表（排除系统库）。"""
+    client = get_docker()
+    containers = [{"name": c.name, "status": c.status,
+                   "image": (c.image.tags or [""])[0]}
+                  for c in client.containers.list(all=True)]
+    mysql = []
+    db = SessionLocal()
+    try:
+        for svc_row in db.query(MySqlService).all():
+            entry = {"version": svc_row.version, "running": False, "dbs": []}
+            try:
+                c = client.containers.get(mysql_svc.svc_name(svc_row.version))
+                if c.status == "running":
+                    entry["running"] = True
+                    res = c.exec_run(["sh", "-c",
+                                      f"mysql -uroot --password='{svc_row.root_password}' "
+                                      f"-N -e 'SHOW DATABASES'"], demux=True)
+                    if res[0] == 0:
+                        entry["dbs"] = [l.strip() for l in (res[1][0] or b"").decode(
+                            "utf-8", "replace").splitlines()
+                            if l.strip() and l.strip() not in _SYSTEM_DBS]
+            except docker.errors.NotFound:
+                pass
+            mysql.append(entry)
+    finally:
+        db.close()
+    return {"containers": containers, "mysql": mysql}
+
+
+@router.post("/host/backup-jobs")
+def create_backup_job(body: BackupJobIn, request: Request = None):
+    _validate_job_in(body)
+    db = SessionLocal()
+    try:
+        j = HostBackupJob(schedule=body.schedule.strip(), kind=body.kind,
+                          target=body.target.strip(), dir_path=body.dir_path.strip(),
+                          table_name=body.table_name.strip(), keep=body.keep,
+                          dest=body.dest)
+        db.add(j)
+        db.commit()
+        if body.kind == "db_table" and not body.table_name.strip():
+            j.kind = "db_full"  # 表级任务但未选表 → 按整库
+            db.commit()
+        out = _job_out(j)
+    finally:
+        db.close()
+    _spawn_thread_safe(j.id)
+    return out
+
+
+def _spawn_thread_safe(job_id: int) -> None:
+    """创建即跑一次首份备份；失败只写任务状态，不影响创建结果。"""
+    from app.services import host_backup_service
+    threading.Thread(target=host_backup_service.run_job, args=(job_id,),
+                     daemon=True, name=f"hostbk-run-{job_id}").start()
+
+
+@router.patch("/host/backup-jobs/{jid}")
+def update_backup_job(jid: int, body: dict, request: Request = None):
+    db = SessionLocal()
+    try:
+        j = db.get(HostBackupJob, jid)
+        if not j:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        if "schedule" in body:
+            err = _cron_svc.validate(str(body["schedule"]).strip())
+            if err:
+                raise HTTPException(status_code=400, detail=err)
+            j.schedule = str(body["schedule"]).strip()
+        if "enabled" in body:
+            j.enabled = 1 if body["enabled"] else 0
+        if "keep" in body:
+            try:
+                keep = int(body["keep"])
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="保留份数无效")
+            if not (1 <= keep <= 100):
+                raise HTTPException(status_code=400, detail="保留份数应为 1-100")
+            j.keep = keep
+        if "dest" in body:
+            if body["dest"] not in _DESTS:
+                raise HTTPException(status_code=400, detail="备份目的地无效")
+            if body["dest"] in ("cos", "both"):
+                cfg = _cos_svc.get_config()
+                if not cfg or not cfg.enabled:
+                    raise HTTPException(status_code=400,
+                                        detail="腾讯云 COS 未启用，请先在「存储设置」中保存并启用")
+            j.dest = body["dest"]
+        db.commit()
+        return _job_out(j)
+    finally:
+        db.close()
+
+
+@router.delete("/host/backup-jobs/{jid}")
+def delete_backup_job(jid: int):
+    db = SessionLocal()
+    try:
+        j = db.get(HostBackupJob, jid)
+        if not j:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        db.delete(j)
+        db.commit()
+        return {"ok": True}
+    finally:
+        db.close()
+
+
+@router.post("/host/backup-jobs/{jid}/run")
+def run_backup_job(jid: int, request: Request = None):
+    """立即执行一次（带 X-Task-Id 时走任务终端实时日志）。"""
+    from app.services import host_backup_service
+    r = host_backup_service.run_job(jid, request)
+    if not r.get("ok"):
+        raise HTTPException(status_code=502, detail=r.get("error", "执行失败"))
+    return r

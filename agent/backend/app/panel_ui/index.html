@@ -433,6 +433,9 @@ function showApidoc() {
       <button data-view="files" onclick="switchView('files')">文件管理</button>
       <button data-view="domain" onclick="switchView('domain')">域名与 SSL</button>
       <button data-view="database" onclick="switchView('database')">数据库</button>
+      <button data-view="backup" onclick="switchView('backup')">备份</button>
+      <button data-view="crons" onclick="switchView('crons')">定时任务</button>
+      <button data-view="site" onclick="switchView('site')">网站防护</button>
       <button id="navDeps" data-view="deps" onclick="switchView('deps')">依赖</button>
       <button id="navDisfn" data-view="disfn" onclick="switchView('disfn')" style="display:none">禁用函数</button>
       <button data-view="term" onclick="switchView('term')">终端</button>
@@ -481,7 +484,7 @@ function showApidoc() {
             <table class="api-tbl">
               <tr><th>字段</th><th>类型</th><th>默认</th><th>说明</th></tr>
               <tr><td class="mono">name</td><td>string</td><td>必填</td><td>实例名称（1-64 字符）</td></tr>
-              <tr><td class="mono">image</td><td>string</td><td>必填</td><td>镜像名，如 <span class="mono">python:3.12-slim</span>、<span class="mono">php:8.3-cli</span></td></tr>
+              <tr><td class="mono">image</td><td>string</td><td>必填</td><td>镜像名，如 <span class="mono">python:3.12-slim</span>、<span class="mono">php:8.3-cli</span>、<span class="mono">node:22-slim</span></td></tr>
               <tr><td class="mono">days</td><td>int</td><td>30</td><td>有效期（天），1-3650</td></tr>
               <tr><td class="mono">cpu</td><td>float</td><td>1.0</td><td>CPU 核数上限，&gt;0 且 ≤8</td></tr>
               <tr><td class="mono">mem</td><td>int</td><td>512</td><td>内存上限（MB），64-16384</td></tr>
@@ -688,7 +691,11 @@ function showApidoc() {
             <div class="actions" style="margin-top:14px">
               <button class="btn ghost" onclick="copyDbDsn()">复制连接串</button>
               <button class="btn ghost" onclick="resetDbPwd()">重置密码</button>
+              <button class="btn ghost" id="pmaBtn" onclick="pmaToggle()">phpMyAdmin</button>
               <button class="btn danger-text" onclick="dropDb()">删除数据库</button>
+            </div>
+            <div id="pmaBox" style="display:none;margin-top:10px;padding:10px 12px;border:1px dashed var(--line);border-radius:10px;font-size:13px">
+              <span id="pmaState">-</span>
             </div>
             <div class="db-switch" id="dbSwitchRow" style="display:none">
               <span class="db-switch-label">切换版本（自动迁移数据）</span>
@@ -696,6 +703,125 @@ function showApidoc() {
               <button class="btn ghost" onclick="switchDb()">开始切换</button>
             </div>
             <p class="hint">内网地址供实例代码直连（与应用同网络，延迟最低）；外网地址可用本机数据库客户端远程管理。切换版本会自动迁移全部数据，成功后密码会重置、需更新应用里的连接地址；删除数据库后数据不可恢复。</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- 备份（仅本实例：自己的库 + 自己容器的目录） -->
+      <div id="v-backup" class="view">
+        <div class="card">
+          <div class="page-title">数据库备份</div>
+          <div id="bkDbInfo" class="status-text">检测数据库状态…</div>
+          <div id="bkDbOps" style="display:none">
+            <div class="domain-row">
+              <input id="bkDbTables" placeholder="表名，逗号分隔；留空 = 整库备份（如 wp_posts,wp_options）">
+              <button class="btn" onclick="doBackupDb()">备份数据库</button>
+            </div>
+            <p class="hint" id="bkDbHint">只能备份本实例的数据库。表名留空备份整库；填表名则只备份选中的表。常用表可在下方提示中直接复制。</p>
+            <div id="bkDbTableChips" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px"></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="page-title">网站目录备份</div>
+          <div class="domain-row">
+            <input id="bkDirPath" placeholder="容器内绝对路径，留空默认 /app">
+            <button class="btn" onclick="doBackupDir()">备份目录</button>
+          </div>
+          <p class="hint">把实例容器内的某个目录打包为 tar.gz（比整容器备份体积小得多）。恢复时解压覆盖到目标目录的同名文件，不会删除其他文件。</p>
+        </div>
+        <div class="card">
+          <div class="page-title">备份文件</div>
+          <div id="bkListWrap" style="overflow-x:auto">
+            <table style="width:100%;border-collapse:collapse;font-size:12.5px">
+              <thead><tr style="color:var(--text2);text-align:left">
+                <th style="padding:6px 8px;border-bottom:1px solid var(--line)">文件</th>
+                <th style="padding:6px 8px;border-bottom:1px solid var(--line)">类型</th>
+                <th style="padding:6px 8px;border-bottom:1px solid var(--line)">大小</th>
+                <th style="padding:6px 8px;border-bottom:1px solid var(--line)">时间</th>
+                <th style="padding:6px 8px;border-bottom:1px solid var(--line)">操作</th>
+              </tr></thead>
+              <tbody id="bkList"></tbody>
+            </table>
+          </div>
+          <div id="bkPager" style="display:none;justify-content:flex-end;align-items:center;gap:8px;margin-top:8px;font-size:12.5px;color:var(--text2);flex-wrap:wrap"></div>
+          <div id="bkRestorePanel" style="display:none;margin-top:12px;padding:12px;border:1px dashed var(--line);border-radius:10px">
+            <div class="page-title" style="margin-bottom:8px">恢复 <span class="mono" id="bkRestoreFile"></span></div>
+            <div class="domain-row" id="bkRestoreDbRow" style="display:none">
+              <span style="font-size:13px;color:var(--text2)">目标库固定为本实例库，覆盖导入</span>
+              <button class="btn" onclick="doRestoreDb()">确认恢复</button>
+            </div>
+            <div class="domain-row" id="bkRestoreDirRow" style="display:none">
+              <input id="bkRestorePath" placeholder="目标目录，留空默认 /app">
+              <button class="btn" onclick="doRestoreDir()">确认恢复</button>
+            </div>
+          </div>
+          <p class="hint">备份文件仅本实例可见。数据库恢复会覆盖导入现有数据；目录恢复覆盖同名文件。请谨慎操作。</p>
+        </div>
+      </div>
+
+      <!-- 定时任务 -->
+      <div id="v-crons" class="view">
+        <div class="card">
+          <div class="page-title">新建定时任务</div>
+          <div class="domain-row">
+            <input id="cronSchedule" placeholder="cron 表达式：分 时 日 月 周（如 0 3 * * * 每天凌晨3点）">
+            <input id="cronCommand" placeholder="在实例容器内执行的命令（如 php /app/bin/console cache:clear）">
+            <button class="btn" onclick="saveCron()">添加</button>
+          </div>
+          <p class="hint">命令在实例容器内执行（docker exec）。示例：每天 3 点备份 <span class="mono">tar -czf /app/bak_$(date +\%F).tar.gz -C /app uploads</span>；每 5 分钟触发 <span class="mono">*/5 * * * *</span>。</p>
+        </div>
+        <div class="card">
+          <div class="page-title">任务列表</div>
+          <div id="cronListWrap" style="overflow-x:auto">
+            <table style="width:100%;border-collapse:collapse;font-size:12.5px">
+              <thead><tr style="color:var(--text2);text-align:left">
+                <th style="padding:6px 8px;border-bottom:1px solid var(--line)">状态</th>
+                <th style="padding:6px 8px;border-bottom:1px solid var(--line)">表达式</th>
+                <th style="padding:6px 8px;border-bottom:1px solid var(--line)">命令</th>
+                <th style="padding:6px 8px;border-bottom:1px solid var(--line)">上次执行</th>
+                <th style="padding:6px 8px;border-bottom:1px solid var(--line)">操作</th>
+              </tr></thead>
+              <tbody id="cronList"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- 网站防护（绑定域名后生效） -->
+      <div id="v-site" class="view">
+        <div class="card">
+          <div class="page-title">网站防护与静态托管</div>
+          <div id="siteNone" class="status-text" style="display:none">请先在「域名与 SSL」绑定域名，防护配置才有生效对象。</div>
+          <div id="siteForm" style="display:none">
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px;margin:6px 0 12px">
+              <div class="spec"><div class="k">防护对象（已绑定域名）</div><div class="v mono" id="siteDomain">-</div></div>
+              <div class="spec"><div class="k">节点 Caddy</div><div class="v mono" id="siteCaddy">-</div></div>
+            </div>
+            <div class="page-title">访问模式</div>
+            <div class="domain-row">
+              <select id="siteMode" onchange="$('siteStaticRow').style.display=this.value==='static'?'flex':'none'">
+                <option value="proxy">反向代理到实例应用</option>
+                <option value="static">静态站点（直接托管文件）</option>
+              </select>
+            </div>
+            <div class="domain-row" id="siteStaticRow" style="display:none">
+              <input id="siteStaticDir" placeholder="/app 下目录名，如 public_html">
+            </div>
+            <p class="hint">静态模式把容器内 <span class="mono">/app/&lt;目录&gt;</span> 作为网站根目录直接对外提供（纯 HTML/JS/CSS 站不需要应用进程，先把文件上传到该目录）。</p>
+            <div class="page-title" style="margin-top:14px">密码保护（basic_auth）</div>
+            <div class="domain-row">
+              <input id="siteAuthUser" placeholder="用户名（留空 = 关闭密码保护）">
+              <input id="siteAuthPass" type="password" placeholder="密码（不修改可留空）">
+            </div>
+            <div class="page-title" style="margin-top:14px">IP 黑白名单（二选一，支持 CIDR 如 10.0.0.0/8）</div>
+            <div class="domain-row">
+              <input id="siteWl" placeholder="白名单：仅允许这些 IP 访问（空格/逗号分隔）">
+              <input id="siteBl" placeholder="黑名单：拒绝这些 IP 访问（空格/逗号分隔）">
+            </div>
+            <div class="actions" style="margin-top:14px">
+              <button class="btn" onclick="saveSite()">保存并生效</button>
+            </div>
+            <p class="hint">白名单优先于黑名单（设置白名单后仅名单内 IP 可访问）。保存即写入 Caddy 并热重载，HTTPS 证书不受影响。</p>
           </div>
         </div>
       </div>
@@ -849,6 +975,132 @@ function showApidoc() {
               </div>
               <p class="hint">适合安装「安装列表」之外的 pecl 扩展；编译约 1-3 分钟，装完成后重启实例生效。</p>
             </div>
+          </div>
+        </div>
+        </div>
+
+        <!-- Node 环境：依赖管理（npm / pnpm） -->
+        <div id="depsNode" style="display:none">
+        <div class="card">
+          <div class="page-title">依赖管理</div>
+          <div class="hint" style="margin-bottom:12px;padding:9px 11px;border:1px solid var(--line);border-radius:10px;background:var(--bg)">npm/pnpm 在线安装需节点可访问外网。依赖装在 <b>/app/node_modules</b>（数据目录持久，<b>重建容器不丢</b>）；镜像源写入容器 /root/.npmrc，重建后恢复官方默认，可重设。</div>
+          <div class="ptabs">
+            <button class="ptab active" data-ptab="nplist" onclick="switchNodeTab('nplist')">依赖安装</button>
+            <button class="ptab" data-ptab="npkg" onclick="switchNodeTab('npkg')">从 package.json 安装</button>
+            <button class="ptab" data-ptab="npman" onclick="switchNodeTab('npman')">手动安装</button>
+            <button class="ptab" data-ptab="npins" onclick="switchNodeTab('npins')">已安装</button>
+            <button class="ptab" data-ptab="npmirror" onclick="switchNodeTab('npmirror')">镜像加速</button>
+          </div>
+
+          <!-- Tab1 依赖安装列表 -->
+          <div id="ntab-nplist">
+            <div class="domain-row" style="margin-bottom:10px;align-items:center">
+              <label class="status-text" style="white-space:nowrap">包管理器</label>
+              <select id="npmgr" onchange="renderNodeCatalog()"><option value="npm">npm</option><option value="pnpm">pnpm</option></select>
+            </div>
+            <table class="ftable">
+              <thead><tr><th>名称</th><th style="width:90px">类型</th><th>说明</th><th style="width:100px">已装版本</th><th style="width:80px">操作</th></tr></thead>
+              <tbody id="nodePkgRows"></tbody>
+            </table>
+            <div id="nodePkgEmpty" class="empty">实例未运行，无法检测依赖状态；启动实例后自动刷新（仍可直接手动安装）</div>
+          </div>
+
+          <!-- Tab2 package.json -->
+          <div id="ntab-npkg" style="display:none">
+            <div class="dep-block">
+              <div class="dep-label">按 package.json 安装全部依赖</div>
+              <div class="domain-row">
+                <select id="npmgr2"><option value="npm">npm</option><option value="pnpm">pnpm</option></select>
+                <button id="npkgBtn" class="btn" onclick="nodeInstallFromPkg()">安装依赖</button>
+              </div>
+              <p id="npkgHint" class="hint">读取实例根目录 package.json 安装全部依赖，日志实时回显。</p>
+            </div>
+          </div>
+
+          <!-- Tab3 手动安装 -->
+          <div id="ntab-npman" style="display:none">
+            <div class="dep-block">
+              <div class="dep-label">手动安装依赖</div>
+              <div class="domain-row">
+                <input id="npkgNames" placeholder="包名，多个用空格分隔，如：express mysql2 dayjs" onkeydown="if(event.key==='Enter')nodeInstallPkgs()">
+                <select id="npmgr3"><option value="npm">npm</option><option value="pnpm">pnpm</option></select>
+                <button class="btn" onclick="nodeInstallPkgs()">安装</button>
+              </div>
+              <p class="hint">支持 @scope/name 与版本（express@4.19.0、zod@^3）。需实例处于运行状态。</p>
+            </div>
+          </div>
+
+          <!-- Tab4 已安装 -->
+          <div id="ntab-npins" style="display:none">
+            <div class="domain-row">
+              <input id="ndepFilter" placeholder="搜索已安装的依赖…" oninput="renderNodeInstalled()">
+              <span id="ndepCount" class="status-text"></span>
+            </div>
+            <table class="ftable">
+              <thead><tr><th>包名</th><th style="width:140px">版本</th><th style="width:110px">操作</th></tr></thead>
+              <tbody id="ndepRows"></tbody>
+            </table>
+            <div id="ndepEmpty" class="empty">暂无已安装依赖（/app/node_modules 为空）</div>
+          </div>
+
+          <!-- Tab5 镜像加速 -->
+          <div id="ntab-npmirror" style="display:none">
+            <div class="hint" style="margin-bottom:12px;padding:9px 11px;border:1px solid var(--line);border-radius:10px;background:var(--bg)">
+              国内源下载速度远快于官方源，安装依赖前建议先切换。写入容器 <b>/root/.npmrc</b> 后<b>立即生效</b>，npm 与 pnpm 安装均使用；重建容器后恢复官方默认，需重新设置。
+            </div>
+            <table class="ftable">
+              <thead><tr><th style="width:110px">镜像</th><th>地址</th><th style="width:60px">状态</th><th style="width:110px">操作</th></tr></thead>
+              <tbody id="npmirrorRows"></tbody>
+            </table>
+            <div id="npmirrorEmpty" class="empty">实例未运行，无法查看/设置镜像源；启动实例后自动刷新</div>
+          </div>
+        </div>
+        </div>
+
+        <!-- Go 环境：依赖管理（go mod） -->
+        <div id="depsGo" style="display:none">
+        <div class="card">
+          <div class="page-title">依赖管理</div>
+          <div class="hint" style="margin-bottom:12px;padding:9px 11px;border:1px solid var(--line);border-radius:10px;background:var(--bg)">Go 依赖声明在 <b>go.mod</b>（编译期一次性拉取，无逐包安装概念）。模块缓存 /go/pkg/mod 重建容器会丢——重编译自动重拉，走国内代理秒级。拉依赖需节点可访问外网。</div>
+          <div class="ptabs">
+            <button class="ptab active" data-ptab="gotidy" onclick="switchGoTab('gotidy')">同步依赖</button>
+            <button class="ptab" data-ptab="gomod" onclick="switchGoTab('gomod')">已装依赖</button>
+            <button class="ptab" data-ptab="goproxy" onclick="switchGoTab('goproxy')">GOPROXY 加速</button>
+          </div>
+
+          <!-- Tab1 同步依赖 -->
+          <div id="ntab-gotidy">
+            <div class="dep-block">
+              <div class="dep-label">go mod tidy</div>
+              <div class="domain-row">
+                <button id="goTidyBtn" class="btn" onclick="goTidy()">同步依赖（go mod tidy）</button>
+              </div>
+              <p class="hint">上传项目后点一次即可拉全 go.mod 声明的依赖；根目录没有 go.mod 时自动 <b>go mod init</b> 创建。日志实时回显。</p>
+            </div>
+          </div>
+
+          <!-- Tab2 已装依赖 -->
+          <div id="ntab-gomod" style="display:none">
+            <div class="domain-row">
+              <span id="goModMeta" class="status-text"></span>
+            </div>
+            <table class="ftable">
+              <thead><tr><th>模块</th><th style="width:140px">版本</th><th style="width:90px">类型</th></tr></thead>
+              <tbody id="goModRows"></tbody>
+            </table>
+            <div id="goModEmpty" class="empty">实例根目录暂无 go.mod——上传项目后到「同步依赖」页一键创建并拉取</div>
+          </div>
+
+          <!-- Tab3 GOPROXY -->
+          <div id="ntab-goproxy" style="display:none">
+            <div class="hint" style="margin-bottom:12px;padding:9px 11px;border:1px solid var(--line);border-radius:10px;background:var(--bg)">
+              拉取依赖前建议先切国内代理（官方源国内直连很慢或超时）。写入容器 <b>go env -w GOPROXY</b> 后<b>立即生效</b>；重建容器后恢复官方默认，需重新设置。
+            </div>
+            <table class="ftable">
+              <thead><tr><th style="width:150px">代理</th><th>地址</th><th style="width:60px">状态</th><th style="width:110px">操作</th></tr></thead>
+              <tbody id="goproxyRows"></tbody>
+            </table>
+            <div id="goproxyEmpty" class="empty">实例未运行，无法查看/设置代理；启动实例后自动刷新</div>
           </div>
         </div>
         </div>
@@ -1128,6 +1380,8 @@ let logWS = null
 let logSeq = 0
 let usageHours = 6
 let isPhp = false
+let isNode = false
+let isGo = false
 
 // ---------- 基础 ----------
 function $ (id) { return document.getElementById(id) }
@@ -1245,10 +1499,218 @@ function switchView (v) {
   if (v === 'usage') loadUsage(usageHours)
   if (v === 'domain') loadDomain()
   if (v === 'database') loadDatabase()
-  if (v === 'deps') { if (isPhp) loadPhpExt(); else loadPyPkgs() }
+  if (v === 'backup') loadBackup()
+  if (v === 'crons') loadCrons()
+  if (v === 'site') loadSite()
+  if (v === 'deps') { if (isPhp) loadPhpExt(); else if (isNode) loadNodePkgs(); else if (isGo) loadGoMod(); else loadPyPkgs() }
   if (v === 'disfn') loadDisfn()
   if (v === 'ops') loadOps()
   if (v === 'term') termConnect()
+}
+
+// ---------- 备份（仅本实例） ----------
+let bkInfo = null
+async function loadBackup () {
+  try {
+    bkInfo = await api('GET', '/panel/instance/backup/info')
+    const hasDb = bkInfo.db && bkInfo.db.running
+    $('bkDbInfo').textContent = !bkInfo.db
+      ? '尚未开通数据库（在「数据库」页开通后可备份）'
+      : (bkInfo.db.running ? `MySQL ${bkInfo.db.version} / ${bkInfo.db.db_name}` : 'MySQL 服务未运行，暂不能备份')
+    $('bkDbOps').style.display = hasDb ? 'block' : 'none'
+    if (hasDb) {
+      const chips = $('bkDbTableChips')
+      chips.innerHTML = ''
+      const tables = bkInfo.db.tables || []
+      if (!tables.length) {
+        chips.innerHTML = '<span class="status-text">该库暂无数据表，直接「备份数据库」即可（空库备份）。</span>'
+      } else {
+        $('bkDbHint').textContent = '只能备份本实例的数据库。表名留空备份整库；也可点表名快速填入。'
+        tables.slice(0, 40).forEach(t => {
+          const b = document.createElement('button')
+          b.className = 'btn ghost sm'
+          b.textContent = t
+          b.onclick = () => {
+            const inp = $('bkDbTables')
+            const cur = inp.value.split(',').map(s => s.trim()).filter(Boolean)
+            if (!cur.includes(t)) cur.push(t)
+            inp.value = cur.join(', ')
+          }
+          chips.appendChild(b)
+        })
+      }
+    }
+    await loadBackupList()
+  } catch (e) { toast(e.message, false) }
+}
+async function doBackupDb () {
+  const tables = $('bkDbTables').value.split(',').map(s => s.trim()).filter(Boolean)
+  toast('正在备份数据库…')
+  try {
+    const d = await api('POST', '/panel/instance/backup/db', { tables })
+    toast(d.detail, true); loadBackupList()
+  } catch (e) { toast(e.message, false) }
+}
+async function doBackupDir () {
+  toast('正在备份目录…')
+  try {
+    const d = await api('POST', '/panel/instance/backup/dir', { path: $('bkDirPath').value.trim() })
+    toast(d.detail, true); loadBackupList()
+  } catch (e) { toast(e.message, false) }
+}
+// 备份列表前端分页（每实例文件量可控，拉全量后本地切片）
+let bkAll = [], bkPage = 1
+const BK_PAGE_SIZE = 10
+async function loadBackupList () {
+  try {
+    const d = await api('GET', '/panel/instance/backup/list')
+    bkAll = d.backups || []
+    const tp = Math.max(1, Math.ceil(bkAll.length / BK_PAGE_SIZE))
+    if (bkPage > tp) bkPage = tp
+    renderBkList()
+  } catch (e) { toast(e.message, false) }
+}
+function renderBkList () {
+  const tb = $('bkList')
+  const slice = bkAll.slice((bkPage - 1) * BK_PAGE_SIZE, bkPage * BK_PAGE_SIZE)
+  tb.innerHTML = slice.length ? '' : '<tr><td colspan="5" style="padding:10px 8px;color:var(--text2)">暂无备份文件</td></tr>'
+  slice.forEach(b => {
+    const kind = { database: '数据库', dir: '目录', container: '容器' }[b.kind] || b.kind
+    const tr = document.createElement('tr')
+    tr.innerHTML = `
+      <td class="mono" style="padding:7px 8px;border-bottom:1px solid var(--line)">${b.file}</td>
+      <td style="padding:7px 8px;border-bottom:1px solid var(--line)">${kind}</td>
+      <td class="mono" style="padding:7px 8px;border-bottom:1px solid var(--line)">${fmtSize(b.size)}</td>
+      <td class="mono" style="padding:7px 8px;border-bottom:1px solid var(--line)">${b.created_at}</td>
+      <td style="padding:7px 8px;border-bottom:1px solid var(--line);white-space:nowrap"></td>`
+    const td = tr.lastElementChild
+    td.appendChild(btn('下载', 'ghost sm', () => window.open(API + '/panel/instance/backup/download?file=' + encodeURIComponent(b.file) + '&t=' + JWT)))
+    td.appendChild(btn('恢复', 'ghost sm', () => showRestore(b)))
+    td.appendChild(btn('删除', 'ghost sm danger-text', async () => {
+      if (!confirm('确认删除 ' + b.file + '？')) return
+      try { const r = await api('DELETE', '/panel/instance/backup?file=' + encodeURIComponent(b.file)); toast(r.detail, true); loadBackupList() } catch (e) { toast(e.message, false) }
+    }))
+    tb.appendChild(tr)
+  })
+  // 分页条
+  const pg = $('bkPager')
+  if (!bkAll.length) { pg.style.display = 'none'; pg.innerHTML = ''; return }
+  const tp = Math.max(1, Math.ceil(bkAll.length / BK_PAGE_SIZE))
+  pg.style.display = 'flex'
+  pg.innerHTML = `<span>共 ${bkAll.length} 条 · 第 ${bkPage}/${tp} 页</span>`
+  pg.appendChild(btn('上一页', 'ghost sm', () => { if (bkPage > 1) { bkPage--; renderBkList() } }))
+  pg.appendChild(btn('下一页', 'ghost sm', () => { if (bkPage < tp) { bkPage++; renderBkList() } }))
+}
+let bkRestoreTarget = null
+function showRestore (b) {
+  bkRestoreTarget = b
+  $('bkRestorePanel').style.display = 'block'
+  $('bkRestoreFile').textContent = b.file
+  $('bkRestoreDbRow').style.display = b.kind === 'database' ? 'flex' : 'none'
+  $('bkRestoreDirRow').style.display = b.kind === 'dir' ? 'flex' : 'none'
+  if (b.kind !== 'database') $('bkRestorePath').value = ''
+}
+async function doRestoreDb () {
+  if (!confirm('数据库恢复将覆盖现有数据，确认继续？')) return
+  toast('正在恢复…')
+  try { const d = await api('POST', '/panel/instance/backup/restore/db', { file: bkRestoreTarget.file }); toast(d.detail, true) } catch (e) { toast(e.message, false) }
+}
+async function doRestoreDir () {
+  toast('正在恢复…')
+  try { const d = await api('POST', '/panel/instance/backup/restore/dir', { file: bkRestoreTarget.file, path: $('bkRestorePath').value.trim() }); toast(d.detail, true) } catch (e) { toast(e.message, false) }
+}
+
+// ---------- 定时任务 ----------
+async function loadCrons () {
+  try {
+    const d = await api('GET', '/panel/instance/crons')
+    const tb = $('cronList')
+    tb.innerHTML = d.crons.length ? '' : '<tr><td colspan="5" style="padding:10px 8px;color:var(--text2)">暂无定时任务</td></tr>'
+    d.crons.forEach(c => {
+      const tr = document.createElement('tr')
+      const st = c.enabled ? '<span style="color:#3aa981">启用</span>' : '<span style="color:var(--text2)">停用</span>'
+      const last = c.last_run ? `${c.last_run} <span style="color:${c.last_status === 'ok' ? '#3aa981' : '#e05a4e'}">${c.last_status === 'ok' ? '成功' : c.last_status === 'fail' ? '失败' : c.last_status}</span>` : '<span style="color:var(--text2)">未执行</span>'
+      tr.innerHTML = `
+        <td style="padding:7px 8px;border-bottom:1px solid var(--line)">${st}</td>
+        <td class="mono" style="padding:7px 8px;border-bottom:1px solid var(--line)">${c.schedule}</td>
+        <td class="mono" style="padding:7px 8px;border-bottom:1px solid var(--line);max-width:260px;overflow:hidden;text-overflow:ellipsis" title="${(c.command || '').replace(/"/g, '&quot;')}">${c.command}</td>
+        <td class="mono" style="padding:7px 8px;border-bottom:1px solid var(--line);white-space:nowrap">${last}</td>
+        <td style="padding:7px 8px;border-bottom:1px solid var(--line);white-space:nowrap"></td>`
+      const td = tr.lastElementChild
+      td.appendChild(btn(c.enabled ? '停用' : '启用', 'ghost sm', async () => {
+        try { await api('PATCH', '/panel/instance/crons/' + c.id, { enabled: !c.enabled }); loadCrons() } catch (e) { toast(e.message, false) }
+      }))
+      td.appendChild(btn('立即执行', 'ghost sm', async () => {
+        try { const r = await api('POST', '/panel/instance/crons/' + c.id + '/run'); toast(r.detail, true); setTimeout(loadCrons, 3000) } catch (e) { toast(e.message, false) }
+      }))
+      td.appendChild(btn('删除', 'ghost sm danger-text', async () => {
+        if (!confirm('确认删除该任务？')) return
+        try { await api('DELETE', '/panel/instance/crons/' + c.id); loadCrons() } catch (e) { toast(e.message, false) }
+      }))
+      tb.appendChild(tr)
+    })
+  } catch (e) { toast(e.message, false) }
+}
+async function saveCron () {
+  const schedule = $('cronSchedule').value.trim()
+  const command = $('cronCommand').value.trim()
+  if (!schedule || !command) return toast('表达式和命令都不能为空', false)
+  try { await api('POST', '/panel/instance/crons', { schedule, command }); $('cronSchedule').value = ''; $('cronCommand').value = ''; toast('已添加', true); loadCrons() } catch (e) { toast(e.message, false) }
+}
+
+// ---------- 网站防护 ----------
+async function loadSite () {
+  try {
+    const d = await api('GET', '/panel/instance/site')
+    const bound = !!d.domain
+    $('siteNone').style.display = bound ? 'none' : 'block'
+    $('siteForm').style.display = bound ? 'block' : 'none'
+    if (!bound) return
+    $('siteDomain').textContent = d.domain
+    const cs = d.caddy || {}
+    $('siteCaddy').textContent = cs.installed ? (cs.active ? `运行中 ${cs.version || ''}` : '未运行：' + (cs.reason || '')) : '节点未安装 Caddy'
+    $('siteMode').value = d.mode || 'proxy'
+    $('siteStaticRow').style.display = d.mode === 'static' ? 'flex' : 'none'
+    $('siteStaticDir').value = d.static_dir || 'public_html'
+    $('siteAuthUser').value = d.auth_user || ''
+    $('siteAuthPass').value = ''
+    $('siteWl').value = d.ip_whitelist || ''
+    $('siteBl').value = d.ip_blacklist || ''
+  } catch (e) { toast(e.message, false) }
+}
+async function saveSite () {
+  const body = {
+    mode: $('siteMode').value,
+    static_dir: $('siteStaticDir').value.trim() || 'public_html',
+    auth_user: $('siteAuthUser').value.trim(),
+    auth_pass: $('siteAuthPass').value,
+    ip_whitelist: $('siteWl').value.trim(),
+    ip_blacklist: $('siteBl').value.trim()
+  }
+  toast('正在应用…')
+  try { const d = await api('PUT', '/panel/instance/site', body); toast('已生效', true); loadSite() } catch (e) { toast(e.message, false) }
+}
+
+// ---------- phpMyAdmin ----------
+let pmaOn = false
+async function pmaToggle () {
+  try {
+    if (!pmaOn) {
+      toast('正在开启 phpMyAdmin（首次需拉取镜像，约 1 分钟）…')
+      const d = await api('POST', '/panel/instance/pma/enable')
+      pmaOn = true
+      $('pmaBtn').textContent = '关闭 phpMyAdmin'
+      $('pmaBox').style.display = 'block'
+      $('pmaState').innerHTML = `已开启（2 小时后自动关闭）：<a class="mono bound" href="${d.url}" target="_blank" rel="noopener" style="color:var(--mint)">${d.url}</a>（自动登录，仅能访问本实例库）`
+      toast(d.detail, true)
+    } else {
+      const d = await api('POST', '/panel/instance/pma/disable')
+      pmaOn = false
+      $('pmaBtn').textContent = 'phpMyAdmin'
+      $('pmaBox').style.display = 'none'
+      toast(d.detail, true)
+    }
+  } catch (e) { toast(e.message, false) }
 }
 
 // ---------- 概览 ----------
@@ -1277,17 +1739,26 @@ function renderOverview () {
     <div class="spec"><div class="k">外部端口</div><div class="v mono">${inst.ext_port}</div></div>
     <div class="spec"><div class="k">访问入口</div><div class="v mono">${location.hostname}:${inst.ext_port}</div></div>
     <div class="spec"><div class="k">有效期至</div><div class="v">${exp}</div></div>`
-  // PHP 环境适配：命令默认值/占位符、依赖页分流（Python 依赖 / PHP 扩展）
-  isPhp = (inst.image || '').startsWith('php:') || (inst.image || '').startsWith('ppanel-php:')
-  const dftCmd = isPhp ? 'php -S 0.0.0.0:8000 -t /app' : 'python main.py'
+  // 运行时类型适配：命令默认值/占位符、依赖页分流（Python 依赖 / PHP 扩展；Node 暂无依赖 UI）
+  const img = inst.image || ''
+  isPhp = img.startsWith('php:') || img.startsWith('ppanel-php:')
+  isNode = img.startsWith('node:')
+  isGo = img.startsWith('golang:')
+  const dftCmd = isPhp ? 'php -S 0.0.0.0:8000 -t /app'
+    : (isNode ? 'node index.js' : (isGo ? '[ -f go.mod ] || go mod init ppanel-app; go build -o app . && ./app' : 'python main.py'))
   $('cmdArea').value = inst.start_cmd || dftCmd
   $('cmdArea').placeholder = dftCmd
   $('noteInput').value = inst.note || ''
-  $('depsPython').style.display = isPhp ? 'none' : 'block'
+  $('depsPython').style.display = (isPhp || isNode || isGo) ? 'none' : 'block'
   $('depsPhp').style.display = isPhp ? 'block' : 'none'
+  $('depsNode').style.display = isNode ? 'block' : 'none'
+  $('depsGo').style.display = isGo ? 'block' : 'none'
+  // 四种运行时都有依赖管理：Python=pip，PHP=pecl 扩展，Node=npm/pnpm，Go=go mod
+  $('navDeps').style.display = 'block'
   $('navDeps').textContent = isPhp ? '扩展' : '依赖'  // PHP 实例导航叫「扩展」
   $('navDisfn').style.display = isPhp ? 'block' : 'none'
-  if (!isPhp && document.querySelector('.sidenav .active')?.dataset.view === 'disfn') switchView('overview')
+  const cur = document.querySelector('.sidenav .active')?.dataset.view
+  if (!isPhp && cur === 'disfn') switchView('overview')
   if (!isPhp) { phpExtShown = false }
   loadStats()
 }
@@ -1336,11 +1807,13 @@ async function openRuntime () {
     const r = await api('GET', '/panel/instance/runtime')
     const sel = $('rtSelect')
     const vs = r.versions || []
-    // 按运行时类型分组展示（Python / PHP / 其他）
+    // 按运行时类型分组展示（Python / PHP / Node / 其他）
     const groups = [
       ['Python', v => v.startsWith('python:')],
       ['PHP', v => v.startsWith('php:') || v.startsWith('ppanel-php:')],
-      ['其他', v => !v.startsWith('python:') && !v.startsWith('php:') && !v.startsWith('ppanel-php:')],
+      ['Node.js', v => v.startsWith('node:')],
+      ['Go', v => v.startsWith('golang:')],
+      ['其他', v => !v.startsWith('python:') && !v.startsWith('php:') && !v.startsWith('ppanel-php:') && !v.startsWith('node:') && !v.startsWith('golang:')],
     ]
     let html = ''
     for (const [g, test] of groups) {
@@ -1756,7 +2229,7 @@ function rowEl (e) {
   tdAct.appendChild(wrap)
 
   tr.append(tdCk, tdName, tdSize, tdTime, tdAct)
-  tr.onclick = ev => selectRow(e.name, ev)
+  // 行点击不选中（仅勾选框选中）；双击打开，右键操作当前行
   tr.ondblclick = () => {
     if (e.is_dir) filesGo(full)
     else if (isImage(e.name)) previewImg(e.name)
@@ -1767,28 +2240,7 @@ function rowEl (e) {
   return tr
 }
 
-// Windows 风格选中：单击选中 / Ctrl 多选 / Shift 范围选
-function selectRow (name, ev) {
-  if (ev && ev.shiftKey && anchorName && anchorName !== name) {
-    const names = entries.map(f => f.name)
-    const a = names.indexOf(anchorName), b = names.indexOf(name)
-    if (a > -1 && b > -1) {
-      const [s, t] = a < b ? [a, b] : [b, a]
-      selection.clear()
-      names.slice(s, t + 1).forEach(n => selection.add(n))
-      renderRows()
-      return
-    }
-  }
-  if (ev && (ev.ctrlKey || ev.metaKey)) {
-    selection.has(name) ? selection.delete(name) : selection.add(name)
-  } else {
-    selection.clear()
-    selection.add(name)
-  }
-  anchorName = name
-  renderRows()
-}
+// 仅点击勾选框选中；右键未选中的行只对当前行操作，不改勾选状态
 function toggleRow (name) {
   selection.has(name) ? selection.delete(name) : selection.add(name)
   anchorName = name
@@ -1855,9 +2307,7 @@ function openCtx (x, y, items) {
   })
 }
 function rowMenu (ev, name, isDir) {
-  if (!selection.has(name)) { selection.clear(); selection.add(name) }
-  renderRows()
-  const names = [...selection]
+  const names = selection.has(name) ? [...selection] : [name]
   const multi = names.length > 1
   const items = []
   if (isDir) {
@@ -2277,7 +2727,7 @@ async function loadDomain () {
       $('sslCaddyState').textContent = '未安装（绑定域名需管理员先安装 Caddy）'
       $('sslCaddyState').style.color = '#e05a4e'
     } else if (!cs.active) {
-      $('sslCaddyState').textContent = '已安装 ' + (cs.version || '') + '，但服务未运行'
+      $('sslCaddyState').textContent = '已安装 ' + (cs.version || '') + '，但服务未运行：' + (cs.reason || '原因未知')
       $('sslCaddyState').style.color = '#e05a4e'
     } else {
       $('sslCaddyState').textContent = '运行中（v' + (cs.version || '?') + '），证书自动申请/续期'
@@ -2729,6 +3179,221 @@ function renderInstalled () {
     td.appendChild(b)
     rows.appendChild(tr)
   }
+}
+
+// ---------- Node 依赖管理（npm / pnpm，五 Tab 同款） ----------
+let nodeCatalog = []
+let nodeInstalled = []
+let nodeRunning = false
+let nodeHasPkg = false
+
+function switchNodeTab (t) {
+  for (const b of document.querySelectorAll('#depsNode .ptab')) b.classList.toggle('active', b.dataset.ptab === t)
+  for (const x of ['nplist', 'npkg', 'npman', 'npins', 'npmirror']) $('ntab-' + x).style.display = x === t ? 'block' : 'none'
+  if (t === 'npins') renderNodeInstalled()
+  if (t === 'npmirror') loadNpmMirror()
+}
+function renderNodeCatalog () {
+  const rows = $('nodePkgRows')
+  rows.innerHTML = ''
+  $('nodePkgEmpty').style.display = nodeRunning ? 'none' : 'block'
+  for (const it of nodeCatalog) {
+    const tr = document.createElement('tr')
+    const st = it.installed != null ? `<span class="st-ok">${esc(it.installed)}</span>` : '<span class="text-sub">未装</span>'
+    const op = nodeRunning
+      ? (it.installed != null
+          ? `<button class="qbtn text-btn sm" onclick="nodeUninstall('${esc(it.name)}')">卸载</button>`
+          : `<button class="qbtn text-btn sm op-install" onclick="nodeInstallPkg('${esc(it.name)}')">安装</button>`)
+      : '<span class="text-sub">—</span>'
+    tr.innerHTML = `<td><span class="mono">${esc(it.name)}</span></td>
+      <td><span class="text-sub">${esc(it.type)}</span></td>
+      <td class="text-sub" style="font-size:12.5px">${esc(it.desc)}</td>
+      <td style="text-align:center">${st}</td>
+      <td style="text-align:center">${op}</td>`
+    rows.appendChild(tr)
+  }
+}
+async function loadNodePkgs (silent) {
+  if (!isNode) return
+  try {
+    const r = await api('GET', '/panel/instance/node/packages')
+    nodeCatalog = r.catalog || []
+    nodeInstalled = r.installed || []
+    nodeRunning = !!r.running
+    nodeHasPkg = !!r.has_package_json
+    $('npkgBtn').disabled = !nodeHasPkg || !nodeRunning
+    $('npkgHint').textContent = nodeHasPkg
+      ? '读取实例根目录 package.json 安装全部依赖，日志实时回显。'
+      : '实例根目录暂无 package.json——先在「文件」页上传，再回来安装。'
+    renderNodeCatalog()
+    renderNodeInstalled()
+  } catch (e) {
+    if (!silent) toast(e.message, false)
+  }
+}
+function _nodeMgr (id) { return $(id).value === 'pnpm' ? 'pnpm' : 'npm' }
+async function nodeInstallPkg (name) {
+  try {
+    const { job_id } = await api('POST', '/panel/instance/node/deps/install-pkgs', { names: name, manager: _nodeMgr('npmgr') })
+    runJob(job_id, `安装依赖 ${name}`, async () => {
+      toast(`依赖 ${name} 安装任务结束`, true)
+      await loadNodePkgs(true)
+    })
+  } catch (e) { toast(e.message, false) }
+}
+async function nodeInstallPkgs () {
+  const names = $('npkgNames').value.trim()
+  if (!names) return toast('请输入依赖名称', false)
+  try {
+    const { job_id } = await api('POST', '/panel/instance/node/deps/install-pkgs', { names, manager: _nodeMgr('npmgr3') })
+    $('npkgNames').value = ''
+    runJob(job_id, '手动安装：' + names, async () => {
+      toast('安装任务结束', true)
+      await loadNodePkgs(true)
+    })
+  } catch (e) { toast(e.message, false) }
+}
+async function nodeInstallFromPkg () {
+  try {
+    const { job_id } = await api('POST', '/panel/instance/node/deps/install', { manager: _nodeMgr('npmgr2') })
+    runJob(job_id, '按 package.json 安装', async () => {
+      toast('安装任务结束', true)
+      await loadNodePkgs(true)
+    })
+  } catch (e) { toast(e.message, false) }
+}
+function nodeUninstall (name) {
+  confirmBox('卸载依赖', `确定卸载依赖「${name}」吗？依赖该包的应用可能无法运行。`, async () => {
+    try {
+      const { job_id } = await api('POST', '/panel/instance/node/deps/uninstall', { names: name, manager: _nodeMgr('npmgr') })
+      runJob(job_id, '卸载 ' + name, async () => {
+        toast('卸载任务结束', true)
+        await loadNodePkgs(true)
+      })
+    } catch (e) { toast(e.message, false) }
+  })
+}
+function renderNodeInstalled () {
+  const kw = (($('ndepFilter') || {}).value || '').trim().toLowerCase()
+  const list = nodeInstalled.filter(p => !kw || p.name.toLowerCase().includes(kw))
+  const rows = $('ndepRows')
+  rows.innerHTML = ''
+  $('ndepCount').textContent = kw ? `匹配 ${list.length} / ${nodeInstalled.length} 个` : `共 ${nodeInstalled.length} 个`
+  $('ndepEmpty').style.display = nodeInstalled.length ? 'none' : 'block'
+  for (const p of list) {
+    const tr = document.createElement('tr')
+    tr.innerHTML = `<td><span class="mono">${esc(p.name)}</span></td>
+      <td><span class="mono text-sub">${esc(p.version)}</span></td>
+      <td style="text-align:center"></td>`
+    const td = tr.lastElementChild
+    const b = document.createElement('button')
+    b.className = 'qbtn text-btn danger sm'
+    b.textContent = '卸载'
+    b.onclick = () => nodeUninstall(p.name)
+    td.appendChild(b)
+    rows.appendChild(tr)
+  }
+}
+async function loadNpmMirror () {
+  try {
+    const d = await api('GET', '/panel/instance/npm/mirror')
+    const rows = $('npmirrorRows')
+    rows.innerHTML = ''
+    $('npmirrorEmpty').style.display = d.running ? 'none' : 'block'
+    for (const m of d.mirrors) {
+      const cur = d.running && m.url === d.current
+      const tr = document.createElement('tr')
+      tr.innerHTML = `<td>${esc(m.name)}</td>
+        <td class="mono" style="font-size:12px;color:var(--text2)">${esc(m.url)}</td>
+        <td style="text-align:center">${cur ? '<span class="st-ok">✓</span>' : ''}</td>
+        <td style="text-align:center">${cur
+          ? '<span class="status-text">当前生效</span>'
+          : `<button class="qbtn text-btn sm" onclick="setNpmMirror('${esc(m.url)}')">使用此镜像</button>`}</td>`
+      rows.appendChild(tr)
+    }
+  } catch (e) { toast(e.message, false) }
+}
+async function setNpmMirror (url) {
+  try {
+    await api('PUT', '/panel/instance/npm/mirror', { url })
+    toast('镜像源已设置，立即生效', true)
+    await loadNpmMirror()
+  } catch (e) { toast(e.message, false) }
+}
+
+// ---------- Go 依赖管理（go mod，三 Tab） ----------
+let goModData = null
+let goRunning = false
+
+function switchGoTab (t) {
+  for (const b of document.querySelectorAll('#depsGo .ptab')) b.classList.toggle('active', b.dataset.ptab === t)
+  for (const x of ['gotidy', 'gomod', 'goproxy']) $('ntab-' + x).style.display = x === t ? 'block' : 'none'
+  if (t === 'gomod') renderGoMod()
+  if (t === 'goproxy') loadGoProxy()
+}
+function renderGoMod () {
+  const rows = $('goModRows')
+  rows.innerHTML = ''
+  const data = goModData
+  $('goModEmpty').style.display = data ? 'none' : 'block'
+  $('goModMeta').textContent = data
+    ? `module: ${data.module || '—'}${data.go ? '　go ' + data.go : ''}　依赖 ${data.requires.length} 个`
+    : ''
+  if (!data) return
+  for (const r of data.requires) {
+    const tr = document.createElement('tr')
+    tr.innerHTML = `<td><span class="mono">${esc(r.name)}</span></td>
+      <td><span class="mono text-sub">${esc(r.version)}</span></td>
+      <td style="text-align:center">${r.indirect ? '<span class="text-sub">间接</span>' : '<span class="st-ok">直接</span>'}</td>`
+    rows.appendChild(tr)
+  }
+}
+async function loadGoMod (silent) {
+  if (!isGo) return
+  try {
+    const r = await api('GET', '/panel/instance/go/mod')
+    goModData = r.go_mod
+    goRunning = !!r.running
+    $('goTidyBtn').disabled = !goRunning
+    renderGoMod()
+  } catch (e) {
+    if (!silent) toast(e.message, false)
+  }
+}
+async function goTidy () {
+  try {
+    const { job_id } = await api('POST', '/panel/instance/go/mod/tidy')
+    runJob(job_id, 'go mod tidy', async () => {
+      toast('依赖同步任务结束', true)
+      await loadGoMod(true)
+    })
+  } catch (e) { toast(e.message, false) }
+}
+async function loadGoProxy () {
+  try {
+    const d = await api('GET', '/panel/instance/go/proxy')
+    const rows = $('goproxyRows')
+    rows.innerHTML = ''
+    $('goproxyEmpty').style.display = d.running ? 'none' : 'block'
+    for (const m of d.proxies) {
+      const cur = d.running && m.url === d.current
+      const tr = document.createElement('tr')
+      tr.innerHTML = `<td>${esc(m.name)}</td>
+        <td class="mono" style="font-size:12px;color:var(--text2)">${esc(m.url)}</td>
+        <td style="text-align:center">${cur ? '<span class="st-ok">✓</span>' : ''}</td>
+        <td style="text-align:center">${cur
+          ? '<span class="status-text">当前生效</span>'
+          : `<button class="qbtn text-btn sm" onclick="setGoProxy('${esc(m.url)}')">使用此代理</button>`}</td>`
+      rows.appendChild(tr)
+    }
+  } catch (e) { toast(e.message, false) }
+}
+async function setGoProxy (url) {
+  try {
+    await api('PUT', '/panel/instance/go/proxy', { url })
+    toast('GOPROXY 已设置，立即生效', true)
+    await loadGoProxy()
+  } catch (e) { toast(e.message, false) }
 }
 
 // ---------- 终端（xterm.js 交互式 PTY，qnbt 同款） ----------

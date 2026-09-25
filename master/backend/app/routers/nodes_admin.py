@@ -37,6 +37,27 @@ def list_nodes(db: Session = Depends(get_db)):
     return [_out(n, agent_health(n)) for n in nodes]
 
 
+@router.get("/admin/nodes/stability")
+def nodes_stability(window: int = 7, db: Session = Depends(get_db)):
+    """所有节点稳定性评分（节点列表徽标）。window: 1/7/30 天。"""
+    if window not in (1, 7, 30):
+        window = 7
+    from app.stability import all_nodes_stability
+    return all_nodes_stability(db, window)
+
+
+@router.get("/admin/nodes/{node_id}/stability")
+def node_stability_detail(node_id: int, window: int = 7,
+                          db: Session = Depends(get_db)):
+    """单节点稳定性详情（节点管理概览卡）。"""
+    if window not in (1, 7, 30):
+        window = 7
+    if not db.get(Node, node_id):
+        raise HTTPException(status_code=404, detail="节点不存在")
+    from app.stability import node_stability
+    return node_stability(db, node_id, window)
+
+
 @router.post("/admin/nodes")
 def create_node(body: NodeCreate, db: Session = Depends(get_db)):
     if db.query(Node).filter(Node.name == body.name.strip()).first():

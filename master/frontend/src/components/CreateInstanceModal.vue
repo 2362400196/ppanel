@@ -58,7 +58,10 @@ watch(() => props.open, async v => {
 
 // 切换运行环境时联动默认启动命令
 watch(image, v => {
-  startCmd.value = v.startsWith('php:') ? 'php -S 0.0.0.0:8000 -t /app' : 'python main.py'
+  if (v.startsWith('php:')) startCmd.value = 'php -S 0.0.0.0:8000 -t /app'
+  else if (v.startsWith('node:')) startCmd.value = 'node index.js'
+  else if (v.startsWith('golang:')) startCmd.value = '[ -f go.mod ] || go mod init ppanel-app; go build -o app . && ./app'
+  else startCmd.value = 'python main.py'
 })
 
 async function submit() {
@@ -93,7 +96,7 @@ async function submit() {
         <UIInput v-model="name" placeholder="如 my-api" />
       </label>
       <label class="field">
-        <span class="label">Python 版本</span>
+        <span class="label">运行环境</span>
         <UISelect v-model="image" :options="images" :disabled="!images.length" />
       </label>
       <div class="grid3">
