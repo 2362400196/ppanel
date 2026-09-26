@@ -100,6 +100,13 @@ function syncPoll() {
 // ---------- 容器 / 镜像 ----------
 const containers = ref([])
 const images = ref([])
+const imgLoading = ref(false)
+const imgCols = [
+  { key: 'full_name', label: '镜像' },
+  { key: 'size', label: '大小' },
+  { key: 'created', label: '创建时间' },
+  { key: 'ops', label: '', width: '90px' },
+]
 
 async function loadInfo() {
   try { info.value = (await api.get('/docker/info', { params: np() })).data }
@@ -110,8 +117,10 @@ async function loadContainers() {
   catch (e) { toastErr(errText(e)) }
 }
 async function loadImages() {
+  imgLoading.value = true
   try { images.value = (await api.get('/docker/images', { params: np() })).data }
   catch (e) { toastErr(errText(e)) }
+  finally { imgLoading.value = false }
 }
 async function contAction(c, action) {
   try {
@@ -1521,19 +1530,16 @@ onUnmounted(() => {
             <UIButton type="ghost" @click="askPhpBuild">构建 PHP 增强镜像</UIButton>
             <UIButton @click="pullOpen = true">拉取镜像</UIButton>
           </div>
-          <table class="ftable">
-            <thead><tr><th>镜像</th><th>大小</th><th /></tr></thead>
-            <tbody>
-              <tr v-for="img in images" :key="img.full_name">
-                <td class="mono">{{ img.full_name }}</td>
-                <td class="mono dim">{{ img.size_mb }} MB</td>
-                <td class="ops">
-                  <UIButton type="text" class="danger" @click="askDelImage(img)">删除</UIButton>
-                </td>
-              </tr>
-              <tr v-if="!images.length"><td colspan="3" class="empty">暂无镜像</td></tr>
-            </tbody>
-          </table>
+          <UITable :columns="imgCols" :rows="images" :loading="imgLoading">
+            <template #col-full_name="{ row }"><span class="mono">{{ row.full_name }}</span></template>
+            <template #col-size="{ row }"><span class="mono dim">{{ row.size || '—' }}</span></template>
+            <template #col-created="{ row }">
+              <span class="mono dim">{{ row.created ? new Date(row.created).toLocaleString() : '—' }}</span>
+            </template>
+            <template #col-ops="{ row }">
+              <UIButton type="text" class="danger" @click="askDelImage(row)">删除</UIButton>
+            </template>
+          </UITable>
         </div>
 
         <!-- 文件管理（独立面板同款） -->

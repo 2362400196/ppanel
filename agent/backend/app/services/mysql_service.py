@@ -18,10 +18,32 @@ from app.docker_client import get_docker
 from app.models import Instance, InstanceDb, MySqlService
 from app.services.instance_service import container_prefix
 
-# 候选版本（可经 MYSQL_VERSIONS 配置；5.7 无 arm64 镜像，树莓派节点不可用；未拉取镜像时启用会被拦）
-MYSQL_VERSIONS = settings.mysql_versions
-
+# 版本列表以节点已拉取的 mysql 镜像为准（动态发现，不再硬编码候选）；
+# 未拉取镜像时启用会被拦（绝不自动 pull）
 _MEM_LIMIT = 768 * 1024 * 1024  # MySQL 服务固定 768M（swap 同值）
+
+
+def _pulled_versions(client: docker.DockerClient) -> set[str]:
+    """本地已拉取的 mysql 镜像 tag 集合（如 5.7 / 8.0 / 8.4 / latest）。"""
+    vers: set[str] = set()
+    try:
+        for img in client.images.list(name="mysql"):
+            for tag in (img.tags or []):
+                if not tag.startswith("mysql:"):
+                    continue
+                v = tag.split(":", 1)[1]
+                if v and v != "<none>":
+                    vers.add(v)
+    except docker.errors.APIError:
+        pass
+    return vers
+
+
+def _ver_sort_key(v: str):
+    try:
+        return (0, float(v), v)   # 纯数字版本按数值排
+    except ValueError:
+        return (1, 0.0, v)        # latest 等非数字 tag 排在后面
 
 
 def svc_name(ver: str) -> str:
@@ -146,8 +168,6 @@ def _wait_ready(ver: str, root_password: str, timeout: int = 90, tid: str = "") 
 
 def enable_mysql(db: Session, ver: str, tid: str = "") -> dict:
     from app import tasks
-    if ver not in MYSQL_VERSIONS:
-        raise HTTPException(status_code=400, detail=f"不支持的版本（可选：{' / '.join(MYSQL_VERSIONS)}）")
     if db.get(MySqlService, ver):
         raise HTTPException(status_code=409, detail=f"MySQL {ver} 已启用")
 
@@ -269,6 +289,7 @@ def _reset_root_password(ver: str, new_password: str, tid: str = "") -> None:
             pass
     tasks.log(tid, "重启 MySQL 服务…")
     main.start()
+    _wait_ready(ver, new_password, tid=tid)  # 重启后 mysqld 需数秒就绪，直接查必失败
     if not _sql_ok(ver, new_password):
         raise HTTPException(status_code=502, detail="root 密码重置后仍无法连接，请查看容器日志")
 
@@ -310,19 +331,21 @@ def enabled_versions(db: Session) -> list[str]:
 
 
 def list_services(db: Session) -> list[dict]:
-    """候选版本全量列出：enabled / running / host_port / 库数量（管理员视图）。"""
+    """版本 = 节点已拉取的 mysql 镜像 tag ∪ 已启用版本（管理员视图）。
+    enabled / running / host_port / 库数量全量列出。"""
     client = None
     try:
         client = get_docker()
     except HTTPException:
         pass
+    pulled = _pulled_versions(client) if client is not None else set()
+    enabled = {r.version for r in db.query(MySqlService.version).all()}
+    versions = sorted(pulled | enabled, key=_ver_sort_key)
     counts: dict[str, int] = {}
-    for ver in MYSQL_VERSIONS:
-        counts[ver] = 0
     for r in db.query(InstanceDb.version, InstanceDb.id).all():
         counts[r.version] = counts.get(r.version, 0) + 1
     rows = []
-    for ver in MYSQL_VERSIONS:
+    for ver in versions:
         svc_row = db.get(MySqlService, ver)
         item = {
             "version": ver,
@@ -364,9 +387,8 @@ def _host_port_of(db: Session, ver: str) -> int | None:
 
 
 def create_instance_db(db: Session, inst: Instance, ver: str) -> dict:
-    """一实例一库：db=ppanel_{iid}，user=ppanel_u{iid}，密码随机（无引号注入风险）。"""
-    if ver not in MYSQL_VERSIONS:
-        raise HTTPException(status_code=400, detail=f"不支持的版本（可选：{' / '.join(MYSQL_VERSIONS)}）")
+    """一实例一库：db=ppanel_{iid}，user=ppanel_u{iid}，密码随机（无引号注入风险）。
+    版本必须已启用 MySQL 服务（未启用由 _get_svc_row 拦截）。"""
     _get_svc_row(db, ver)
     if db.query(InstanceDb).filter(InstanceDb.instance_id == inst.id).first():
         raise HTTPException(status_code=409, detail="该实例已有数据库，如需更换请先删除数据库")
@@ -442,9 +464,6 @@ def switch_instance_db(db: Session, inst: Instance, target_ver: str) -> dict:
     row = db.query(InstanceDb).filter(InstanceDb.instance_id == inst.id).first()
     if not row:
         raise HTTPException(status_code=404, detail="该实例尚未开通数据库")
-    if target_ver not in MYSQL_VERSIONS:
-        raise HTTPException(status_code=400,
-                            detail=f"不支持的版本（可选：{' / '.join(MYSQL_VERSIONS)}）")
     if target_ver == row.version:
         raise HTTPException(status_code=400, detail="已在该版本上，请选择其他版本")
 

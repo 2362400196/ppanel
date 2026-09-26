@@ -330,7 +330,7 @@ def panel_ops(dep: Instance = Depends(_dep), db: Session = Depends(get_db),
     rows = (db.query(AgentOpLog)
             .filter(AgentOpLog.instance_id == dep.id)
             .order_by(AgentOpLog.id.desc())
-            .limit(max(1, min(limit, 100))).all())
+            .limit(max(1, min(limit, 500))).all())
     return [{"action": r.action, "detail": r.detail,
              "created_at": r.created_at.isoformat() if r.created_at else None}
             for r in rows]

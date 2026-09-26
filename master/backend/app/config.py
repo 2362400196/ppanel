@@ -117,6 +117,14 @@ def _env_float(key: str, default: float) -> float:
 settings = Settings()
 
 
+def env_display_name(image: str) -> str:
+    """镜像 → 环境显示名，用于实例命名前缀：python:3.11-slim → Python、php:8.2-cli → PHP。"""
+    base = (image or "").split(":")[0].split("/").pop().strip().lower()
+    return {"python": "Python", "php": "PHP", "node": "Node", "nodejs": "Node",
+            "golang": "Go", "go": "Go", "java": "Java", "nginx": "Nginx",
+            "redis": "Redis", "mysql": "MySQL"}.get(base, base.capitalize() or "App")
+
+
 def default_start_cmd(image: str, mem_limit_mb: int | None = None) -> str:
     """与被控一致的默认启动命令（空 start_cmd 时兜底，PHP 注入安全参数）。"""
     if not (image or "").startswith("php:"):

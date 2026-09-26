@@ -19,7 +19,9 @@ const userCols = [
   { key: 'id', label: 'ID', width: '60px' },
   { key: 'username', label: '用户名' },
   { key: 'role', label: '角色', width: '100px' },
-  { key: 'created_at', label: '创建时间', width: '180px' }
+  { key: 'balance', label: '钱包余额', width: '110px' },
+  { key: 'created_at', label: '创建时间', width: '170px' },
+  { key: 'ops', label: '', width: '90px' }
 ]
 const createUserOpen = ref(false)
 const newUser = ref({ username: '', password: '', role: 'user' })
@@ -66,6 +68,41 @@ async function doCreateUser() {
   }
 }
 
+// ---------- 余额调整（加/减） ----------
+const adjOpen = ref(false)
+const adjUser = ref(null)
+const adjMode = ref('add')           // add | sub
+const adjAmount = ref('')
+const adjNote = ref('')
+const adjusting = ref(false)
+
+function askAdjust(u) {
+  adjUser.value = u
+  adjMode.value = 'add'
+  adjAmount.value = ''
+  adjNote.value = ''
+  adjOpen.value = true
+}
+
+async function doAdjust() {
+  const yuan = parseFloat(adjAmount.value)
+  if (!(yuan > 0)) { toastErr('请输入正确的金额'); return }
+  adjusting.value = true
+  try {
+    const cents = Math.round(yuan * 100) * (adjMode.value === 'add' ? 1 : -1)
+    const { data } = await api.post('/admin/pay/adjust', {
+      user_id: adjUser.value.id, amount_cents: cents, note: adjNote.value.trim()
+    })
+    toastOk(data.detail || '已调整')
+    adjOpen.value = false
+    loadUsers()
+  } catch (e) {
+    toastErr(errText(e))
+  } finally {
+    adjusting.value = false
+  }
+}
+
 onMounted(loadUsers)
 </script>
 
@@ -92,7 +129,13 @@ onMounted(loadUsers)
       <template #col-role="{ row }">
         <UITag :tone="row.role === 'admin' ? 'warn' : 'primary'">{{ row.role === 'admin' ? '管理员' : '用户' }}</UITag>
       </template>
+      <template #col-balance="{ row }">
+        <span class="balance">¥{{ ((row.balance_cents || 0) / 100).toFixed(2) }}</span>
+      </template>
       <template #col-created_at="{ row }">{{ fmtTime(row.created_at) }}</template>
+      <template #col-ops="{ row }">
+        <UIButton type="text" @click="askAdjust(row)">余额</UIButton>
+      </template>
     </UITable>
 
     <!-- 新建用户 -->
@@ -116,6 +159,29 @@ onMounted(loadUsers)
         <UIButton :loading="creatingUser" @click="doCreateUser">创建</UIButton>
       </template>
     </UIModal>
+
+    <!-- 余额调整（加/减） -->
+    <UIModal v-model:open="adjOpen" :title="`余额调整 · ${adjUser?.username || ''}`" width="380px">
+      <div class="form">
+        <div class="mode-row">
+          <button class="mode-btn" :class="{ active: adjMode === 'add' }" @click="adjMode = 'add'">加余额</button>
+          <button class="mode-btn sub" :class="{ active: adjMode === 'sub' }" @click="adjMode = 'sub'">减余额</button>
+        </div>
+        <label class="field">
+          <span>金额（元）</span>
+          <UIInput v-model="adjAmount" type="number" min="0" step="0.01" placeholder="如 10 或 0.01" />
+        </label>
+        <label class="field">
+          <span>备注（进流水，可不填）</span>
+          <UIInput v-model="adjNote" placeholder="如：活动赠送 / 退款扣回" />
+        </label>
+        <p class="adj-tip text-dim">当前余额 ¥{{ ((adjUser?.balance_cents || 0) / 100).toFixed(2) }}，调整记录可在「订单支付」流水查看。</p>
+      </div>
+      <template #footer>
+        <UIButton type="ghost" @click="adjOpen = false">取消</UIButton>
+        <UIButton :loading="adjusting" @click="doAdjust">{{ adjMode === 'add' ? '确认加款' : '确认扣减' }}</UIButton>
+      </template>
+    </UIModal>
   </div>
 </template>
 
@@ -125,4 +191,15 @@ onMounted(loadUsers)
 .form { display: flex; flex-direction: column; gap: 14px; }
 .field { display: flex; flex-direction: column; gap: 6px; }
 .field span { font-size: 12px; font-weight: 600; color: var(--text-2); }
+.balance { font-weight: 600; font-variant-numeric: tabular-nums; }
+.mode-row { display: flex; gap: 8px; }
+.mode-btn {
+  flex: 1; padding: 9px 0; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--panel); font-size: 13px; cursor: pointer; color: var(--text-2);
+  font-family: inherit; transition: all .15s;
+}
+.mode-btn:hover { border-color: var(--primary); }
+.mode-btn.active { border-color: var(--primary); background: var(--primary-soft); color: var(--primary-strong); font-weight: 700; }
+.mode-btn.sub.active { border-color: var(--danger, #e5484d); background: color-mix(in srgb, var(--danger, #e5484d) 8%, transparent); color: var(--danger, #e5484d); }
+.adj-tip { font-size: 12px; margin: 0; }
 </style>

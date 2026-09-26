@@ -10,6 +10,12 @@ const routes = [
   },
   {
     path: '/',
+    name: 'portal',
+    component: () => import('../views/PortalView.vue'),
+    meta: { public: true, bare: true }
+  },
+  {
+    path: '/instances',
     name: 'instances',
     component: () => import('../views/InstancesView.vue')
   },
@@ -22,6 +28,21 @@ const routes = [
     path: '/shop',
     name: 'shop',
     component: () => import('../views/ShopView.vue')
+  },
+  {
+    path: '/wallet',
+    name: 'wallet',
+    component: () => import('../views/WalletView.vue')
+  },
+  {
+    path: '/tickets',
+    name: 'tickets',
+    component: () => import('../views/TicketView.vue')
+  },
+  {
+    path: '/rewards',
+    name: 'rewards',
+    component: () => import('../views/RewardsView.vue')
   },
   {
     path: '/settings',
@@ -70,6 +91,30 @@ const routes = [
     component: () => import('../views/BackupCenterView.vue'),
     meta: { admin: true }
   },
+  {
+    path: '/orders',
+    name: 'orders',
+    component: () => import('../views/AdminOrdersView.vue'),
+    meta: { admin: true }
+  },
+  {
+    path: '/admin-tickets',
+    name: 'admin-tickets',
+    component: () => import('../views/AdminTicketsView.vue'),
+    meta: { admin: true }
+  },
+  {
+    path: '/admin-coupons',
+    name: 'admin-coupons',
+    component: () => import('../views/AdminCouponsView.vue'),
+    meta: { admin: true }
+  },
+  {
+    path: '/admin-rewards',
+    name: 'admin-rewards',
+    component: () => import('../views/AdminRewardsView.vue'),
+    meta: { admin: true }
+  },
   { path: '/:pathMatch(.*)*', redirect: '/' }
 ]
 
@@ -102,9 +147,8 @@ router.beforeEach(async to => {
     }
   }
   if (to.meta.admin && !auth.isAdmin) return '/'
-  // 管理员视角专注管理：用户功能页（仪表盘/商城）重定向到管理后台仪表盘
+  // 管理员视角专注管理：用户功能页（控制台/商城）重定向到管理后台仪表盘
   if (auth.isAdmin && ['instances', 'shop'].includes(to.name)) return '/dashboard'
-  if (auth.isAdmin && to.path === '/') return '/dashboard'
   return true
 })
 

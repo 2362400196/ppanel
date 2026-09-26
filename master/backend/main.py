@@ -15,9 +15,10 @@ from app.domain_proxy import try_domain_proxy
 from app.metrics_sampler import metrics_loop
 from app.models import (Domain, Instance, InstanceEvent, Metric, Node,
                         NodeHeartbeat, OpLog, Plan, User)  # noqa: F401 确保模型注册
-from app.routers import (auth_router, docker_proxy, host_proxy, instances,
-                         nodes_admin, open_api, plans_admin, users_admin,
-                         ws_proxy, tasks_router)
+from app.routers import (ai_router, auth_router, docker_proxy, host_proxy,
+                         instances, nodes_admin, open_api, pay_router,
+                         plans_admin, rewards, tasks_router, tickets,
+                         users_admin, ws_proxy)
 from app.stability import heartbeat_loop
 
 
@@ -102,6 +103,10 @@ app.include_router(docker_proxy.router, prefix="/api")
 app.include_router(host_proxy.router, prefix="/api")
 app.include_router(tasks_router.router, prefix="/api")  # 任务日志增量拉取（配合 X-Task-Id）
 app.include_router(open_api.router, prefix="/api")
+app.include_router(ai_router.router, prefix="/api")  # AI 助手（DeepSeek 流式）
+app.include_router(pay_router.router, prefix="/api")  # 微信支付（Native 扫码）
+app.include_router(tickets.router, prefix="/api")  # 工单
+app.include_router(rewards.router, prefix="/api")  # 福利中心（签到/积分/等级/优惠券）
 app.include_router(ws_proxy.router)  # WS 与面板一致，不带 /api 前缀
 
 

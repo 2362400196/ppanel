@@ -3,6 +3,7 @@
 """
 import threading
 import time
+from datetime import datetime
 
 import docker
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -171,6 +172,11 @@ def _fmt_size(n: int) -> str:
 def _image_row(img):
     a = img.attrs
     tags = a.get("RepoTags") or ["<none>:<none>"]
+    created = a.get("Created", 0) or 0       # epoch 秒 → ISO（前端直接 new Date 解析）
+    try:
+        created_iso = datetime.fromtimestamp(int(created)).isoformat(timespec="seconds")
+    except (ValueError, OSError, TypeError):
+        created_iso = ""
     return {
         "id": a.get("Id", "").replace("sha256:", "")[:12],
         "repo": tags[0].rsplit(":", 1)[0] if ":" in tags[0] else tags[0],
@@ -179,7 +185,7 @@ def _image_row(img):
         "tags": tags,
         "size_bytes": a.get("Size", 0),
         "size": _fmt_size(a.get("Size", 0)),
-        "created": a.get("Created", ""),
+        "created": created_iso,
     }
 
 

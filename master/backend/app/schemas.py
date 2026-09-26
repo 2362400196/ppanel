@@ -19,6 +19,7 @@ class UserOut(BaseModel):
     id: int
     username: str
     role: str
+    balance_cents: int = 0
     created_at: Optional[datetime] = None
 
     class Config:

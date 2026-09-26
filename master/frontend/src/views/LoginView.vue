@@ -18,7 +18,7 @@ async function submit() {
   loading.value = true
   try {
     await auth.login(username.value, password.value)
-    router.push('/')
+    router.push('/instances')
   } catch (e) {
     toastErr(errText(e))
   } finally {

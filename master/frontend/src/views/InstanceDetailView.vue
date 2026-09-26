@@ -48,7 +48,7 @@ async function load(silent = false) {
     if (first) startCmdDraft.value = data.start_cmd
   } catch (e) {
     if (!silent) toastErr(errText(e))
-    if (e.response?.status === 404) router.replace('/')
+    if (e.response?.status === 404) router.replace('/instances')
   } finally {
     loading.value = false
   }
@@ -83,7 +83,7 @@ async function doDelete() {
     const { data } = await api.delete(`/instances/${instanceId.value}`,
       { headers: { 'X-Task-Id': tid } })
     toastOk(data.detail || '已删除')
-    router.push('/')
+    router.push('/instances')
   } catch (e) {
     toastErr(errText(e))
   }

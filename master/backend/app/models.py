@@ -17,6 +17,9 @@ class User(Base):
     username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(128))
     role: Mapped[str] = mapped_column(String(16), default="user")  # admin / user
+    balance_cents: Mapped[int] = mapped_column(Integer, default=0)  # 钱包余额（分）
+    points: Mapped[int] = mapped_column(Integer, default=0)         # 积分（签到/消费获得，可兑换天数）
+    level_exp: Mapped[int] = mapped_column(Integer, default=0)      # 等级经验（累计实付金额：分）
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
@@ -118,6 +121,83 @@ class Domain(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class Ticket(Base):
+    """工单：用户提交问题/需求，管理员回复处理。"""
+    __tablename__ = "tickets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True)
+    title: Mapped[str] = mapped_column(String(128))
+    status: Mapped[str] = mapped_column(String(12), default="open", index=True)  # open/closed
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+
+
+class TicketMsg(Base):
+    """工单会话消息。content 可为空（纯附件消息）。"""
+    __tablename__ = "ticket_msgs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ticket_id: Mapped[int] = mapped_column(Integer, index=True)
+    user_id: Mapped[int] = mapped_column(Integer)
+    is_admin: Mapped[int] = mapped_column(Integer, default=0)  # 1=管理员回复
+    content: Mapped[str] = mapped_column(Text, default="")
+    file_id: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 关联附件
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class TicketFile(Base):
+    """工单附件：图片/文件落盘 data/ticket_files/，随机名存储防路径问题。"""
+    __tablename__ = "ticket_files"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ticket_id: Mapped[int] = mapped_column(Integer, index=True)
+    orig_name: Mapped[str] = mapped_column(String(255))
+    stored_name: Mapped[str] = mapped_column(String(64), unique=True)
+    size: Mapped[int] = mapped_column(Integer, default=0)
+    is_image: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class Checkin(Base):
+    """每日签到：一人一天一条（user_id+day 唯一）。"""
+    __tablename__ = "checkins"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True)
+    day: Mapped[str] = mapped_column(String(10), index=True)   # YYYY-MM-DD（本地时区）
+    points: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class Coupon(Base):
+    """优惠券：管理员创建发放，购买时凭 code 抵扣。"""
+    __tablename__ = "coupons"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    code: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    amount_cents: Mapped[int] = mapped_column(Integer)              # 抵扣金额（分）
+    min_spend_cents: Mapped[int] = mapped_column(Integer, default=0)  # 使用门槛（商品原价）
+    total: Mapped[int] = mapped_column(Integer, default=1)          # 发放总量
+    used: Mapped[int] = mapped_column(Integer, default=0)           # 已核销数
+    expire_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    enabled: Mapped[int] = mapped_column(Integer, default=1)
+    note: Mapped[str] = mapped_column(String(128), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class CouponUse(Base):
+    """券核销记录。"""
+    __tablename__ = "coupon_uses"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    coupon_id: Mapped[int] = mapped_column(Integer, index=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True)
+    order_no: Mapped[str] = mapped_column(String(32))
+    amount_cents: Mapped[int] = mapped_column(Integer)   # 实际抵扣
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class Plan(Base):
     """商城商品：套餐规格 + 价格，管理员可编辑与上下架。"""
     __tablename__ = "plans"
@@ -136,3 +216,30 @@ class Plan(Base):
     image: Mapped[str] = mapped_column(String(128), default="")  # 运行环境（开通实例的镜像）；空=默认
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)  # 上架状态
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class AppSetting(Base):
+    """平台级键值配置（如 DeepSeek API Key 等敏感信息，只存服务端）。"""
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class Order(Base):
+    """钱包流水：recharge=微信充值单（查单驱动入账），shop=余额消费单，admin=管理员调整。"""
+    __tablename__ = "orders"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    out_trade_no: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True)
+    kind: Mapped[str] = mapped_column(String(16), default="recharge")  # recharge/shop/admin
+    plan_id: Mapped[int] = mapped_column(Integer, default=0)
+    plan_name: Mapped[str] = mapped_column(String(64), default="")
+    amount_cents: Mapped[int] = mapped_column(Integer)          # 金额（分）：充值=入账，消费=扣款
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)  # pending/paid/failed
+    code_url: Mapped[str] = mapped_column(String(255), default="")
+    instance_uuid: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    paid_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

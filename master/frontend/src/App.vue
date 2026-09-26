@@ -5,6 +5,7 @@ import { useAuthStore } from './stores/auth'
 import ToastHost from './components/ui/ToastHost.vue'
 import TaskTerminal from './components/TaskTerminal.vue'
 import UITag from './components/ui/UITag.vue'
+import AiAssistant from './components/AiAssistant.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -39,13 +40,25 @@ function logout() {
       <nav class="nav">
         <!-- 用户视角：仪表盘 / 商城 / 设置 -->
         <template v-if="!auth.isAdmin">
-          <router-link to="/" class="nav-item" :class="{ active: route.name === 'instances' || route.name === 'instance-detail' }">
+          <router-link to="/instances" class="nav-item" :class="{ active: route.name === 'instances' || route.name === 'instance-detail' }">
             <svg class="nav-icon" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" /><rect x="3" y="14" width="7" height="7" rx="1.5" /><rect x="14" y="14" width="7" height="7" rx="1.5" /></svg>
             <span>仪表盘</span>
           </router-link>
           <router-link to="/shop" class="nav-item" :class="{ active: route.name === 'shop' }">
             <svg class="nav-icon" viewBox="0 0 24 24"><path d="M6 7h12l1.5 13.5a1 1 0 0 1-1 1H5.5a1 1 0 0 1-1-1L6 7z" /><path d="M9 10V6a3 3 0 0 1 6 0v4" /></svg>
             <span>商城</span>
+          </router-link>
+          <router-link to="/wallet" class="nav-item" :class="{ active: route.name === 'wallet' }">
+            <svg class="nav-icon" viewBox="0 0 24 24"><rect x="2.5" y="6" width="19" height="13" rx="2.5" /><path d="M2.5 10h19" /><circle cx="17" cy="14.5" r="1.1" /></svg>
+            <span>钱包</span>
+          </router-link>
+          <router-link to="/tickets" class="nav-item" :class="{ active: route.name === 'tickets' }">
+            <svg class="nav-icon" viewBox="0 0 24 24"><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4h13A1.5 1.5 0 0 1 20 5.5v9a1.5 1.5 0 0 1-1.5 1.5H9l-4.2 3.6c-.4.3-.8 0-.8-.4V5.5z" /><path d="M8 9h8M8 12.5h5" /></svg>
+            <span>工单</span>
+          </router-link>
+          <router-link to="/rewards" class="nav-item" :class="{ active: route.name === 'rewards' }">
+            <svg class="nav-icon" viewBox="0 0 24 24"><path d="M12 21s-7-4.6-9.3-9A5.6 5.6 0 0 1 12 6.2 5.6 5.6 0 0 1 21.3 12C19 16.4 12 21 12 21z" /></svg>
+            <span>福利</span>
           </router-link>
           <router-link to="/settings" class="nav-item" :class="{ active: route.name === 'settings' }">
             <svg class="nav-icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.09a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.09a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>
@@ -83,6 +96,22 @@ function logout() {
             <svg class="nav-icon" viewBox="0 0 24 24"><path d="M20.6 13.4 13.4 20.6a2 2 0 0 1-2.8 0l-7-7A2 2 0 0 1 3 12.2V5a2 2 0 0 1 2-2h7.2a2 2 0 0 1 1.4.6l7 7a2 2 0 0 1 0 2.8z" /><circle cx="7.5" cy="7.5" r="1.2" /></svg>
             <span>商品管理</span>
           </router-link>
+          <router-link to="/orders" class="nav-item" :class="{ active: route.name === 'orders' }">
+            <svg class="nav-icon" viewBox="0 0 24 24"><path d="M6 2h12l1.5 5H4.5L6 2z" /><path d="M4.5 7h15V20a2 2 0 0 1-2 2h-11a2 2 0 0 1-2-2V7z" /><path d="M9 11.5h6" /></svg>
+            <span>订单支付</span>
+          </router-link>
+          <router-link to="/admin-tickets" class="nav-item" :class="{ active: route.name === 'admin-tickets' }">
+            <svg class="nav-icon" viewBox="0 0 24 24"><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4h13A1.5 1.5 0 0 1 20 5.5v9a1.5 1.5 0 0 1-1.5 1.5H9l-4.2 3.6c-.4.3-.8 0-.8-.4V5.5z" /><path d="M8 9h8M8 12.5h5" /></svg>
+            <span>工单处理</span>
+          </router-link>
+          <router-link to="/admin-coupons" class="nav-item" :class="{ active: route.name === 'admin-coupons' }">
+            <svg class="nav-icon" viewBox="0 0 24 24"><path d="M3 9V7a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v2a3 3 0 0 0 0 6v2a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-2a3 3 0 0 0 0-6z" /><path d="M13 5v2.5M13 11v2M13 16.5V19" /></svg>
+            <span>优惠券</span>
+          </router-link>
+          <router-link to="/admin-rewards" class="nav-item" :class="{ active: route.name === 'admin-rewards' }">
+            <svg class="nav-icon" viewBox="0 0 24 24"><circle cx="12" cy="8" r="6" /><path d="M15.5 12.9 17 22l-5-3-5 3 1.5-9.1" /></svg>
+            <span>福利设置</span>
+          </router-link>
           <router-link to="/settings" class="nav-item" :class="{ active: route.name === 'settings' }">
             <svg class="nav-icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.09a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.09a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>
             <span>设置</span>
@@ -118,6 +147,8 @@ function logout() {
         </router-view>
       </div>
     </main>
+    <!-- 管理员全局 AI 助手（右下角悬浮球，任何页面可打开） -->
+    <AiAssistant v-if="auth.isAdmin" />
   </div>
 </template>
 

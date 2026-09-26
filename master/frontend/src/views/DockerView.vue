@@ -94,7 +94,14 @@ function contAction(c, action) {
 const confirmOpen = ref(false)
 const confirmCtx = ref({ title: '', message: '', danger: true, run: () => {} })
 function askConfirm(title, message, run) {
-  confirmCtx.value = { title, message, danger: true, run }
+  // 统一包装：点确定立即关弹窗；run 抛错统一 toast（避免弹窗残留/静默失败）
+  confirmCtx.value = {
+    title, message, danger: true,
+    run: async () => {
+      confirmOpen.value = false
+      try { await run() } catch (e) { toastErr(errText(e)) }
+    }
+  }
   confirmOpen.value = true
 }
 function removeContainer(c, force) {

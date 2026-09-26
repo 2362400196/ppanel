@@ -117,9 +117,6 @@ class Settings:
         "PHP_DISABLE_FUNCTIONS",
         "exec,shell_exec,system,passthru,proc_open,popen,pcntl_exec,pcntl_fork,"
         "pcntl_waitpid,show_source,dl,syslog,ini_alter,ini_restore,chroot,chgrp,chown"))
-    # 共享 MySQL 候选版本（仅当 mysql:{ver} 镜像已拉取才能启用；5.7 无 arm64）
-    mysql_versions: list = field(default_factory=lambda: _env_list(
-        "MYSQL_VERSIONS", ["5.7", "8.0", "8.4"]))
 
     @property
     def all_images(self) -> list:

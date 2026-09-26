@@ -1,0 +1,21 @@
+# 数据库文件（本地运行数据，不入库）
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.sql.gz
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# 前端
+node_modules/
+dist/
+
+# 日志与环境变量（含密钥）
+*.log
+.env

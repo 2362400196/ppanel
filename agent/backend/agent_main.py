@@ -230,8 +230,9 @@ _PANEL_UI = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 
 @app.get("/panel", include_in_schema=False)
 def panel_page():
-    """独立单容器面板入口（无构建单文件 UI）。"""
-    return FileResponse(_PANEL_UI, media_type="text/html")
+    """独立单容器面板入口（无构建单文件 UI）。no-store：页面更新后浏览器立即生效，避免旧缓存。"""
+    return FileResponse(_PANEL_UI, media_type="text/html",
+                        headers={"Cache-Control": "no-store"})
 
 
 # Monaco Editor（VS Code 内核）静态资源：文件管理在线编辑器使用

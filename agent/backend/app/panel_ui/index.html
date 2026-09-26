@@ -262,6 +262,12 @@ select { height: 34px; border: 1px solid var(--line); border-radius: 9px; paddin
 .domain-row { display: flex; gap: 8px; margin-top: 10px; }
 .domain-row input { flex: 1; height: 38px; border: 1px solid var(--line); border-radius: 10px; padding: 0 12px; outline: none; }
 .domain-row input:focus { border-color: var(--primary); }
+.dbver-item { display:flex; align-items:center; justify-content:space-between; width:100%; padding:12px 14px; border:1px solid var(--line); border-radius:10px; background:#fff; cursor:pointer; font-size:14px; text-align:left; transition:all .15s ease; }
+.dbver-item:hover { border-color:var(--primary); background:var(--primary-soft); transform:translateY(-1px); }
+.dv-name { font-weight:600; color:var(--text); }
+.dv-go { font-size:12px; color:var(--primary); }
+.dbver-btn { padding:7px 12px; border:1px solid var(--line); border-radius:9px; background:#fff; cursor:pointer; font-size:13px; color:var(--text2); transition:all .15s ease; }
+.dbver-btn:hover { border-color:var(--primary); color:var(--primary-deep); background:var(--primary-soft); }
 .domain-row select { flex: 1; }
 .db-switch { display: flex; align-items: center; gap: 8px; margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--line); }
 .db-switch-label { font-size: 12px; color: var(--text-dim); }
@@ -269,6 +275,12 @@ select { height: 34px; border: 1px solid var(--line); border-radius: 9px; paddin
 .bound { display: inline-flex; align-items: center; gap: 8px; background: var(--primary-soft); color: var(--primary-deep); font-weight: 700; padding: 6px 12px; border-radius: 9px; font-size: 13px; }
 
 /* 操作记录 */
+.ops-pager { display:flex; align-items:center; justify-content:space-between; padding-top:12px; border-top:1px dashed var(--line); margin-top:4px; font-size:12.5px; color:var(--text2); }
+.ops-pager .p-ctrl { display:flex; align-items:center; gap:10px; }
+.ops-pager .p-info { font-size:12.5px; color:var(--text2); }
+.ops-pager .p-btn { padding:5px 12px; border:1px solid var(--line); border-radius:8px; background:#fff; cursor:pointer; font-size:12.5px; color:var(--text2); transition:all .15s ease; }
+.ops-pager .p-btn:hover:not(:disabled) { border-color:var(--primary); color:var(--primary-deep); background:var(--primary-soft); }
+.ops-pager .p-btn:disabled { opacity:.4; cursor:not-allowed; }
 .ops-list { display: flex; flex-direction: column; }
 .op-row { display: flex; align-items: baseline; gap: 12px; padding: 10px 4px; border-bottom: 1px dashed var(--line); font-size: 13px; }
 .op-row .t { color: var(--text2); font-size: 12px; width: 150px; flex-shrink: 0; }
@@ -672,11 +684,7 @@ function showApidoc() {
           <div class="page-title">数据库</div>
           <div id="dbNone">
             <div class="status-text" style="margin-bottom:10px">尚未开通数据库</div>
-            <div class="domain-row" id="dbCreateRow" style="display:none">
-              <select id="dbVerSelect"></select>
-              <button class="btn" onclick="createDb()">开通数据库</button>
-            </div>
-            <p class="hint" id="dbEmptyHint">节点尚未启用 MySQL 服务，请联系管理员在节点管理中启用。</p>
+            <button class="btn" onclick="openCreateDb()">开通数据库</button>
           </div>
           <div id="dbInfo" style="display:none">
             <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px;margin-top:4px">
@@ -699,8 +707,7 @@ function showApidoc() {
             </div>
             <div class="db-switch" id="dbSwitchRow" style="display:none">
               <span class="db-switch-label">切换版本（自动迁移数据）</span>
-              <select id="dbSwitchSel"></select>
-              <button class="btn ghost" onclick="switchDb()">开始切换</button>
+              <div id="dbSwitchList" style="display:flex;gap:8px;flex-wrap:wrap"></div>
             </div>
             <p class="hint">内网地址供实例代码直连（与应用同网络，延迟最低）；外网地址可用本机数据库客户端远程管理。切换版本会自动迁移全部数据，成功后密码会重置、需更新应用里的连接地址；删除数据库后数据不可恢复。</p>
           </div>
@@ -1142,6 +1149,14 @@ function showApidoc() {
           <div class="page-title">操作记录</div>
           <div class="ops-list" id="opsList"></div>
           <div id="opsEmpty" class="empty" style="display:none">暂无操作记录</div>
+          <div id="opsPager" class="ops-pager" style="display:none">
+            <span id="opsPagerInfo" class="p-info"></span>
+            <div class="p-ctrl">
+              <button class="p-btn" onclick="gotoOps(-1)">上一页</button>
+              <span id="opsPagerPage" class="p-info"></span>
+              <button class="p-btn" onclick="gotoOps(1)">下一页</button>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -1190,6 +1205,23 @@ function showApidoc() {
     <div class="qmodal-foot">
       <button class="qbtn" onclick="closeModal('confirmMask')">取消</button>
       <button id="cfOk" class="qbtn primary">确定</button>
+    </div>
+  </div>
+</div>
+
+<!-- 开通数据库：选择版本弹窗 -->
+<div id="dbCreateMask" class="qmodal-mask">
+  <div class="qmodal" style="width:420px">
+    <div class="qmodal-head"><span class="title">开通数据库</span>
+      <span class="icon-close" onclick="closeModal('dbCreateMask')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></span>
+    </div>
+    <div class="qmodal-body">
+      <div style="font-size:13.5px;margin-bottom:10px">选择 MySQL 版本</div>
+      <div id="dbCreateList" style="display:flex;flex-direction:column;gap:8px"></div>
+      <p class="hint" style="margin-top:10px">每个实例一个独立库；开通后可用「切换版本」自动迁移数据。</p>
+    </div>
+    <div class="qmodal-foot">
+      <button class="qbtn" onclick="closeModal('dbCreateMask')">取消</button>
     </div>
   </div>
 </div>
@@ -2768,16 +2800,17 @@ async function loadDatabase () {
   try {
     const data = await api('GET', '/panel/instance/database')
     const versions = data.versions || []
-    $('dbVerSelect').innerHTML = versions.map(v => `<option value="${esc(v)}">MySQL ${esc(v)}</option>`).join('')
-    $('dbCreateRow').style.display = versions.length ? 'flex' : 'none'
-    $('dbEmptyHint').style.display = versions.length ? 'none' : 'block'
     $('dbNone').style.display = data.db ? 'none' : 'block'
     $('dbInfo').style.display = data.db ? 'block' : 'none'
     if (data.db) {
       const d = data.db
       const others = versions.filter(v => v !== d.version)
       $('dbSwitchRow').style.display = others.length ? 'flex' : 'none'
-      $('dbSwitchSel').innerHTML = others.map(v => `<option value="${esc(v)}">MySQL ${esc(v)}</option>`).join('')
+      $('dbSwitchList').innerHTML = others.map(v =>
+        `<button type="button" class="dbver-btn" data-ver="${esc(v)}">切换到 MySQL ${esc(v)}</button>`).join('')
+      $('dbSwitchList').querySelectorAll('.dbver-btn').forEach(b => {
+        b.onclick = () => switchDb(b.dataset.ver)
+      })
       $('dbVersion').textContent = 'MySQL ' + d.version
       $('dbName').textContent = d.db_name
       $('dbUser').textContent = d.db_user
@@ -2787,14 +2820,33 @@ async function loadDatabase () {
     }
   } catch (e) { toast(e.message, false) }
 }
-async function createDb () {
-  const ver = $('dbVerSelect').value
-  if (!ver) return
+async function openCreateDb () {
   try {
-    await api('POST', '/panel/instance/database', { version: ver })
-    toast('数据库已开通', true)
-    loadDatabase()
+    const data = await api('GET', '/panel/instance/database')
+    const versions = data.versions || []
+    const box = $('dbCreateList')
+    if (!versions.length) {
+      box.innerHTML = '<div style="color:var(--text2);font-size:13px;padding:4px 0">节点尚未启用 MySQL 服务，请联系管理员在节点面板启用后重试</div>'
+      $('dbCreateMask').classList.add('open')
+      return
+    }
+    box.innerHTML = versions.map(v => `
+      <button type="button" class="dbver-item" data-ver="${esc(v)}">
+        <span class="dv-name">MySQL ${esc(v)}</span>
+        <span class="dv-go">选择开通 →</span>
+      </button>`).join('')
+    box.querySelectorAll('.dbver-item').forEach(b => {
+      b.onclick = () => { closeModal('dbCreateMask'); doCreateDb(b.dataset.ver) }
+    })
+    $('dbCreateMask').classList.add('open')
   } catch (e) { toast(e.message, false) }
+}
+function doCreateDb (ver) {
+  if (!ver) return
+  toast('正在开通数据库（MySQL ' + ver + '）…', true)
+  api('POST', '/panel/instance/database', { version: ver })
+    .then(() => { toast('数据库已开通（MySQL ' + ver + '）', true); loadDatabase() })
+    .catch(e => toast(e.message, false))
 }
 function resetDbPwd () {
   confirmBox('重置数据库密码', '使用旧密码连接的应用将无法连库，重置后需更新应用配置。确定继续？', async () => {
@@ -2806,8 +2858,7 @@ function dropDb () {
     try { await api('DELETE', '/panel/instance/database'); toast('数据库已删除', true); loadDatabase() } catch (e) { toast(e.message, false) }
   })
 }
-function switchDb () {
-  const ver = $('dbSwitchSel').value
+function switchDb (ver) {
   if (!ver) return
   confirmBox('切换到 MySQL ' + ver, '将自动迁移全部数据（表/数据/触发器/存储过程）到 MySQL ' + ver + '。迁移成功后密码会重置，应用里的连接地址需改为 pagent-mysql-' + ver + '。迁移失败自动保留原库，可重试。确定切换？', async () => {
     toast('正在迁移数据，请勿关闭页面…', true)
@@ -3533,22 +3584,36 @@ function logStop () {
 }
 
 // ---------- 操作记录 ----------
+let opsData = [], opsPage = 1
+const OPS_PAGE_SIZE = 20
 async function loadOps () {
   try {
-    const list = await api('GET', '/panel/instance/ops?limit=30')
-    const box = $('opsList')
-    box.innerHTML = ''
-    const names = { start: '启动', stop: '停止', restart: '重启', update: '修改配置',
-      restore: '恢复备份', deps_install: '安装依赖', domain_bind: '绑定域名', domain_unbind: '解绑域名' }
-    for (const o of list) {
-      const row = document.createElement('div')
-      row.className = 'op-row'
-      const t = o.created_at ? new Date(o.created_at).toLocaleString('zh-CN', { hour12: false }) : '-'
-      row.innerHTML = `<span class="t">${t}</span><span class="a">${names[o.action] || o.action}</span><span class="d">${esc(o.detail || '')}</span>`
-      box.appendChild(row)
-    }
-    $('opsEmpty').style.display = list.length ? 'none' : 'block'
+    opsData = await api('GET', '/panel/instance/ops?limit=500')
+    opsPage = 1
+    renderOps()
   } catch (e) { /* 静默 */ }
+}
+function gotoOps (d) { opsPage += d; renderOps() }
+function renderOps () {
+  const box = $('opsList')
+  const names = { start: '启动', stop: '停止', restart: '重启', update: '修改配置',
+    restore: '恢复备份', deps_install: '安装依赖', domain_bind: '绑定域名', domain_unbind: '解绑域名' }
+  const total = opsData.length
+  const pages = Math.max(1, Math.ceil(total / OPS_PAGE_SIZE))
+  if (opsPage > pages) opsPage = pages
+  if (opsPage < 1) opsPage = 1
+  const slice = opsData.slice((opsPage - 1) * OPS_PAGE_SIZE, opsPage * OPS_PAGE_SIZE)
+  box.innerHTML = slice.map(o => {
+    const t = o.created_at ? new Date(o.created_at).toLocaleString('zh-CN', { hour12: false }) : '-'
+    return `<div class="op-row"><span class="t">${t}</span><span class="a">${names[o.action] || esc(o.action)}</span><span class="d">${esc(o.detail || '')}</span></div>`
+  }).join('')
+  $('opsEmpty').style.display = total ? 'none' : 'block'
+  const bar = $('opsPager')
+  bar.style.display = total ? 'flex' : 'none'
+  $('opsPagerInfo').textContent = `共 ${total} 条`
+  $('opsPagerPage').textContent = `${opsPage} / ${pages}`
+  bar.querySelector('.p-btn').disabled = opsPage <= 1
+  bar.querySelectorAll('.p-btn')[1].disabled = opsPage >= pages
 }
 
 // ---------- 弹窗 / 刷新 ----------
