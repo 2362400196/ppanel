@@ -56,6 +56,14 @@ def _git(root: str, *args, timeout=300):
     return _run(["git", "-C", root, *args], timeout=timeout)
 
 
+def _remote_name(root: str) -> str:
+    """取仓库第一个远程名（不写死 origin，开发机远程可能叫别的名字）。"""
+    ok, out = _git(root, "remote", timeout=10)
+    if ok and out:
+        return out.splitlines()[0].strip()
+    return "origin"
+
+
 def _log(msg: str) -> None:
     with LOCK:
         STATE["log"].append(msg)
@@ -72,7 +80,7 @@ def master_version():
                 "reason": "非 git 部署（Docker/手动），请用安装脚本部署以支持在线升级"}
     ok1, cur = _git(root, "rev-parse", "--short", "HEAD", timeout=10)
     ok2, br = _git(root, "rev-parse", "--abbrev-ref", "HEAD", timeout=10)
-    ok3, ls = _git(root, "ls-remote", "origin", "HEAD", timeout=20)
+    ok3, ls = _git(root, "ls-remote", _remote_name(root), "HEAD", timeout=20)
     remote = ls.split()[0][:7] if ok3 and ls else None
     return {"mode": "git", "branch": br if ok2 else "",
             "current": cur if ok1 else None, "remote": remote,
@@ -174,9 +182,10 @@ def _pipeline() -> None:
         if not ok:
             _log(f"pull 失败，硬对齐远程：{out[-200:]}")
             _bok, br = _git(root, "rev-parse", "--abbrev-ref", "HEAD", timeout=10)
-            _git(root, "fetch", "origin", timeout=120)
+            _rn = _remote_name(root)
+            _git(root, "fetch", _rn, timeout=120)
             ok, out = _git(root, "reset", "--hard",
-                           f"origin/{br if _bok else 'main'}", timeout=60)
+                           f"{_rn}/{br if _bok else 'master'}", timeout=60)
         if not ok:
             raise RuntimeError(f"代码拉取失败：{out}")
         ok, cur = _git(root, "rev-parse", "--short", "HEAD", timeout=10)
