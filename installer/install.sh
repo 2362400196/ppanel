@@ -177,6 +177,23 @@ master_install_node() {  # 前端构建需要 Node >= 18
   ok "Node $(node -v)"
 }
 
+bootstrap_uv() {  # $1=backend 目录；成功后 UV_BIN 指向可用 uv，失败为空
+  UV_BIN=""
+  [ -x "$HOME/.local/bin/uv" ] && UV_BIN="$HOME/.local/bin/uv"
+  [ -z "$UV_BIN" ] && [ -x "$1/.venv/bin/uv" ] && UV_BIN="$1/.venv/bin/uv"
+  if [ -z "$UV_BIN" ]; then
+    info "安装 uv 包管理器（清华 PyPI 镜像）..."
+    # uv 创建的 venv 不带 pip：缺 pip 先重建，保证 bootstrap 可用
+    [ -x "$1/.venv/bin/pip" ] || python3 -m venv --clear "$1/.venv"
+    "$1/.venv/bin/pip" install -q uv -i "$PYPI_MIRROR" && UV_BIN="$1/.venv/bin/uv" || true
+    if [ -z "$UV_BIN" ]; then
+      info "pip 安装 uv 失败，尝试官方安装脚本..."
+      curl -LsSf --max-time 60 https://astral.sh/uv/install.sh | sh >/dev/null 2>&1 || true
+      [ -x "$HOME/.local/bin/uv" ] && UV_BIN="$HOME/.local/bin/uv"
+    fi
+  fi
+}
+
 master_deps() {
   step "2/6 后端依赖（uv 加速）"
   cd "$MASTER_BACKEND"
@@ -188,14 +205,7 @@ master_deps() {
     unset UV_PYTHON_PREFERENCE
     export UV_PYTHON=3.12
   fi
-  UV_BIN=""
-  [ -x "$HOME/.local/bin/uv" ] && UV_BIN="$HOME/.local/bin/uv"
-  [ -z "$UV_BIN" ] && [ -x "$MASTER_BACKEND/.venv/bin/uv" ] && UV_BIN="$MASTER_BACKEND/.venv/bin/uv"
-  if [ -z "$UV_BIN" ]; then
-    [ -d "$MASTER_BACKEND/.venv" ] || python3 -m venv "$MASTER_BACKEND/.venv"
-    "$MASTER_BACKEND/.venv/bin/pip" install -q uv -i "$PYPI_MIRROR" \
-      && UV_BIN="$MASTER_BACKEND/.venv/bin/uv" || true
-  fi
+  bootstrap_uv "$MASTER_BACKEND"
   UV_OK=0
   if [ -n "$UV_BIN" ]; then
     info "uv sync 安装后端依赖..."
@@ -398,11 +408,12 @@ docker_offline_install() {  # 离线兜底：优先本地离线包，无包则�
     ok "使用本地离线包：$LOCAL_TGZ"
     cp -f "$LOCAL_TGZ" /tmp/ppanel-docker.tgz
   else
-    # ② 无本地包 → 多源在线下载
+    # ② 无本地包 → 多源在线下载（gitee 仓库内置离线包，国内最稳）
     warn "未找到本地离线包（可预先把 docker-27.5.1.tgz 放到脚本同目录 / /opt/ppanel / /tmp）"
     BASE="https://download.docker.com/linux/static/stable/$DA/docker-$DVER.tgz"
+    GITEE_RAW="https://gitee.com/zhuxiaohuaqn/ppanel/raw/master/installer/docker-$DVER.tgz"
     DL_OK=0
-    for u in "$BASE" "https://ghfast.top/$BASE" "https://gh-proxy.com/$BASE"; do
+    for u in "$GITEE_RAW" "$BASE" "https://ghfast.top/$BASE" "https://gh-proxy.com/$BASE"; do
       info "下载离线包：$u"
       if curl -fL --max-time 300 --retry 1 -o /tmp/ppanel-docker.tgz "$u" 2>/dev/null && [ -s /tmp/ppanel-docker.tgz ]; then
         DL_OK=1; break
@@ -679,15 +690,7 @@ agent_deps() {
     export UV_PYTHON=3.12
   fi
 
-  UV_BIN=""
-  [ -x "$HOME/.local/bin/uv" ] && UV_BIN="$HOME/.local/bin/uv"
-  [ -z "$UV_BIN" ] && [ -x "$AGENT_APP/.venv/bin/uv" ] && UV_BIN="$AGENT_APP/.venv/bin/uv"
-  if [ -z "$UV_BIN" ]; then
-    info "安装 uv 包管理器（清华 PyPI 镜像）..."
-    [ -d "$AGENT_APP/.venv" ] || python3 -m venv "$AGENT_APP/.venv"
-    "$AGENT_APP/.venv/bin/pip" install -q uv -i "$PYPI_MIRROR" && UV_BIN="$AGENT_APP/.venv/bin/uv"
-  fi
-
+  bootstrap_uv "$AGENT_APP"
   UV_OK=0
   if [ -n "$UV_BIN" ]; then
     info "uv sync 安装依赖..."
