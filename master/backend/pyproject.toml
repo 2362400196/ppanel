@@ -3,7 +3,7 @@ name = "ppanel-master"
 version = "0.1.0"
 description = "PPanel 主控：用户/节点/实例编排 + 被控转发 + 商城对接"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "bcrypt>=5.0.0",
     "cryptography>=50.0.1",
@@ -17,3 +17,7 @@ dependencies = [
     "uvicorn[standard]>=0.53.0",
     "websockets>=13.0",
 ]
+
+# pip 兜底安装需要构建项目：显式指定包，避免 data/ 等运行时目录被当成包导致 flat-layout 歧义
+[tool.setuptools.packages.find]
+include = ["app*"]

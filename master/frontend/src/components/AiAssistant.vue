@@ -1,16 +1,20 @@
 <script setup>
-// 全局 AI 助手：右下角悬浮球 + 侧滑抽屉，任何管理页面可随时打开。
+// 全局 AI 助手：右下角悬浮球 + 侧滑抽屉，任何登录用户可用。
+// 按身份分流：管理员=平台工具；普通用户=个人工具（我的实例/钱包/积分/备份）。
 // DeepSeek 流式对话（SSE 经主控转发，Key 只存服务端）。
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import DOMPurify from 'dompurify'
 import { marked } from 'marked'
 import { api, errText } from '../api/client'
 import { toastErr, toastOk } from './ui/toast'
+import { useAuthStore } from '../stores/auth'
 import UIButton from './ui/UIButton.vue'
 import UIInput from './ui/UIInput.vue'
 import UIModal from './ui/UIModal.vue'
 import UISelect from './ui/UISelect.vue'
 import ConfirmDialog from './ui/ConfirmDialog.vue'
+
+const auth = useAuthStore()
 
 const open = ref(false)
 
@@ -38,10 +42,51 @@ const stickBottom = ref(true)
 marked.setOptions({ gfm: true, breaks: true })
 function mdRender(text) {
   if (!text) return ''
-  return DOMPurify.sanitize(marked.parse(text))
+  // 充值码标记 → 二维码占位（initQrs 挂载真实图片并轮询到账）
+  const t = String(text).replace(/\[充值码:([A-Za-z0-9]+):([\d.]+)\]/g,
+    (_m, no, yuan) => `<div class="ai-qr" data-no="${no}" data-yuan="${yuan}"></div>`)
+  return DOMPurify.sanitize(marked.parse(t))
 }
 
+// 充值二维码：渲染占位 → 填充 img（?t= 传 token，后端支持 query 鉴权）→ 轮询到账
+const qrTimers = new Map()
+function initQrs() {
+  const el = listEl.value
+  if (!el) return
+  el.querySelectorAll('.ai-qr:not(.ready)').forEach(box => {
+    box.classList.add('ready')
+    const no = box.dataset.no
+    const yuan = box.dataset.yuan
+    const t = localStorage.getItem('ppanel_token') || ''
+    box.innerHTML = `<div class="qr-title">微信扫码支付 ¥${yuan}</div>` +
+      `<img src="/api/wallet/recharge/${no}/qrcode?t=${encodeURIComponent(t)}" alt="支付二维码">` +
+      `<div class="qr-status">等待扫码支付，支付后自动到账</div>`
+    const timer = setInterval(async () => {
+      try {
+        const { data } = await api.get(`/wallet/recharge/${no}`)
+        if (data.trade_state === 'SUCCESS') {
+          clearInterval(timer)
+          qrTimers.delete(no)
+          const s = box.querySelector('.qr-status')
+          s.textContent = '支付成功，余额已到账'
+          s.classList.add('ok')
+          toastOk(`充值 ¥${yuan} 已到账`)
+        }
+      } catch { /* 网络抖动继续轮询 */ }
+    }, 2500)
+    qrTimers.set(no, timer)
+  })
+}
+// 消息流式渲染会反复重建 DOM（v-html），watch 无法保证最终填充；
+// 用 MutationObserver 监听消息区，任何重渲染后自动补填未就绪的二维码
+const qrObserver = new MutationObserver(() => initQrs())
+watch(listEl, el => {
+  if (el) qrObserver.observe(el, { childList: true, subtree: true })
+}, { immediate: true })
+onUnmounted(() => { qrObserver.disconnect(); qrTimers.forEach(c => clearInterval(c)) })
+
 async function loadCfg() {
+  if (!auth.isAdmin) { cfg.value.has_key = true; return }  // 普通用户不查配置（管理员已配好）
   try {
     const { data } = await api.get('/ai/config')
     cfg.value = data
@@ -63,11 +108,17 @@ async function saveKey() {
   }
 }
 
-const SUGGESTS = [
+const SUGGESTS_ADMIN = [
   '帮我对比一下现在的商品配置',
   '看看最近有没有实例崩溃',
   '测一下所有节点是否在线',
 ]
+const SUGGESTS_USER = [
+  '查一下我的实例状态',
+  '我的钱包余额和积分是多少',
+  '帮我给实例做个备份',
+]
+const SUGGESTS = computed(() => (auth.isAdmin ? SUGGESTS_ADMIN : SUGGESTS_USER))
 
 const TOOL_LABEL = {
   list_nodes: '查询节点',
@@ -86,6 +137,21 @@ const TOOL_LABEL = {
   recent_events: '查询异常事件',
   list_users: '查询用户',
   create_user: '创建用户',
+  my_instances: '查询我的实例',
+  my_instance_detail: '实例详情',
+  my_instance_power: '实例电源操作',
+  my_wallet: '查询钱包',
+  my_points: '查询积分等级',
+  shop_plans: '查询商品',
+  my_backups: '查询我的备份',
+  my_create_backup: '创建备份',
+  my_restore_backup: '恢复备份',
+  my_recharge: '创建充值单',
+  my_files: '查看实例文件',
+  my_deploy: '部署项目',
+  my_install_deps: '安装依赖',
+  my_set_start_cmd: '设置启动命令',
+  my_logs: '查看日志',
 }
 
 function scrollBottom(force = false) {
@@ -249,7 +315,7 @@ onMounted(loadCfg)
             </div>
             <div class="ai-actions">
               <UISelect v-model="model" :options="modelOpts" style="width:132px" />
-              <button class="ico-btn" :title="cfg.has_key ? `密钥 ${cfg.key_masked}` : '配置密钥'" @click="cfgOpen = true">
+              <button v-if="auth.isAdmin" class="ico-btn" :title="cfg.has_key ? `密钥 ${cfg.key_masked}` : '配置密钥'" @click="cfgOpen = true">
                 <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="15" r="4.5" /><path d="M11 12 21 2m-4 2 3 3m-6 0 2.5 2.5" /></svg>
               </button>
               <button class="ico-btn" title="新对话" :disabled="!messages.length" @click="newOpen = true">
@@ -266,7 +332,7 @@ onMounted(loadCfg)
             <div v-if="!messages.length" class="hello">
               <div class="hello-logo">P</div>
               <div class="hello-title">有什么可以帮你？</div>
-              <div class="hello-sub">运维排查、创建节点商品、备份恢复…直接提问</div>
+              <div class="hello-sub">{{ auth.isAdmin ? '运维排查、创建节点商品、备份恢复…直接提问' : '实例管理、钱包积分、备份恢复…直接提问' }}</div>
               <div class="hello-tips">
                 <button v-for="s in SUGGESTS" :key="s" class="tip-card" @click="send(s)">{{ s }}</button>
               </div>
@@ -484,6 +550,15 @@ onMounted(loadCfg)
 .content :deep(ul), .content :deep(ol) { margin: 6px 0; padding-left: 20px; }
 .content :deep(a) { color: var(--primary-strong); }
 .content :deep(table) { border-collapse: collapse; font-size: 12px; margin: 6px 0; }
+.content :deep(.ai-qr) {
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  margin: 10px 0; padding: 14px; width: 216px;
+  border: 1px solid var(--line); border-radius: 12px; background: #fff;
+}
+.content :deep(.ai-qr .qr-title) { font-size: 13px; font-weight: 700; color: var(--text); }
+.content :deep(.ai-qr img) { width: 172px; height: 172px; }
+.content :deep(.ai-qr .qr-status) { font-size: 12px; color: var(--text-dim); }
+.content :deep(.ai-qr .qr-status.ok) { color: var(--primary-strong); font-weight: 700; }
 .content :deep(th), .content :deep(td) { border: 1px solid var(--line); padding: 4px 8px; }
 .content.typing::after { content: '▍'; color: var(--primary); animation: blink 1s steps(1) infinite; }
 

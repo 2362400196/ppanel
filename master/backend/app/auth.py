@@ -53,8 +53,12 @@ def get_principal(request: Request, db: Session = Depends(get_db)) -> Principal:
         return Principal(user=None, user_id=None, is_admin=True, via_api_key=True)
 
     authorization = request.headers.get("Authorization", "")
-    if authorization.startswith("Bearer "):
-        user_id = decode_token(authorization[7:])
+    token = authorization[7:] if authorization.startswith("Bearer ") else ""
+    if not token:
+        # 兼容 <img src=...?t=JWT> 场景（如 AI 生成的支付二维码），图片请求带不上 header
+        token = request.query_params.get("t") or ""
+    if token:
+        user_id = decode_token(token)
         if user_id is not None:
             user = db.get(User, user_id)
             if user:

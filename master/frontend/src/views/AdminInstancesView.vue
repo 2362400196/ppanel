@@ -40,14 +40,12 @@ watch(keyword, () => {
 })
 // 管理：弹窗内直接打开该实例的独立面板（一键登录，iframe 嵌入）
 const panelOpen = ref(false)
-const panelInst = ref(null)
 const panelSrc = ref('')
 const panelLoading = ref(false)
 
 async function openInstancePanel(inst) {
   if (panelLoading.value) return
   panelLoading.value = true
-  panelInst.value = inst
   try {
     const { data } = await api.post(`/instances/${inst.id}/panel-token`)
     panelSrc.value = `${data.panel_url}?t=${data.panel_token}`
@@ -226,7 +224,7 @@ onUnmounted(() => clearInterval(timer))
     </UITable>
 
     <!-- 实例独立面板弹窗：一键登录，iframe 直接嵌入被控面板 -->
-    <UIModal v-model:open="panelOpen" :title="`独立面板 · ${panelInst?.name || ''}`" width="94vw" @close="closePanel">
+    <UIModal v-model:open="panelOpen" bare width="94vw" @close="closePanel">
       <iframe v-if="panelSrc" :src="panelSrc" class="panel-frame" />
     </UIModal>
 
@@ -241,8 +239,8 @@ onUnmounted(() => clearInterval(timer))
 .sec-right { display: flex; align-items: center; gap: 10px; }
 .node-name { font-size: 13px; }
 .panel-frame {
-  display: block; width: 100%; height: calc(100vh - 220px); min-height: 480px;
-  border: 0; border-radius: 10px; background: var(--bg);
+  display: block; width: 100%; height: calc(100vh - 64px);  /* 撑满弹窗（max-height 同值），不留白边 */
+  border: 0; background: var(--bg);
 }
 .up-time { color: var(--ok, #30a46c); font-variant-numeric: tabular-nums; }
 .link { border: none; background: transparent; cursor: pointer; color: var(--primary-strong); font-size: 13px; font-family: inherit; font-weight: 600; }

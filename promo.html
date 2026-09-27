@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>PPanel 宣传片 · 桌面全屏</title>
+<style>
+/* ============ 全屏网页：100vw x 100vh 铺满，视口单位自适应 ============ */
+* { margin:0; padding:0; box-sizing:border-box; }
+html,body { width:100%; height:100%; overflow:hidden; background:#eaf6f1;
+  font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif; color:#0f2f28; }
+#stage { position:fixed; inset:0;
+  background:linear-gradient(165deg,#f4fcf9 0%,#e6f7f0 46%,#d9f1e8 100%); }
+
+/* ============ 背景氛围 ============ */
+.blob { position:absolute; border-radius:50%; filter:blur(90px); animation:blobMove 9s ease-in-out infinite alternate; }
+.b1 { width:42vw; height:42vw; left:-12vw; top:-6vw; background:rgba(105,224,199,.32); }
+.b2 { width:36vw; height:36vw; right:-10vw; top:30vh; background:rgba(47,181,159,.22); animation-delay:-3s; }
+.b3 { width:44vw; height:44vw; left:10vw; bottom:-16vw; background:rgba(152,235,214,.34); animation-delay:-6s; }
+@keyframes blobMove { from { transform:translate(0,0) scale(1); } to { transform:translate(4vw,-5vh) scale(1.18); } }
+.grid { position:absolute; inset:0; opacity:.13;
+  background-image:linear-gradient(rgba(29,141,117,.55) 1px,transparent 1px),linear-gradient(90deg,rgba(29,141,117,.55) 1px,transparent 1px);
+  background-size:5.5vw 5.5vw; mask-image:radial-gradient(ellipse at 50% 42%, #000 32%, transparent 80%); }
+
+/* ============ 页片 ============ */
+.slide { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center;
+  padding:8vh 6vw; text-align:center; opacity:0; visibility:hidden; transition:opacity .45s ease; }
+.slide.active { opacity:1; visibility:visible; z-index:2; }
+
+.a { opacity:0; }
+.active .a { animation:popIn .62s cubic-bezier(.2,1.4,.4,1) forwards; animation-delay:calc(var(--i,0)*.16s); }
+.active .a.up { animation-name:riseIn; }
+.active .a.zoom { animation-name:zoomIn; }
+@keyframes popIn { 0%{opacity:0; transform:scale(.5) translateY(24px);} 60%{transform:scale(1.08) translateY(-4px);} 100%{opacity:1; transform:scale(1) translateY(0);} }
+@keyframes riseIn { 0%{opacity:0; transform:translateY(70px);} 100%{opacity:1; transform:translateY(0);} }
+@keyframes zoomIn { 0%{opacity:0; transform:scale(1.6);} 100%{opacity:1; transform:scale(1);} }
+
+/* ============ 文字 ============ */
+.kicker { display:inline-flex; align-items:center; gap:14px; font-size:1.5vw; letter-spacing:.4vw; color:#17907b; font-weight:700; }
+.kicker::before,.kicker::after { content:''; width:2.6vw; height:.2vw; border-radius:.2vw; background:linear-gradient(90deg,transparent,#2fb59f); }
+.kicker::after { background:linear-gradient(90deg,#2fb59f,transparent); }
+h1.big { font-size:6.4vw; font-weight:900; line-height:1.16; letter-spacing:.1vw; margin:3vh 0; color:#0f2f28; }
+h1.big em { font-style:normal; background:linear-gradient(92deg,#1d8d75,#35c9ad 60%,#63dcc2); -webkit-background-clip:text; background-clip:text; color:transparent; }
+h2.mid { font-size:4.6vw; font-weight:900; line-height:1.22; margin:2.4vh 0 1vh; color:#0f2f28; }
+h2.mid em { font-style:normal; color:#1d8d75; }
+.sub { font-size:1.8vw; color:#54756b; line-height:1.65; }
+.grad-text { background:linear-gradient(92deg,#1d8d75,#35c9ad); -webkit-background-clip:text; background-clip:text; color:transparent; }
+
+/* ============ 通用组件 ============ */
+.pill { display:inline-flex; align-items:center; gap:1vw; padding:1.1vw 2.4vw; border-radius:99vw;
+  background:#e3f6ef; border:2px solid rgba(47,181,159,.45); font-size:1.7vw; font-weight:700; color:#17786a; }
+.glow-btn { display:inline-flex; align-items:center; padding:1.4vw 3.8vw; border-radius:99vw; font-size:2vw; font-weight:900; color:#fff;
+  background:linear-gradient(135deg,#3ed6b8,#1fa386); box-shadow:0 1vw 2.6vw rgba(47,181,159,.42); position:relative; }
+.glow-btn::after { content:''; position:absolute; inset:-.4vw; border-radius:99vw; border:2px solid rgba(47,181,159,.55); animation:ring 1.6s ease-out infinite; }
+@keyframes ring { 0%{transform:scale(.92); opacity:1;} 100%{transform:scale(1.22); opacity:0;} }
+.floaty { animation:floaty 3.2s ease-in-out infinite alternate; }
+@keyframes floaty { from{transform:translateY(-.8vh);} to{transform:translateY(.9vh);} }
+.card { background:rgba(255,255,255,.85); border:1.5px solid rgba(47,181,159,.24); border-radius:1.6vw; backdrop-filter:blur(6px);
+  box-shadow:0 .8vw 2vw rgba(23,105,92,.10); }
+
+/* ============ S1 开场 ============ */
+.logo-big { width:11vw; height:11vw; border-radius:2.8vw; display:flex; align-items:center; justify-content:center;
+  font-size:5.6vw; font-weight:900; font-family:'JetBrains Mono',Consolas,monospace; color:#fff;
+  background:linear-gradient(135deg,#3ed6b8,#1d8d75); box-shadow:0 1vw 3vw rgba(47,181,159,.45); }
+.s1-tag { margin-top:4vh; display:flex; gap:1.4vw; }
+.s1-tag span { padding:.9vw 2vw; border-radius:99vw; font-size:1.7vw; font-weight:800; background:rgba(255,255,255,.92);
+  border:1.5px solid rgba(47,181,159,.35); color:#17786a; box-shadow:0 .5vw 1.4vw rgba(23,105,92,.10); }
+
+/* ============ S2 痛点 ============ */
+.pain { width:56vw; display:flex; flex-direction:column; gap:2vh; margin:4.5vh 0 5vh; }
+.pain .row { display:flex; align-items:center; gap:1.4vw; padding:1.6vw 2.2vw; border-radius:1.2vw; font-size:2vw; font-weight:700;
+  background:#fdeef0; border:1.5px solid rgba(224,82,96,.35); color:#c14a57; text-align:left; box-shadow:0 .5vw 1.4vw rgba(224,82,96,.08); }
+.pain .row b { flex-shrink:0; width:3.2vw; height:3.2vw; border-radius:50%; background:#e05260; color:#fff;
+  display:flex; align-items:center; justify-content:center; font-size:1.7vw; }
+.no-line { font-size:4.6vw; font-weight:900; color:#1d8d75; text-shadow:0 .4vw 1.8vw rgba(47,181,159,.3); }
+
+/* ============ S3 定位 ============ */
+.formula { display:flex; align-items:center; gap:1.6vw; margin:5vh 0; }
+.formula .box { padding:2.2vw 2.8vw; border-radius:1.6vw; font-size:2.3vw; font-weight:900; color:#0f2f28; }
+.formula .op { font-size:3.4vw; font-weight:900; color:#1d8d75; }
+
+/* ============ S4 秒开 ============ */
+.count { font-size:16vw; font-weight:900; line-height:1; font-family:'JetBrains Mono',Consolas,monospace;
+  background:linear-gradient(180deg,#35c9ad,#1d8d75); -webkit-background-clip:text; background-clip:text; color:transparent;
+  filter:drop-shadow(0 .8vw 1.8vw rgba(47,181,159,.35)); }
+.marquee { width:64vw; overflow:hidden; margin-top:5vh; position:relative; height:5.4vw;
+  mask-image:linear-gradient(90deg,transparent,#000 12%,#000 88%,transparent); }
+.marquee .track { position:absolute; white-space:nowrap; display:flex; gap:1.2vw; animation:scroll 12s linear infinite; }
+@keyframes scroll { from{transform:translateX(0);} to{transform:translateX(-50%);} }
+.marquee span { flex-shrink:0; padding:1vw 2.2vw; border-radius:1vw; font-size:1.8vw; font-weight:800; font-family:'JetBrains Mono',monospace;
+  background:rgba(255,255,255,.92); border:1.5px solid rgba(47,181,159,.3); color:#17786a; box-shadow:0 .5vw 1.3vw rgba(23,105,92,.08); }
+
+/* ============ S5 驾驶舱（横版 4 列） ============ */
+.grid8 { display:grid; grid-template-columns:repeat(4,1fr); gap:1.4vw; width:72vw; margin-top:5vh; }
+.grid8 .g { padding:2vw 1.4vw; border-radius:1.4vw; display:flex; flex-direction:column; align-items:center; gap:1vh; font-size:1.55vw; font-weight:800; color:#1c4a40; }
+.grid8 .ic { width:4.2vw; height:4.2vw; border-radius:1.1vw; background:linear-gradient(135deg,#e0f7f0,#c9efe4);
+  display:flex; align-items:center; justify-content:center; }
+.grid8 svg { width:2.2vw; height:2.2vw; fill:none; stroke:#1d8d75; stroke-width:2; stroke-linecap:round; stroke-linejoin:round; }
+
+/* ============ S6 SSL（步骤横排） ============ */
+.lock-wrap { position:relative; margin:4.5vh 0; }
+.domain-bar { display:flex; align-items:center; padding:1.8vw 2.6vw; border-radius:1.3vw; font-size:2.1vw; font-weight:800;
+  font-family:'JetBrains Mono',monospace; background:rgba(255,255,255,.92); border:1.5px solid rgba(47,181,159,.35); color:#0f2f28;
+  box-shadow:0 .8vw 2vw rgba(23,105,92,.12); }
+.lock-badge { position:absolute; right:-2vw; top:-2.6vw; width:7vw; height:7vw; border-radius:50%;
+  background:linear-gradient(135deg,#3ed6b8,#1fa386); display:flex; align-items:center; justify-content:center;
+  box-shadow:0 1vw 2.6vw rgba(47,181,159,.5); animation:popIn .5s cubic-bezier(.2,1.6,.4,1) forwards; animation-delay:.9s; opacity:0; }
+.lock-badge svg { width:3.4vw; height:3.4vw; fill:none; stroke:#fff; stroke-width:2.6; stroke-linecap:round; stroke-linejoin:round; }
+.steps { display:flex; gap:1.4vw; margin-top:5vh; width:66vw; }
+.step { flex:1; display:flex; align-items:center; gap:1vw; padding:1.5vw 1.6vw; border-radius:1.2vw; font-size:1.55vw; font-weight:700; text-align:left; color:#26473f; }
+.step i { font-style:normal; flex-shrink:0; width:2.7vw; height:2.7vw; border-radius:50%; background:#dff5ee; border:1.5px solid #35c9ad;
+  color:#1d8d75; display:flex; align-items:center; justify-content:center; font-size:1.4vw; font-weight:900; }
+
+/* ============ S7 AI（气泡左右分布） ============ */
+.chat { width:60vw; display:flex; flex-direction:column; gap:2.6vh; margin:4.5vh 0 0; }
+.msg { max-width:70%; padding:1.7vw 2.2vw; border-radius:1.6vw; font-size:1.8vw; font-weight:700; line-height:1.55; text-align:left; }
+.msg.user { align-self:flex-end; background:linear-gradient(135deg,#35c9ad,#1d8d75); color:#fff; border-bottom-right-radius:.4vw;
+  box-shadow:0 .8vw 1.8vw rgba(47,181,159,.35); }
+.msg.ai { align-self:flex-start; background:rgba(255,255,255,.92); border:1.5px solid rgba(47,181,159,.3); border-bottom-left-radius:.4vw; color:#26473f;
+  box-shadow:0 .6vw 1.5vw rgba(23,105,92,.10); }
+.msg.ai .st { color:#1d8d75; }
+.cursor { display:inline-block; width:.25vw; height:2vw; background:#1d8d75; vertical-align:-.3vw; animation:blink .7s steps(1) infinite; }
+@keyframes blink { 50%{opacity:0;} }
+
+/* ============ S9 福利 ============ */
+.coin-row { display:flex; gap:2vw; margin:5vh 0; }
+.coin { width:9.5vw; height:9.5vw; border-radius:50%; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:.4vh;
+  background:radial-gradient(circle at 32% 28%, #7defd6, #23a186); color:#063f34; font-weight:900; border:.35vw solid rgba(255,255,255,.8);
+  box-shadow:0 1vw 2.4vw rgba(23,105,92,.22), 0 0 3vw rgba(75,227,196,.3); }
+.coin b { font-size:3vw; } .coin span { font-size:1.35vw; }
+
+/* ============ S10 结尾 ============ */
+.cta-sub { font-size:1.9vw; color:#54756b; margin:2.6vh 0 4.5vh; line-height:1.6; }
+.url { font-size:2.8vw; font-weight:900; font-family:'JetBrains Mono',monospace; color:#17786a; letter-spacing:.15vw; }
+
+/* ============ 进度条 + 角标 ============ */
+#bar { position:absolute; top:0; left:0; height:.7vw; width:100%; z-index:9; display:flex; background:rgba(23,105,92,.10); }
+#bar i { flex:1; margin:0 3px; border-radius:0 0 4px 4px; overflow:hidden; position:relative; }
+#bar i::after { content:''; position:absolute; inset:0; background:linear-gradient(90deg,#35c9ad,#1d8d75); transform:scaleX(var(--p,0)); transform-origin:left; }
+#bar i.done::after { transform:scaleX(1); }
+#pageNo { position:absolute; right:2.6vw; bottom:3vh; font-size:1.4vw; font-weight:800; color:rgba(23,105,92,.5); z-index:9; font-family:'JetBrains Mono',monospace; }
+#hint { position:absolute; left:2.6vw; bottom:3vh; font-size:1.2vw; color:rgba(23,105,92,.38); z-index:9; }
+
+/* ============ 开始封面 ============ */
+#cover { position:absolute; inset:0; z-index:20; background:linear-gradient(165deg,#f4fcf9,#d9f1e8);
+  display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4.5vh; cursor:pointer; }
+#cover .go { padding:1.5vw 4.2vw; border-radius:99vw; font-size:2.2vw; font-weight:900; color:#fff;
+  background:linear-gradient(135deg,#3ed6b8,#1fa386); box-shadow:0 1vw 2.6vw rgba(47,181,159,.42); }
+#cover .tip { font-size:1.4vw; color:#54756b; line-height:1.8; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div class="blob b1"></div><div class="blob b2"></div><div class="blob b3"></div><div class="grid"></div>
+  <div id="bar"></div><div id="pageNo">1 / 10</div><div id="hint">空格暂停 · ←→ 翻页</div>
+
+  <div id="cover">
+    <div class="logo-big floaty">P</div>
+    <div class="go">点击全屏开始</div>
+    <div class="tip">空格 暂停 / 续播 · ← → 翻页</div>
+  </div>
+
+  <!-- S1 开场 -->
+  <section class="slide" data-dur="4600">
+    <div class="logo-big a">P</div>
+    <h1 class="big a" style="--i:1">PPanel<em>云主机</em></h1>
+    <div class="sub a" style="--i:2">把一整个机房，装进你的浏览器</div>
+    <div class="s1-tag a" style="--i:3"><span>秒开</span><span>秒部署</span><span>秒管理</span></div>
+  </section>
+
+  <!-- S2 痛点 -->
+  <section class="slide" data-dur="5200">
+    <div class="kicker a">部署一个网站，你要</div>
+    <div class="pain">
+      <div class="row a up" style="--i:1"><b>1</b>买服务器 · 装系统</div>
+      <div class="row a up" style="--i:2"><b>2</b>敲命令装环境 · 排错两小时</div>
+      <div class="row a up" style="--i:3"><b>3</b>配域名 · 申请证书 · 天天维护</div>
+    </div>
+    <div class="no-line a zoom" style="--i:4">不！用！了！</div>
+  </section>
+
+  <!-- S3 定位 -->
+  <section class="slide" data-dur="4400">
+    <div class="kicker a">PPanel 是什么</div>
+    <div class="formula">
+      <div class="box card a zoom" style="--i:1">云主机</div><div class="op a" style="--i:2">+</div>
+      <div class="box card a zoom" style="--i:3">运维团队</div><div class="op a" style="--i:4">=</div>
+      <div class="box card a zoom" style="--i:5; background:linear-gradient(135deg,#3ed6b8,#1d8d75); color:#fff;">一个面板</div>
+    </div>
+    <h1 class="big a up" style="--i:6">开通 · 部署 · 运维 <em>全搞定</em></h1>
+  </section>
+
+  <!-- S4 秒开 -->
+  <section class="slide" data-dur="5000">
+    <div class="kicker a">开通实例要多久</div>
+    <div class="count a zoom" style="--i:1" id="countNum">10</div>
+    <div class="sub a" style="--i:2">点一下按钮 · <b class="grad-text">秒级</b>开出一台云主机</div>
+    <div class="marquee a up" style="--i:3"><div class="track" id="mtrack"></div></div>
+  </section>
+
+  <!-- S5 驾驶舱 -->
+  <section class="slide" data-dur="5600">
+    <h2 class="mid a">每台实例，都有<em>专属驾驶舱</em></h2>
+    <div class="grid8" id="grid8"></div>
+  </section>
+
+  <!-- S6 SSL -->
+  <section class="slide" data-dur="5200">
+    <div class="kicker a">绑定域名</div>
+    <div class="lock-wrap">
+      <div class="domain-bar a up" style="--i:1">app.<span class="grad-text">example.com</span></div>
+      <div class="lock-badge"><svg viewBox="0 0 24 24"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></div>
+    </div>
+    <h2 class="mid a" style="--i:2">HTTPS <em>自动到手</em></h2>
+    <div class="steps">
+      <div class="step card a up" style="--i:3"><i>1</i>填入域名 · 自动校验解析</div>
+      <div class="step card a up" style="--i:4"><i>2</i>Let's Encrypt 自动签发</div>
+      <div class="step card a up" style="--i:5"><i>3</i>到期自动续期 · 全程无感</div>
+    </div>
+  </section>
+
+  <!-- S7 AI -->
+  <section class="slide" data-dur="5600">
+    <div class="kicker a">内置 AI 助手</div>
+    <h2 class="mid a" style="--i:1">打字就能<em>部署项目</em></h2>
+    <div class="chat">
+      <div class="msg user a up" style="--i:2">我刚上传了项目文件，帮我部署一下</div>
+      <div class="msg ai a up" style="--i:3">收到！<span class="st">解压项目 → 安装依赖 → 启动实例</span>，三步搞定，运行日志随时看 <span class="cursor"></span></div>
+    </div>
+    <div class="pill a up" style="--i:4; margin-top:4.5vh">还能一句话查余额 · 开实例 · 一键充值</div>
+  </section>
+
+  <!-- S8 安全 -->
+  <section class="slide" data-dur="4600">
+    <div class="kicker a">你的数据很贵</div>
+    <h1 class="big a" style="--i:1">备份 · 防护 · 监控<br><em>一刻不闲</em></h1>
+    <div class="sub a up" style="--i:2">数据库整库备份 / 目录快照 / 一键恢复 / 网站防护 / 实时运行日志</div>
+  </section>
+
+  <!-- S9 福利 -->
+  <section class="slide" data-dur="4400">
+    <div class="kicker a">白嫖党狂喜</div>
+    <div class="coin-row">
+      <div class="coin a zoom floaty" style="--i:1"><b>签</b><span>每日签到</span></div>
+      <div class="coin a zoom floaty" style="--i:2; animation-delay:.3s"><b>积</b><span>积分等级</span></div>
+      <div class="coin a zoom floaty" style="--i:3; animation-delay:.6s"><b>换</b><span>积分抵扣</span></div>
+    </div>
+    <h1 class="big a up" style="--i:4">越玩越<em>便宜</em></h1>
+  </section>
+
+  <!-- S10 结尾 -->
+  <section class="slide" data-dur="6000">
+    <div class="logo-big a floaty" style="width:9vw;height:9vw;font-size:4.4vw">P</div>
+    <h1 class="big a" style="--i:1">你的第一台云主机，<em>现在就开</em></h1>
+    <div class="cta-sub a" style="--i:2">打开浏览器 · 输入网址 · 上车</div>
+    <div class="url a zoom" style="--i:3">www.ppanel.cn</div>
+    <div class="glow-btn a" style="--i:4; margin-top:5vh">立即免费体验</div>
+  </section>
+</div>
+
+<script>
+/* ============ S4 跑马灯（两份拼接无缝滚动） ============ */
+const imgs = ['Python 3.12','PHP 8.3','Node 20','Go 1.24','Java 21','MySQL 9.0','Redis 7','Nginx','Docker','Ubuntu'];
+document.getElementById('mtrack').innerHTML =
+  [...imgs, ...imgs].map(t => `<span>${t}</span>`).join('');
+
+/* ============ S5 功能网格 ============ */
+const feats = [
+  ['域名与 SSL','M4 11V7a4 4 0 0 1 8 0v4M4 11h16v10H4z'],
+  ['文件管理','M3 7h6l2 3h10v10H3zM3 7V5h6'],
+  ['数据库','db'],
+  ['备份恢复','M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6'],
+  ['定时任务','clock'],
+  ['网站防护','M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z'],
+  ['在线终端','M4 5h16v14H4zM7 9l3 3-3 3M12 15h5'],
+  ['运行日志','M6 4h12v16H6zM9 8h6M9 12h6M9 16h4'],
+];
+document.getElementById('grid8').innerHTML = feats.map(([t,d],i) => {
+  let svg;
+  if (d === 'db') svg = '<ellipse cx="12" cy="5.5" rx="8" ry="3"/><path d="M4 5.5v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6M4 11.5v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/>';
+  else if (d === 'clock') svg = '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/>';
+  else svg = d;
+  return `<div class="g card a up" style="--i:${i+1}"><div class="ic"><svg viewBox="0 0 24 24">${svg}</svg></div>${t}</div>`;
+}).join('');
+
+/* ============ 自动轮播：rAF 驱动，暂停可冻结进度 ============ */
+const slides = [...document.querySelectorAll('.slide')];
+const bar = document.getElementById('bar');
+slides.forEach(() => bar.appendChild(document.createElement('i')));
+const segs = [...bar.children];
+const num = document.getElementById('pageNo');
+let cur = 0, paused = false, raf = null, startT = 0, acc = 0;
+
+function show(i) {
+  cur = i;
+  slides.forEach((s, k) => s.classList.toggle('active', k === i));
+  num.textContent = (i + 1) + ' / ' + slides.length;
+  segs.forEach((sg, k) => { sg.className = k < i ? 'done' : ''; sg.style.setProperty('--p', 0); });
+  acc = 0; startT = performance.now();
+  cancelAnimationFrame(raf);
+  raf = requestAnimationFrame(tick);
+}
+function tick(t) {
+  if (paused) { startT = t - acc; raf = requestAnimationFrame(tick); return; }
+  acc = t - startT;
+  const dur = +slides[cur].dataset.dur;
+  const p = Math.min(1, acc / dur);
+  segs[cur].style.setProperty('--p', p);
+  if (p >= 1) { show((cur + 1) % slides.length); return; }
+  raf = requestAnimationFrame(tick);
+}
+
+/* ============ 控制：空格/点击 暂停续播 · 方向键翻页 ============ */
+addEventListener('keydown', e => {
+  if (e.code === 'Space') { e.preventDefault(); paused = !paused; }
+  if (e.key === 'ArrowRight') { paused = false; show((cur + 1) % slides.length); }
+  if (e.key === 'ArrowLeft') { paused = false; show((cur - 1 + slides.length) % slides.length); }
+});
+addEventListener('click', () => { paused = !paused; });
+
+/* ============ 开始封面：点击 → 进全屏 → 开播 ============ */
+document.getElementById('cover').addEventListener('click', e => {
+  e.stopPropagation();  // 不触发暂停
+  paused = false;
+  if (document.documentElement.requestFullscreen) document.documentElement.requestFullscreen();
+  document.getElementById('cover').remove();
+  show(0);
+});
+
+/* ============ S4 数字跳动：进页时 10 → 1 倒数 ============ */
+const cnt = document.getElementById('countNum');
+let segTimer = null;
+new MutationObserver(() => {
+  clearInterval(segTimer);
+  if (slides[3].classList.contains('active')) {
+    let n = 10; cnt.textContent = n;
+    segTimer = setInterval(() => { n = Math.max(1, n - 1); cnt.textContent = n; if (n === 1) clearInterval(segTimer); }, 420);
+  }
+}).observe(slides[3], { attributes: true, attributeFilter: ['class'] });
+
+/* 播放由「点击全屏开始」封面触发，不再自动开播 */
+</script>
+</body>
+</html>

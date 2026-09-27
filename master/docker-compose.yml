@@ -1,0 +1,17 @@
+services:
+  master:
+    build: .
+    image: ppanel-master:latest
+    container_name: ppanel-master
+    restart: unless-stopped
+    ports:
+      - "${MASTER_PORT:-8001}:8001"
+    environment:
+      MASTER_HOST: 0.0.0.0
+      MASTER_PORT: 8001
+      JWT_SECRET: ${JWT_SECRET:?请在 master/.env 中设置 JWT_SECRET}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?请在 master/.env 中设置 ADMIN_PASSWORD}
+    volumes:
+      # SQLite 数据库与上传的工单附件等持久化在宿主机 backend/data
+      - ./backend/data:/srv/master/backend/data

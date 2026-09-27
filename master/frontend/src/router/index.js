@@ -115,6 +115,12 @@ const routes = [
     component: () => import('../views/AdminRewardsView.vue'),
     meta: { admin: true }
   },
+  {
+    path: '/admin-upgrade',
+    name: 'admin-upgrade',
+    component: () => import('../views/AdminUpgradeView.vue'),
+    meta: { admin: true }
+  },
   { path: '/:pathMatch(.*)*', redirect: '/' }
 ]
 

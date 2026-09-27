@@ -3,11 +3,12 @@ name = "ppanel"
 version = "0.1.0"
 description = "PPanel 被控端 Agent"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "bcrypt>=5.0.0",
     "docker>=7.2.0",
     "fastapi>=0.141.1",
+    "httpx>=0.28.1",
     "pyjwt>=2.14.0",
     "python-multipart>=0.0.32",
     "sqlalchemy>=2.0.54",
@@ -21,3 +22,7 @@ dependencies = [
 dev = [
     "httpx>=0.28.1",
 ]
+
+# pip 兜底安装需要构建项目：显式指定包，避免 data/ 等运行时目录被当成包导致 flat-layout 歧义
+[tool.setuptools.packages.find]
+include = ["app*"]

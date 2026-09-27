@@ -5,7 +5,8 @@ const props = defineProps({
   open: Boolean,
   title: String,
   width: { type: [String, Number], default: '440px' },
-  persistent: Boolean // 点击遮罩/Esc 不关闭
+  persistent: Boolean, // 点击遮罩/Esc 不关闭
+  bare: Boolean // 无边框模式：不渲染头部、无内边距，内容完全填充（Esc/点遮罩关闭）
 })
 const emit = defineEmits(['update:open', 'close'])
 
@@ -35,9 +36,9 @@ watch(() => props.open, v => {
   <Teleport to="body">
     <Transition name="modal">
       <div v-if="open" class="modal-mask" @mousedown.self="close">
-        <div class="modal-panel" :style="{ width: typeof width === 'number' ? width + 'px' : width }">
-          <div class="modal-head">
-            <span class="modal-title">{{ title }}</span>
+        <div class="modal-panel" :class="{ bare }" :style="{ width: typeof width === 'number' ? width + 'px' : width }">
+          <div v-if="!bare" class="modal-head">
+            <span v-if="title" class="modal-title">{{ title }}</span>
             <button class="modal-x" aria-label="关闭" @click="closeForced">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
                 <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
@@ -76,6 +77,7 @@ watch(() => props.open, v => {
 .modal-x {
   width: 28px; height: 28px; border: none; background: transparent;
   border-radius: 8px; cursor: pointer;
+  margin-left: auto; /* 无标题时叉号仍靠右 */
   display: flex; align-items: center; justify-content: center;
   color: var(--text);
   transition: background .15s ease, color .15s ease;
@@ -83,6 +85,7 @@ watch(() => props.open, v => {
 .modal-x:hover { background: rgba(229, 72, 77, .12); color: #e5484d; }
 .modal-x svg { width: 16px; height: 16px; }
 .modal-body { padding: 16px 20px; overflow-y: auto; }
+.modal-panel.bare .modal-body { padding: 0; overflow: hidden; }
 .modal-foot {
   display: flex; justify-content: flex-end; gap: 10px;
   padding: 0 20px 16px;

@@ -20,7 +20,7 @@ from app.config import settings
 from app.database import Base, SessionLocal, engine
 from app.models import Instance, InstanceCron, InstanceSite, User  # noqa: F401
 from app.routers import (agent, agent_ws, backup, host_files, host_tasks,
-                         open_api, panel, panel_ops, security)
+                         open_api, panel, panel_ops, security, upgrade)
 from app.services import instance_service as svc
 from app.services import cron_service
 
@@ -157,6 +157,8 @@ app.include_router(agent_ws.router, prefix="/agent")
 app.include_router(host_files.router, prefix="/agent")  # 宿主机文件管理（管理员节点运维）
 app.include_router(security.router, prefix="/agent")  # 宿主机安全防护：X-Node-Token 或 X-API-Key
 app.include_router(backup.router, prefix="/agent")  # 节点备份：容器导出 / 数据库导出，X-Node-Token 或 X-API-Key
+app.include_router(upgrade.router, prefix="/agent",
+                   dependencies=[Depends(require_node)])  # 在线升级：版本检查 / 一键升级（X-Node-Token）
 app.include_router(host_tasks.router, prefix="/agent")  # 任务日志增量拉取（配合 X-Task-Id）
 app.include_router(panel_ops.router)  # 面板扩展：自助备份/定时任务/站点防护/phpMyAdmin
 # 注意：panel_ops 必须先于 panel 挂载——panel 里有 POST /panel/instance/{action} 通配路由，

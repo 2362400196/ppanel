@@ -112,6 +112,10 @@ function logout() {
             <svg class="nav-icon" viewBox="0 0 24 24"><circle cx="12" cy="8" r="6" /><path d="M15.5 12.9 17 22l-5-3-5 3 1.5-9.1" /></svg>
             <span>福利设置</span>
           </router-link>
+          <router-link to="/admin-upgrade" class="nav-item" :class="{ active: route.name === 'admin-upgrade' }">
+            <svg class="nav-icon" viewBox="0 0 24 24"><path d="M12 3v12" /><path d="m7 10 5-5 5 5" /><path d="M5 21h14" /></svg>
+            <span>系统升级</span>
+          </router-link>
           <router-link to="/settings" class="nav-item" :class="{ active: route.name === 'settings' }">
             <svg class="nav-icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.09a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.09a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>
             <span>设置</span>
@@ -147,8 +151,8 @@ function logout() {
         </router-view>
       </div>
     </main>
-    <!-- 管理员全局 AI 助手（右下角悬浮球，任何页面可打开） -->
-    <AiAssistant v-if="auth.isAdmin" />
+    <!-- 全局 AI 助手（右下角悬浮球，登录即可用；管理员/普通用户工具自动分流） -->
+    <AiAssistant v-if="auth.user" />
   </div>
 </template>
 

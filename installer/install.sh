@@ -1,0 +1,936 @@
+#!/usr/bin/env bash
+# ============================================================
+#  PPanel 总安装器
+#
+#  一个脚本管好主控 + 被控（交互菜单选择，或子命令免交互）：
+#    bash install.sh                   -> 菜单
+#    bash install.sh agent             -> 独立面板安装/升级（被控节点）
+#    bash install.sh agent-reinstall   -> 被控全新重装（清数据）
+#    bash install.sh agent-uninstall   -> 被控卸载
+#    bash install.sh agent-reset-admin -> 被控重置管理员
+#    bash install.sh master            -> 主控面板（服务器直装，systemd）
+#    bash install.sh master-docker     -> 主控面板（Docker）
+#    bash install.sh status            -> 运行状态
+#
+#  环境变量：SRC_DIR=/opt/ppanel  REPO_URL=...  MASTER_PORT=8001  PORT=9100
+#            PYPI_MIRROR=...  NPM_REGISTRY=...
+# ============================================================
+set -euo pipefail
+
+REPO_URL="${REPO_URL:-https://gitee.com/zhuxiaohuaqn/ppanel.git}"
+SRC_DIR="${SRC_DIR:-/opt/ppanel}"
+MASTER_SERVICE="ppanel-master"
+MASTER_PORT="${MASTER_PORT:-8001}"
+PYPI_MIRROR="${PYPI_MIRROR:-https://pypi.tuna.tsinghua.edu.cn/simple}"
+NPM_REGISTRY="${NPM_REGISTRY:-https://registry.npmmirror.com}"
+
+MASTER_DIR="$SRC_DIR/master"
+MASTER_BACKEND="$MASTER_DIR/backend"
+MASTER_FRONTEND="$MASTER_DIR/frontend"
+
+AGENT_SERVICE="ppanel-agent"
+AGENT_APP="$SRC_DIR/agent/backend"
+AGENT_PORT="${PORT:-9100}"
+
+c_g='\033[0;32m'; c_c='\033[0;36m'; c_y='\033[0;33m'; c_r='\033[0;31m'; c_dim='\033[2m'; c_b='\033[1m'; c_off='\033[0m'
+info()  { echo -e "  ${c_g}➜${c_off} $*"; }
+ok()    { echo -e "  ${c_g}✔${c_off} $*"; }
+warn()  { echo -e "  ${c_y}⚠${c_off} $*"; }
+fail()  { echo -e "  ${c_r}✘ $*${c_off}" >&2; exit 1; }
+step()  { echo -e "\n${c_c}${c_b}── $* ──${c_off}"; }
+
+banner() {
+  echo -e "${c_c}"
+  echo -e "  ____   ___  ____   ___  _   _ _____ "
+  echo -e " |  _ \\ / _ \\|  _ \\ / _ \\| \\ | | ____|"
+  echo -e " | |_) | | | | |_) | | | |  \\| |  _|  "
+  echo -e " |  __/| |_| |  __/| |_| | |\\  | |___ "
+  echo -e " |_|    \\___/|_|    \\___/|_| \\_|_____|"
+  echo -e "${c_off}${c_dim}        云面板总安装器 · 主控 / 被控${c_off}"
+  echo -e "${c_dim}  ─────────────────────────────────────────────────────${c_off}"
+}
+
+confirm() { read -rp "  ${c_y}$1 [y/N]: ${c_off}" a; [[ "$a" =~ ^[Yy]$ ]]; }
+
+# ============================================================
+#  环境检测（与被控安装脚本同一套）
+# ============================================================
+PKG=""
+detect_env() {
+  [ "$(id -u)" = 0 ] || fail "请用 root 运行：sudo bash install.sh"
+  if command -v apt-get >/dev/null 2>&1; then PKG="apt"
+  elif command -v dnf >/dev/null 2>&1; then PKG="dnf"
+  elif command -v yum >/dev/null 2>&1; then PKG="yum"
+  else fail "未识别的发行版（需要 apt/dnf/yum）"
+  fi
+  ok "系统环境：$(. /etc/os-release && echo "$PRETTY_NAME") · $PKG"
+}
+
+pkg_install() {
+  case "$PKG" in
+    apt)
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -y 2>&1 | tail -1 || true
+      apt-get install -y -o DPkg::Lock::Timeout=120 "$@"
+      ;;
+    dnf) dnf install -y "$@" ;;
+    yum) yum install -y "$@" ;;
+  esac
+}
+
+is_cn() {
+  TZ_VAL=$(cat /etc/timezone 2>/dev/null || timedatectl show -p Timezone --value 2>/dev/null || echo "")
+  case "$TZ_VAL" in
+    Asia/Shanghai|Asia/Chongqing|Asia/Harbin|Asia/Urumqi|Asia/Hong_Kong|Asia/Macau|Asia/Taipei) return 0 ;;
+  esac
+  command -v curl >/dev/null 2>&1 || return 1
+  [ "$(curl -s --max-time 3 https://ipinfo.io/country 2>/dev/null | tr -d '[:space:]')" = "CN" ]
+}
+
+open_port() {  # 防火墙放行端口（有防火墙才操作）
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+    ufw allow "$1/tcp" >/dev/null 2>&1 && ok "ufw 已放行 $1"
+  elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+    firewall-cmd --permanent --add-port="$1/tcp" >/dev/null 2>&1 && firewall-cmd --reload >/dev/null 2>&1 && ok "firewalld 已放行 $1"
+  fi
+}
+
+# ============================================================
+#  代码获取（主控/被控共用一个仓库：/opt/ppanel）
+# ============================================================
+ensure_repo() {  # $1=安装后校验的文件路径（缺省主控 main.py）
+  local CHECK="${1:-$MASTER_BACKEND/main.py}"
+  step "拉取代码"
+  if [ -d "$SRC_DIR/.git" ]; then
+    MODE_UPGRADE=1
+    info "检测到已有代码（$SRC_DIR），更新..."
+    # 预清理：恢复上次安装裁剪/本地改动，清残留 merge 状态，避免二次安装 pull 失败
+    git -C "$SRC_DIR" merge --abort 2>/dev/null || true
+    git -C "$SRC_DIR" checkout -- . 2>/dev/null || true
+    if git -C "$SRC_DIR" pull --ff-only > /tmp/ppanel-git.log 2>&1; then
+      ok "代码已是最新"
+    else
+      tail -4 /tmp/ppanel-git.log
+      warn "git pull 失败，硬对齐远程分支..."
+      BR=$(git -C "$SRC_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)
+      if git -C "$SRC_DIR" fetch origin > /dev/null 2>&1 \
+         && git -C "$SRC_DIR" reset --hard "origin/$BR" > /dev/null 2>&1; then
+        ok "已对齐远程分支 $BR"
+      else
+        warn "无法自动更新，沿用现有代码继续"
+      fi
+    fi
+  else
+    MODE_UPGRADE=0
+    info "克隆仓库 -> $SRC_DIR"
+    git clone --depth 1 "$REPO_URL" "$SRC_DIR" >/dev/null 2>&1 \
+      || fail "克隆失败，检查网络或用 REPO_URL= 指定仓库地址"
+  fi
+  [ -f "$CHECK" ] || fail "仓库结构异常：找不到 $CHECK"
+  ok "代码就绪"
+}
+
+# ============================================================
+#  主控：服务器直装
+# ============================================================
+master_install_base() {
+  step "1/6 基础依赖（Python / Node）"
+  pkg_install curl git ca-certificates
+  command -v python3 >/dev/null 2>&1 || pkg_install python3 python3-venv python3-pip
+  if python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)'; then
+    ok "Python $(python3 -V 2>&1 | awk '{print $2}')"
+  elif python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)'; then
+    warn "系统 Python $(python3 -V 2>&1 | awk '{print $2}') 低于 3.11，稍后由 uv 自动配置 Python 3.12"
+  else
+    fail "需要 Python >= 3.11（可由 uv 自动下载），当前 $(python3 -V 2>&1)"
+  fi
+  master_install_node
+}
+
+master_install_node() {  # 前端构建需要 Node >= 18
+  NODE_OK=0
+  if command -v node >/dev/null 2>&1; then
+    NM=$(node -v | sed 's/^v//' | cut -d. -f1)
+    [ "$NM" -ge 18 ] 2>/dev/null && NODE_OK=1
+  fi
+  if [ "$NODE_OK" != 1 ]; then
+    info "安装 Node.js（前端构建用）..."
+    pkg_install nodejs npm 2>/dev/null || true
+    if command -v node >/dev/null 2>&1; then
+      NM=$(node -v | sed 's/^v//' | cut -d. -f1)
+      [ "$NM" -ge 18 ] 2>/dev/null && NODE_OK=1
+    fi
+    if [ "$NODE_OK" != 1 ]; then
+      info "发行版 Node 过旧，尝试 NodeSource 20.x..."
+      if command -v apt-get >/dev/null 2>&1; then
+        curl -fsSL --max-time 60 https://deb.nodesource.com/setup_20.x | bash - >/dev/null 2>&1 \
+          && apt-get install -y nodejs >/dev/null 2>&1 || true
+      else
+        curl -fsSL --max-time 60 https://rpm.nodesource.com/setup_20.x | bash - >/dev/null 2>&1 \
+          && $PKG install nodejs >/dev/null 2>&1 || true
+      fi
+    fi
+  fi
+  command -v node >/dev/null 2>&1 || fail "Node.js 安装失败，请手动安装 Node >= 18 后重试"
+  [ "$(node -v | sed 's/^v//' | cut -d. -f1)" -ge 18 ] 2>/dev/null \
+    || fail "Node 版本过低（$(node -v)），需要 >= 18"
+  ok "Node $(node -v)"
+}
+
+master_deps() {
+  step "2/6 后端依赖（uv 加速）"
+  cd "$MASTER_BACKEND"
+  export UV_DEFAULT_INDEX="$PYPI_MIRROR" UV_INDEX_URL="$PYPI_MIRROR"
+  if python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
+    export UV_PYTHON_PREFERENCE=only-system UV_PYTHON="$(command -v python3)"
+  else
+    # 系统 Python 过旧：允许 uv 下载托管版 3.12
+    unset UV_PYTHON_PREFERENCE
+    export UV_PYTHON=3.12
+  fi
+  UV_BIN=""
+  [ -x "$HOME/.local/bin/uv" ] && UV_BIN="$HOME/.local/bin/uv"
+  [ -z "$UV_BIN" ] && [ -x "$MASTER_BACKEND/.venv/bin/uv" ] && UV_BIN="$MASTER_BACKEND/.venv/bin/uv"
+  if [ -z "$UV_BIN" ]; then
+    [ -d "$MASTER_BACKEND/.venv" ] || python3 -m venv "$MASTER_BACKEND/.venv"
+    "$MASTER_BACKEND/.venv/bin/pip" install -q uv -i "$PYPI_MIRROR" \
+      && UV_BIN="$MASTER_BACKEND/.venv/bin/uv" || true
+  fi
+  UV_OK=0
+  if [ -n "$UV_BIN" ]; then
+    info "uv sync 安装后端依赖..."
+    if "$UV_BIN" sync --inexact --no-dev --no-install-project > /tmp/ppanel-uv-master.log 2>&1; then
+      UV_OK=1; git checkout -- uv.lock 2>/dev/null || true
+    fi
+  fi
+  if [ "$UV_OK" != 1 ]; then
+    warn "uv 不可用，退回 pip 安装..."
+    [ -x "$MASTER_BACKEND/.venv/bin/pip" ] || python3 -m venv --clear "$MASTER_BACKEND/.venv"
+    "$MASTER_BACKEND/.venv/bin/pip" install -q --upgrade pip -i "$PYPI_MIRROR"
+    "$MASTER_BACKEND/.venv/bin/pip" install -q . -i "$PYPI_MIRROR"
+  fi
+  "$MASTER_BACKEND/.venv/bin/python" -c "import fastapi, uvicorn, sqlalchemy" \
+    || fail "后端依赖校验失败"
+  ok "后端依赖就绪"
+}
+
+master_web() {
+  step "3/6 构建前端"
+  cd "$MASTER_FRONTEND"
+  if [ -f dist/index.html ] && [ ! -f src/App.vue ]; then true; fi
+  info "npm 安装依赖（${NPM_REGISTRY}）..."
+  npm ci --registry="$NPM_REGISTRY" >/tmp/ppanel-npm.log 2>&1 \
+    || npm install --registry="$NPM_REGISTRY" >>/tmp/ppanel-npm.log 2>&1 \
+    || { tail -8 /tmp/ppanel-npm.log; fail "npm 依赖安装失败"; }
+  info "npm run build..."
+  npm run build >>/tmp/ppanel-npm.log 2>&1 || { tail -8 /tmp/ppanel-npm.log; fail "前端构建失败"; }
+  [ -f dist/index.html ] || fail "构建产物缺失（dist/index.html）"
+  ok "前端构建完成（dist/）"
+}
+
+master_env() {  # 生成 master/backend/.env；全新安装时打印随机管理员密码
+  step "4/6 配置文件"
+  NEW_INSTALL=0
+  if [ ! -f "$MASTER_BACKEND/.env" ]; then
+    NEW_INSTALL=1
+    JWT_SECRET="$(openssl rand -hex 24 2>/dev/null || head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    ADMIN_PASS="$(openssl rand -base64 18 2>/dev/null || head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 14)"
+    mkdir -p "$MASTER_BACKEND/data"
+    cat > "$MASTER_BACKEND/.env" <<EOF
+# PPanel 主控配置（由 install.sh 生成）
+MASTER_HOST=0.0.0.0
+MASTER_PORT=$MASTER_PORT
+
+# 管理员账号（首次启动自动创建）
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=$ADMIN_PASS
+
+# JWT 密钥（已随机生成）
+JWT_SECRET=$JWT_SECRET
+EOF
+    ok "配置文件已生成"
+  else
+    ok "沿用现有配置文件（$MASTER_BACKEND/.env）"
+  fi
+}
+
+master_service() {
+  step "5/6 注册服务并启动"
+  MPORT=$(grep -E '^MASTER_PORT=' "$MASTER_BACKEND/.env" | cut -d= -f2)
+  [ -n "$MPORT" ] || MPORT="$MASTER_PORT"
+  cat > "/etc/systemd/system/$MASTER_SERVICE.service" <<EOF
+[Unit]
+Description=PPanel Master (control panel)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=$MASTER_BACKEND
+ExecStart=$MASTER_BACKEND/.venv/bin/uvicorn main:app --host 0.0.0.0 --port $MPORT
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  systemctl enable --now "$MASTER_SERVICE" >/dev/null 2>&1 || true
+  systemctl restart "$MASTER_SERVICE"
+  sleep 3
+  systemctl is-active --quiet "$MASTER_SERVICE" || fail "服务启动失败：journalctl -u $MASTER_SERVICE -n 50"
+  open_port "$MPORT"
+}
+
+master_summary() {
+  IP=$(hostname -I 2>/dev/null | awk '{print $1}'); [ -n "$IP" ] || IP="<服务器IP>"
+  MPORT=$(grep -E '^MASTER_PORT=' "$MASTER_BACKEND/.env" | cut -d= -f2); [ -n "$MPORT" ] || MPORT="$MASTER_PORT"
+  echo ""
+  echo -e "  ${c_g}${c_b}━━━━━━━━━━━━━ 主控安装完成 ━━━━━━━━━━━━━${c_off}"
+  echo -e "  面板地址  ${c_b}http://$IP:$MPORT${c_off}"
+  if [ "${NEW_INSTALL:-0}" = 1 ]; then
+    echo -e "  管理员    ${c_b}admin${c_off} / ${c_b}$(grep -E '^ADMIN_PASSWORD=' "$MASTER_BACKEND/.env" | cut -d= -f2)${c_off}"
+    echo -e "  ${c_y}⚠ 密码只显示这一次，请立即登录并修改${c_off}"
+  else
+    echo -e "  管理员    沿用既有账号（密码见 $MASTER_BACKEND/.env）"
+  fi
+  echo -e "  ${c_dim}─────────────────────────────────────────────${c_off}"
+  echo -e "  下一步    登录后台 → 节点管理 → 添加被控节点"
+  echo -e "  常用      systemctl restart $MASTER_SERVICE · journalctl -u $MASTER_SERVICE -f"
+  echo -e "  提醒      云服务器请在安全组放行 TCP $MPORT"
+  echo -e "  ${c_g}${c_b}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c_off}"
+}
+
+prune_for_master() {  # 装完主控后移除仓库里用不到的被控/安装器代码（同机双装时保留）
+  if systemctl list-unit-files 2>/dev/null | awk '{print $1}' | grep -qx "ppanel-agent.service" \
+     || { command -v docker >/dev/null 2>&1 && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "ppanel-agent"; }; then
+    warn "检测到本机装有独立面板（被控），保留完整仓库代码"
+    return 0
+  fi
+  [ -d "$SRC_DIR/agent" ] && rm -rf "$SRC_DIR/agent" && ok "已移除被控代码（仅保留主控面板）"
+  [ -d "$SRC_DIR/installer" ] && rm -rf "$SRC_DIR/installer" && ok "已移除安装器目录"
+}
+
+action_master() {
+  detect_env
+  master_install_base
+  ensure_repo "$MASTER_BACKEND/main.py"
+  master_deps
+  master_web
+  master_env
+  master_service
+  prune_for_master
+  master_summary
+}
+
+# ============================================================
+#  Docker 安装（国内在线多源 → 离线静态兜底）
+# ============================================================
+docker_ce_repo_install() {  # 国内 docker-ce 软件源：阿里云 → 清华，apt/dnf/yum 通吃
+  step "使用 docker-ce 国内软件源安装"
+  case "$PKG" in
+    apt)
+      . /etc/os-release
+      ID_LC=$(echo "${ID:-debian}" | tr '[:upper:]' '[:lower:]')
+      # Ubuntu 用 ubuntu 源；debian/deepin/UOS 等 Debian 系用 debian 源
+      case "$ID_LC" in
+        ubuntu) FAMILY=ubuntu; CODENAMES=("${VERSION_CODENAME:-jammy}") ;;
+        *)      FAMILY=debian;  CODENAMES=("${VERSION_CODENAME:-bookworm}")
+                [ "$ID_LC" != "debian" ] && CODENAMES+=("bookworm") ;;  # deepin 等：codename 不在官方池时回退
+      esac
+      for MIRROR in mirrors.aliyun.com mirrors.tuna.tsinghua.edu.cn; do
+        for CN in "${CODENAMES[@]}"; do
+          info "尝试源：$MIRROR（$FAMILY/$CN）..."
+          curl -fsSL --max-time 20 "https://$MIRROR/docker-ce/linux/$FAMILY/gpg" 2>/dev/null \
+            | gpg --dearmor --yes -o /usr/share/keyrings/ppanel-docker.gpg 2>/dev/null || continue
+          echo "deb [signed-by=/usr/share/keyrings/ppanel-docker.gpg] https://$MIRROR/docker-ce/linux/$FAMILY $CN stable" \
+            > /etc/apt/sources.list.d/ppanel-docker.list
+          apt-get update -qq 2>/dev/null || continue
+          apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin 2>/dev/null \
+            && return 0
+        done
+      done
+      ;;
+    *)
+      for MIRROR in mirrors.aliyun.com mirrors.tuna.tsinghua.edu.cn; do
+        info "尝试源：$MIRROR ..."
+        cat > /etc/yum.repos.d/ppanel-docker.repo <<EOF
+[ppanel-docker-stable]
+name=Docker CE Stable
+baseurl=https://$MIRROR/docker-ce/linux/centos/\$releasever/\$basearch/stable
+enabled=1
+gpgcheck=1
+gpgkey=https://$MIRROR/docker-ce/linux/centos/gpg
+EOF
+        $PKG makecache 2>/dev/null || true
+        $PKG install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin 2>/dev/null \
+          && return 0
+        rm -f /etc/yum.repos.d/ppanel-docker.repo
+      done
+      ;;
+  esac
+  return 1
+}
+
+docker_offline_install() {  # 离线兜底：优先本地离线包，无包则多源下载静态二进制
+  step "Docker 离线安装（静态二进制）"
+  ARCH=$(uname -m)
+  case "$ARCH" in
+    x86_64)  DA=amd64 ;;
+    aarch64) DA=aarch64 ;;
+    *) fail "不支持的架构：$ARCH（可手动安装 Docker）" ;;
+  esac
+  DVER="27.5.1"
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+  # ① 本地离线包优先：脚本同目录 / /opt/ppanel / /tmp / /root
+  LOCAL_TGZ=""
+  for cand in "$SCRIPT_DIR/docker-$DVER.tgz" "$SCRIPT_DIR/docker-"*.tgz "$SCRIPT_DIR/docker.tgz" \
+              /opt/ppanel/docker-$DVER.tgz /opt/ppanel/docker-*.tgz /opt/ppanel/docker.tgz \
+              /tmp/docker-$DVER.tgz /tmp/docker-*.tgz /tmp/docker.tgz \
+              /root/docker-$DVER.tgz /root/docker-*.tgz /root/docker.tgz; do
+    for f in $cand; do
+      if [ -s "$f" ]; then LOCAL_TGZ="$f"; break 2; fi
+    done
+  done
+
+  if [ -n "$LOCAL_TGZ" ]; then
+    ok "使用本地离线包：$LOCAL_TGZ"
+    cp -f "$LOCAL_TGZ" /tmp/ppanel-docker.tgz
+  else
+    # ② 无本地包 → 多源在线下载
+    warn "未找到本地离线包（可预先把 docker-27.5.1.tgz 放到脚本同目录 / /opt/ppanel / /tmp）"
+    BASE="https://download.docker.com/linux/static/stable/$DA/docker-$DVER.tgz"
+    DL_OK=0
+    for u in "$BASE" "https://ghfast.top/$BASE" "https://gh-proxy.com/$BASE"; do
+      info "下载离线包：$u"
+      if curl -fL --max-time 300 --retry 1 -o /tmp/ppanel-docker.tgz "$u" 2>/dev/null && [ -s /tmp/ppanel-docker.tgz ]; then
+        DL_OK=1; break
+      fi
+    done
+    [ "$DL_OK" = 1 ] || fail "离线包下载失败（多源均不可达），请手动下载 docker-$DVER.tgz 放到脚本同目录后重跑"
+  fi
+
+  info "解压并安装..."
+  tar -xzf /tmp/ppanel-docker.tgz -C /tmp
+  cp /tmp/docker-*/* /usr/bin/ 2>/dev/null || true
+  rm -rf /tmp/ppanel-docker.tgz /tmp/docker-*/
+  cat > /etc/systemd/system/docker.service <<'UNIT'
+[Unit]
+Description=Docker Application Container Engine
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+ExecStart=/usr/bin/dockerd
+ExecReload=/bin/kill -s HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=1048576
+Delegate=yes
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  systemctl daemon-reload
+  systemctl enable --now docker >/dev/null 2>&1 || true
+  sleep 2
+  docker info >/dev/null 2>&1 || fail "离线安装后 Docker 未运行：journalctl -u docker -n 30"
+  ok "Docker 离线安装完成：$(docker --version | sed 's/,.*//')"
+}
+
+docker_online_cn() {  # 国内在线：阿里云一键脚本一次 → docker-ce 国内源
+  info "尝试阿里云一键脚本（get.docker.com --mirror Aliyun）..."
+  curl -fsSL --max-time 40 https://get.docker.com | sh -s -- --mirror Aliyun >/dev/null 2>&1 || true
+  systemctl enable --now docker >/dev/null 2>&1 || true
+  if docker info >/dev/null 2>&1; then ok "Docker 安装成功（阿里云镜像脚本）"; return 0; fi
+  docker_ce_repo_install || return 1
+  systemctl enable --now docker >/dev/null 2>&1 || true
+  docker info >/dev/null 2>&1
+}
+
+install_docker() {
+  step "检查 Docker"
+  if command -v docker >/dev/null 2>&1; then
+    ok "Docker 已存在：$(docker --version | sed 's/,.*//')"
+  else
+    if is_cn; then
+      info "检测到国内网络..."
+      docker_online_cn || { warn "在线安装失败，转离线安装..."; docker_offline_install; }
+    else
+      info "安装 Docker（官方脚本）..."
+      curl -fsSL --max-time 120 https://get.docker.com | sh >/dev/null 2>&1 || true
+      systemctl enable --now docker >/dev/null 2>&1 || true
+      docker info >/dev/null 2>&1 || { warn "官方脚本失败，转离线安装..."; docker_offline_install; }
+    fi
+  fi
+  systemctl enable --now docker >/dev/null 2>&1 || true
+  docker info >/dev/null 2>&1 || fail "Docker 服务未运行（journalctl -u docker -n 30）"
+  ok "Docker 服务运行中：$(docker --version | sed 's/,.*//')"
+}
+
+docker_install_compose() {  # compose 插件缺失时补装（master-docker 需要）
+  docker compose version >/dev/null 2>&1 && return 0
+  command -v docker-compose >/dev/null 2>&1 && return 0
+  info "补装 Docker Compose 插件..."
+  CV="v2.32.4"
+  ARCH=$(uname -m); case "$ARCH" in aarch64) CA=aarch64 ;; *) CA=x86_64 ;; esac
+  BASE="https://github.com/docker/compose/releases/download/$CV/docker-compose-linux-$CA"
+  mkdir -p /usr/local/lib/docker/cli-plugins
+  for u in "$BASE" "https://ghfast.top/$BASE" "https://gh-proxy.com/$BASE"; do
+    if curl -fL --max-time 240 -o /usr/local/lib/docker/cli-plugins/docker-compose "$u" 2>/dev/null \
+       && [ -s /usr/local/lib/docker/cli-plugins/docker-compose ]; then
+      chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+      docker compose version >/dev/null 2>&1 && { ok "Compose 插件就绪"; return 0; }
+    fi
+  done
+  return 1
+}
+
+master_docker_env() {  # master/.env 供 docker-compose 变量替换
+  NEW_INSTALL=0
+  if [ ! -f "$MASTER_DIR/.env" ]; then
+    NEW_INSTALL=1
+    JWT_SECRET="$(openssl rand -hex 24 2>/dev/null || head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    ADMIN_PASS="$(openssl rand -base64 18 2>/dev/null || head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 14)"
+    cat > "$MASTER_DIR/.env" <<EOF
+# PPanel 主控 Docker 配置（compose 变量）
+MASTER_PORT=$MASTER_PORT
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=$ADMIN_PASS
+JWT_SECRET=$JWT_SECRET
+EOF
+    ok "Docker 配置已生成（master/.env）"
+  else
+    ok "沿用现有配置（master/.env）"
+  fi
+}
+
+master_docker_summary() {
+  IP=$(hostname -I 2>/dev/null | awk '{print $1}'); [ -n "$IP" ] || IP="<服务器IP>"
+  MPORT=$(grep -E '^MASTER_PORT=' "$MASTER_DIR/.env" | cut -d= -f2); [ -n "$MPORT" ] || MPORT="$MASTER_PORT"
+  echo ""
+  echo -e "  ${c_g}${c_b}━━━━━━━━━━━ 主控 Docker 安装完成 ━━━━━━━━━━━${c_off}"
+  echo -e "  面板地址  ${c_b}http://$IP:$MPORT${c_off}"
+  if [ "${NEW_INSTALL:-0}" = 1 ]; then
+    echo -e "  管理员    ${c_b}admin${c_off} / ${c_b}$(grep -E '^ADMIN_PASSWORD=' "$MASTER_DIR/.env" | cut -d= -f2)${c_off}"
+    echo -e "  ${c_y}⚠ 密码只显示这一次，请立即登录并修改${c_off}"
+  else
+    echo -e "  管理员    沿用既有账号（密码见 $MASTER_DIR/.env）"
+  fi
+  echo -e "  ${c_dim}─────────────────────────────────────────────${c_off}"
+  echo -e "  数据      宿主机 $MASTER_DIR/backend/data（SQLite 与附件）"
+  echo -e "  常用      cd $MASTER_DIR && $DOCKER_COMPOSE restart · logs -f"
+  echo -e "  升级      cd $MASTER_DIR && git -C $SRC_DIR pull && $DOCKER_COMPOSE up -d --build"
+  echo -e "  提醒      云服务器请在安全组放行 TCP $MPORT"
+  echo -e "  ${c_g}${c_b}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c_off}"
+}
+
+action_master_docker() {
+  detect_env
+  install_docker
+  docker_install_compose || fail "Docker Compose 安装失败，请手动安装 docker-compose 后重跑"
+  DOCKER_COMPOSE="docker compose"
+  ensure_repo "$MASTER_BACKEND/main.py"
+  step "配置"
+  master_docker_env
+  step "构建并启动容器"
+  cd "$MASTER_DIR"
+  info "首次构建需要拉取基础镜像并编译前端，约几分钟..."
+  $DOCKER_COMPOSE up -d --build || fail "构建/启动失败：$DOCKER_COMPOSE logs"
+  sleep 3
+  docker ps --filter "name=ppanel-master" --filter "status=running" | grep -q ppanel-master \
+    || fail "容器未运行：docker logs ppanel-master"
+  ok "容器运行中"
+  open_port "$MASTER_PORT"
+  prune_for_master
+  master_docker_summary
+}
+
+# ============================================================
+#  被控：独立面板安装 / 管理（原 agent/install.sh 已并入）
+# ============================================================
+switch_mirror() {  # 国内环境自动换 apt 源
+  IS_CN=0
+  TZ_VAL=$(cat /etc/timezone 2>/dev/null || timedatectl show -p Timezone --value 2>/dev/null || echo "")
+  case "$TZ_VAL" in
+    Asia/Shanghai|Asia/Chongqing|Asia/Harbin|Asia/Urumqi|Asia/Hong_Kong|Asia/Macau|Asia/Taipei) IS_CN=1 ;;
+  esac
+  if [ "$IS_CN" = 0 ] && command -v curl >/dev/null 2>&1; then
+    C=$(curl -s --max-time 3 https://ipinfo.io/country 2>/dev/null | tr -d '[:space:]')
+    [ "$C" = "CN" ] && IS_CN=1
+  fi
+  if [ "$IS_CN" = 1 ] && [ "$PKG" = "apt" ]; then
+    info "检测到国内环境，切换 apt 源为清华镜像..."
+    CHANGED=0
+    for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+      [ -f "$f" ] || continue
+      grep -qE 'deb\.debian\.org|security\.debian\.org|archive\.ubuntu\.com|security\.ubuntu\.com|raspbian\.raspberrypi\.org|archive\.raspberrypi\.org' "$f" || continue
+      [ -f "$f.bak.ppanel" ] || cp "$f" "$f.bak.ppanel"
+      sed -i \
+        -e 's#deb\.debian\.org#mirrors.tuna.tsinghua.edu.cn#g' \
+        -e 's#security\.debian\.org#mirrors.tuna.tsinghua.edu.cn#g' \
+        -e 's#archive\.ubuntu\.com#mirrors.tuna.tsinghua.edu.cn#g' \
+        -e 's#security\.ubuntu\.com#mirrors.tuna.tsinghua.edu.cn#g' \
+        -e 's#raspbian\.raspberrypi\.org/raspbian#mirrors.tuna.tsinghua.edu.cn/raspbian/raspbian#g' \
+        -e 's#archive\.raspberrypi\.org/debian#mirrors.tuna.tsinghua.edu.cn/raspberrypi/debian#g' \
+        "$f"
+      CHANGED=1
+    done
+    [ "$CHANGED" = 1 ] && ok "apt 源已切换（原文件备份为 *.bak.ppanel）" || ok "apt 源已是国内镜像"
+  fi
+}
+
+agent_install_base() {
+  step "1/6 安装基础依赖"
+  pkg_install curl git ca-certificates
+  if ! command -v python3 >/dev/null 2>&1; then
+    case "$PKG" in
+      apt) pkg_install python3 python3-venv python3-pip ;;
+      *)   pkg_install python3 python3-pip ;;
+    esac
+  fi
+  PYV=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+  if python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)'; then
+    ok "Python $PYV"
+  elif python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)'; then
+    warn "系统 Python $PYV 低于 3.11，稍后由 uv 自动配置 Python 3.12"
+  else
+    fail "需要 Python >= 3.11（可由 uv 自动下载），当前 $PYV"
+  fi
+}
+
+install_caddy() {
+  step "3/6 安装 Caddy（域名自动 HTTPS / Let's Encrypt 证书）"
+  if command -v caddy >/dev/null 2>&1; then
+    ok "Caddy 已存在：$(caddy version 2>/dev/null | head -1)"
+  else
+    if [ "$PKG" = "apt" ]; then
+      info "安装 Caddy（caddy 官方仓库）..."
+      apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https curl >/dev/null 2>&1 || true
+      curl -fsSL "https://caddyserver.com/api/download-gpg" 2>/dev/null | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg 2>/dev/null \
+        || curl -fsSL "https://dl.cloudsmith.io/public/caddy/stable/gpg.key" 2>/dev/null | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg 2>/dev/null || true
+      echo "deb [signed-by=/usr/share/keyrings/caddy-stable-archive-keyring.gpg] https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version main" \
+        > /etc/apt/sources.list.d/caddy-stable.list 2>/dev/null || true
+      apt-get update -qq >/dev/null 2>&1 || true
+      if ! apt-get install -y -qq caddy >/dev/null 2>&1; then
+        # 仓库不可达时退回静态二进制（GitHub 直链 / 国内加速）
+        info "apt 安装失败，尝试静态二进制..."
+        ARCH=$(uname -m); case "$ARCH" in x86_64) CA=amd64 ;; aarch64) CA=arm64 ;; *) CA=amd64 ;; esac
+        curl -fsSL --max-time 120 "https://github.com/caddyserver/caddy/releases/latest/download/caddy_${CA}.tar.gz" -o /tmp/caddy.tgz 2>/dev/null \
+          || curl -fsSL --max-time 120 "https://ghfast.top/https://github.com/caddyserver/caddy/releases/latest/download/caddy_${CA}.tar.gz" -o /tmp/caddy.tgz 2>/dev/null \
+          || { warn "Caddy 安装失败（不影响面板运行，仅「域名与 SSL」功能不可用）"; return 0; }
+        tar -xzf /tmp/caddy.tgz -C /usr/local/bin caddy && chmod +x /usr/local/bin/caddy && rm -f /tmp/caddy.tgz
+        # 静态安装补 systemd 单元
+        cat > /etc/systemd/system/caddy.service <<'UNIT'
+[Unit]
+Description=Caddy
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+User=root
+ExecStart=/usr/local/bin/caddy run --environ --config /etc/caddy/Caddyfile
+ExecReload=/usr/local/bin/caddy reload --config /etc/caddy/Caddyfile --force
+TimeoutStopSec=5s
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+        systemctl daemon-reload
+      fi
+    else
+      # dnf/yum
+      $PKG install caddy || { warn "Caddy 安装失败（不影响面板运行，仅「域名与 SSL」功能不可用）"; return 0; }
+    fi
+    ok "Caddy 安装完成：$(caddy version 2>/dev/null | head -1)"
+  fi
+  # 主 Caddyfile：确保 include 实例站点目录
+  mkdir -p /etc/caddy/sites
+  if [ ! -f /etc/caddy/Caddyfile ]; then
+    printf '# PPanel 主配置：实例站点在 /etc/caddy/sites/ 下自动管理\nimport /etc/caddy/sites/*\n' > /etc/caddy/Caddyfile
+  elif ! grep -q "import /etc/caddy/sites" /etc/caddy/Caddyfile; then
+    printf '\nimport /etc/caddy/sites/*\n' >> /etc/caddy/Caddyfile
+  fi
+  systemctl enable --now caddy >/dev/null 2>&1 || true
+  # 80/443 放行（ACME HTTP-01 验证与 HTTPS 访问必需）
+  ufw allow 80/tcp >/dev/null 2>&1 || true
+  ufw allow 443/tcp >/dev/null 2>&1 || true
+  firewall-cmd --permanent --add-service=http >/dev/null 2>&1 || true
+  firewall-cmd --permanent --add-service=https >/dev/null 2>&1 || true
+  firewall-cmd --reload >/dev/null 2>&1 || true
+  ok "Caddy 已启动，80/443 端口已放行"
+}
+
+agent_deps() {
+  step "5/6 安装 Python 依赖（uv 加速）"
+  cd "$AGENT_APP"
+  export UV_DEFAULT_INDEX="$PYPI_MIRROR"
+  export UV_INDEX_URL="$PYPI_MIRROR"
+  if python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
+    export UV_PYTHON_PREFERENCE=only-system
+    export UV_PYTHON="$(command -v python3)"
+  else
+    # 系统 Python 过旧：允许 uv 下载托管版 3.12
+    unset UV_PYTHON_PREFERENCE
+    export UV_PYTHON=3.12
+  fi
+
+  UV_BIN=""
+  [ -x "$HOME/.local/bin/uv" ] && UV_BIN="$HOME/.local/bin/uv"
+  [ -z "$UV_BIN" ] && [ -x "$AGENT_APP/.venv/bin/uv" ] && UV_BIN="$AGENT_APP/.venv/bin/uv"
+  if [ -z "$UV_BIN" ]; then
+    info "安装 uv 包管理器（清华 PyPI 镜像）..."
+    [ -d "$AGENT_APP/.venv" ] || python3 -m venv "$AGENT_APP/.venv"
+    "$AGENT_APP/.venv/bin/pip" install -q uv -i "$PYPI_MIRROR" && UV_BIN="$AGENT_APP/.venv/bin/uv"
+  fi
+
+  UV_OK=0
+  if [ -n "$UV_BIN" ]; then
+    info "uv sync 安装依赖..."
+    # --inexact：保留 venv 内 uv 本体；--no-install-project：平铺结构不构建项目本身
+    if "$UV_BIN" sync --inexact --no-dev --no-install-project > /tmp/ppanel-uv-sync.log 2>&1; then
+      UV_OK=1
+      git checkout -- uv.lock 2>/dev/null || true
+    else
+      tail -5 /tmp/ppanel-uv-sync.log
+      if [ "$PKG" = "apt" ]; then
+        warn "疑似缺编译头文件（aarch64 常见），安装工具链后重试..."
+        pkg_install libffi-dev python3-dev gcc
+        if "$UV_BIN" sync --inexact --no-dev --no-install-project > /tmp/ppanel-uv-sync.log 2>&1; then
+          UV_OK=1
+          git checkout -- uv.lock 2>/dev/null || true
+        else
+          tail -5 /tmp/ppanel-uv-sync.log
+        fi
+      fi
+    fi
+  fi
+  if [ "$UV_OK" != 1 ]; then
+    warn "uv 不可用，退回 pip 安装（较慢）..."
+    [ -x "$AGENT_APP/.venv/bin/pip" ] || python3 -m venv --clear "$AGENT_APP/.venv"
+    "$AGENT_APP/.venv/bin/pip" install -q --upgrade pip -i "$PYPI_MIRROR"
+    "$AGENT_APP/.venv/bin/pip" install -q . -i "$PYPI_MIRROR"
+  fi
+  "$AGENT_APP/.venv/bin/python" -c "import fastapi, docker, uvicorn" \
+    || fail "依赖校验失败（fastapi/docker/uvicorn 导入失败）"
+  ok "依赖就绪（校验通过）"
+}
+
+agent_service() {
+  step "6/6 注册服务并启动"
+  mkdir -p /data/inst "$AGENT_APP/data"
+  if [ ! -f "$AGENT_APP/.env" ]; then
+    NODE_TOKEN="ppnode_$(openssl rand -hex 16 2>/dev/null || head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    JWT_SECRET="$(openssl rand -hex 24 2>/dev/null || head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    # 管理员为内部占位（无人工登录），随机化杜绝弱口令撞库；接口均走 X-Node-Token 鉴权
+    ADMIN_PASS="$(openssl rand -base64 18 2>/dev/null || head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 14)"
+    cat > "$AGENT_APP/.env" <<EOF
+# PPanel 独立面板配置（由 install.sh 生成）
+DATA_ROOT=/data/inst
+
+# 管理员为内部占位（无人工登录），已随机化防撞库；接口均走 X-Node-Token / X-API-Key 鉴权
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=$ADMIN_PASS
+
+# JWT 密钥（已随机生成）
+JWT_SECRET=$JWT_SECRET
+
+# 节点令牌：主控「节点管理」添加节点时填入
+NODE_TOKEN=$NODE_TOKEN
+EOF
+    ok "配置文件已生成（管理员密码已随机化，不对外展示）"
+  else
+    NODE_TOKEN=$(grep -E '^NODE_TOKEN=' "$AGENT_APP/.env" | cut -d= -f2)
+    [ -n "$NODE_TOKEN" ] || fail ".env 缺少 NODE_TOKEN，请补填"
+    ok "沿用现有配置文件"
+  fi
+
+  info "写入 systemd 服务（端口 $AGENT_PORT）..."
+  cat > "/etc/systemd/system/$AGENT_SERVICE.service" <<EOF
+[Unit]
+Description=PPanel Agent (standalone panel + docker node agent)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=$AGENT_APP
+ExecStart=$AGENT_APP/.venv/bin/uvicorn agent_main:app --host 0.0.0.0 --port $AGENT_PORT
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  systemctl enable --now "$AGENT_SERVICE" >/dev/null 2>&1 || true
+  systemctl restart "$AGENT_SERVICE"
+  sleep 2
+  systemctl is-active --quiet "$AGENT_SERVICE" || fail "服务启动失败：journalctl -u $AGENT_SERVICE -n 50"
+
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+    ufw allow "$AGENT_PORT/tcp" >/dev/null 2>&1 && ok "ufw 已放行 $AGENT_PORT"
+  elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+    firewall-cmd --permanent --add-port="$AGENT_PORT/tcp" >/dev/null 2>&1 && firewall-cmd --reload >/dev/null 2>&1 && ok "firewalld 已放行 $AGENT_PORT"
+  fi
+}
+
+agent_summary() {
+  IP=$(hostname -I 2>/dev/null | awk '{print $1}'); [ -n "$IP" ] || IP="<服务器IP>"
+  echo ""
+  if [ "${MODE_UPGRADE:-0}" = 1 ]; then
+    echo -e "  ${c_g}${c_b}━━━━━━━━━━━━━ 升 级 完 成 ━━━━━━━━━━━━━${c_off}"
+  else
+    echo -e "  ${c_g}${c_b}━━━━━━━━━━━━━ 安 装 完 成 ━━━━━━━━━━━━━${c_off}"
+  fi
+  echo -e "  独立面板  ${c_b}http://$IP:$AGENT_PORT/panel${c_off}"
+  echo -e "  说明      仅供主控与 API 调用（X-Node-Token 鉴权），无需登录"
+  echo -e "  节点Token ${c_b}$NODE_TOKEN${c_off}"
+  echo -e "  ${c_dim}─────────────────────────────────────────────${c_off}"
+  echo -e "  下一步    主控「节点管理」→ 添加节点 → 填入上方 Token 与节点地址"
+  echo -e "  常用      systemctl restart $AGENT_SERVICE · journalctl -u $AGENT_SERVICE -f"
+  echo -e "  提醒      云服务器请在控制台安全组放行 TCP $AGENT_PORT"
+  echo -e "  ${c_g}${c_b}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c_off}"
+}
+
+prune_for_agent() {  # 装完被控后移除仓库里用不到的主控/安装器代码（同机双装时保留）
+  if systemctl list-unit-files 2>/dev/null | awk '{print $1}' | grep -qx "ppanel-master.service" \
+     || { command -v docker >/dev/null 2>&1 && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "ppanel-master"; }; then
+    warn "检测到本机装有主控面板，保留完整仓库代码"
+    return 0
+  fi
+  [ -d "$SRC_DIR/master" ] && rm -rf "$SRC_DIR/master" && ok "已移除主控代码（仅保留被控面板）"
+  [ -d "$SRC_DIR/installer" ] && rm -rf "$SRC_DIR/installer" && ok "已移除安装器目录"
+}
+
+action_agent() {
+  detect_env
+  switch_mirror
+  agent_install_base
+  install_docker
+  install_caddy
+  ensure_repo "$AGENT_APP/agent_main.py"
+  agent_deps
+  agent_service
+  prune_for_agent
+  agent_summary
+}
+
+action_agent_reinstall() {  # 全新重装：清除旧安装（含数据）后重装
+  detect_env
+  echo -e "  ${c_y}将删除：$SRC_DIR（代码+配置，含同机主控）、/data/inst（全部实例数据）、$AGENT_SERVICE 服务${c_off}"
+  confirm "确认完全清除并重新安装？" || { warn "已取消"; return 0; }
+  systemctl disable --now "$AGENT_SERVICE" >/dev/null 2>&1 || true
+  rm -f "/etc/systemd/system/$AGENT_SERVICE.service"; systemctl daemon-reload
+  rm -rf "$SRC_DIR" /data/inst /tmp/ppanel-uv-sync.log
+  ok "旧安装已清除"
+  switch_mirror
+  agent_install_base
+  install_docker
+  install_caddy
+  ensure_repo "$AGENT_APP/agent_main.py"
+  agent_deps
+  agent_service
+  prune_for_agent
+  agent_summary
+}
+
+action_agent_uninstall() {
+  detect_env
+  [ -d "$SRC_DIR" ] || [ -f "/etc/systemd/system/$AGENT_SERVICE.service" ] || fail "未检测到已安装的 PPanel 面板"
+  echo -e "  ${c_y}卸载将删除：$AGENT_SERVICE 服务、整个 $SRC_DIR（若同机装有主控将一并删除）${c_off}"
+  confirm "是否同时删除实例数据 /data/inst？（推荐卸载前备份）" \
+    && RM_DATA=1 || RM_DATA=0
+  confirm "确认卸载？" || { warn "已取消"; return 0; }
+  info "停止服务..."
+  systemctl disable --now "$AGENT_SERVICE" >/dev/null 2>&1 || true
+  rm -f "/etc/systemd/system/$AGENT_SERVICE.service"; systemctl daemon-reload
+  rm -rf "$SRC_DIR" /tmp/ppanel-uv-sync.log
+  [ "$RM_DATA" = 1 ] && { rm -rf /data/inst; ok "实例数据已删除"; } || ok "实例数据保留于 /data/inst"
+  ok "PPanel 独立面板已卸载"
+}
+
+action_agent_reset_admin() {
+  [ -f "$AGENT_APP/data/ppanel.db" ] || fail "未找到数据库（$AGENT_APP/data/ppanel.db）"
+  confirm "删除内置管理员并按 .env 随机密码重建？" || { warn "已取消"; return 0; }
+  "$AGENT_APP/.venv/bin/python" - <<PYEOF
+import sqlite3
+c = sqlite3.connect("$AGENT_APP/data/ppanel.db")
+c.execute("DELETE FROM users WHERE username='admin'")
+c.commit()
+print("  管理员已删除")
+PYEOF
+  systemctl restart "$AGENT_SERVICE"
+  ok "已重建（随机密码见 $AGENT_APP/.env 的 ADMIN_PASSWORD）"
+}
+
+# ============================================================
+#  状态
+# ============================================================
+action_status() {
+  echo ""
+  if systemctl is-active --quiet "$MASTER_SERVICE" 2>/dev/null; then
+    ok "主控（直装）：运行中（$MASTER_SERVICE，端口 $(grep -E '^MASTER_PORT=' "$MASTER_BACKEND/.env" 2>/dev/null | cut -d= -f2 || echo "$MASTER_PORT")）"
+  else
+    warn "主控（直装）：未安装或未运行"
+  fi
+  if command -v docker >/dev/null 2>&1 && docker ps --filter "name=ppanel-master" --format '{{.Names}} {{.Status}}' 2>/dev/null | grep -q .; then
+    ok "主控（Docker）：$(docker ps --filter 'name=ppanel-master' --format '{{.Names}} · {{.Status}}')"
+  else
+    warn "主控（Docker）：未安装或未运行"
+  fi
+  if systemctl is-active --quiet "$AGENT_SERVICE" 2>/dev/null; then
+    ok "被控（独立面板）：运行中（$AGENT_SERVICE，端口 $AGENT_PORT）"
+    [ -f "$AGENT_APP/.env" ] && info "节点 Token：$(grep -E '^NODE_TOKEN=' "$AGENT_APP/.env" 2>/dev/null | cut -d= -f2)"
+    info "实时日志：journalctl -u $AGENT_SERVICE -f"
+  else
+    warn "被控（独立面板）：未安装或未运行"
+  fi
+  echo ""
+}
+
+# ============================================================
+#  菜单与入口
+# ============================================================
+menu() {
+  banner
+  echo ""
+  echo -e "  ${c_b}[1]${c_off} 安装/升级 独立面板（被控）  ${c_dim}面板 + Docker 实例编排${c_off}"
+  echo -e "  ${c_b}[2]${c_off} 全新重装 被控               ${c_dim}清除旧面板与全部数据后重装${c_off}"
+  echo -e "  ${c_b}[3]${c_off} 卸载 被控                   ${c_dim}移除面板，可选保留实例数据${c_off}"
+  echo -e "  ${c_b}[4]${c_off} 重置 被控管理员             ${c_dim}删除内置管理员，按随机密码重建${c_off}"
+  echo -e "  ${c_b}[5]${c_off} 安装 主控面板（服务器直装） ${c_dim}systemd 运行，需 Node 构建前端${c_off}"
+  echo -e "  ${c_b}[6]${c_off} 安装 主控面板（Docker）     ${c_dim}容器化部署，环境更干净${c_off}"
+  echo -e "  ${c_b}[7]${c_off} 运行状态"
+  echo -e "  ${c_b}[0]${c_off} 退出"
+  echo ""
+  read -rp "  请选择 [0-7]: " c
+  echo ""
+  case "$c" in
+    1) action_agent ;;
+    2) action_agent_reinstall ;;
+    3) action_agent_uninstall ;;
+    4) action_agent_reset_admin ;;
+    5) action_master ;;
+    6) action_master_docker ;;
+    7) action_status ;;
+    0) exit 0 ;;
+    *) warn "无效选择"; exit 1 ;;
+  esac
+}
+
+case "${1:-menu}" in
+  menu)              menu ;;
+  agent)             banner; action_agent ;;
+  agent-reinstall)   banner; action_agent_reinstall ;;
+  agent-uninstall)   banner; action_agent_uninstall ;;
+  agent-reset-admin) banner; action_agent_reset_admin ;;
+  master)            banner; action_master ;;
+  master-docker)     banner; action_master_docker ;;
+  status)            banner; action_status ;;
+  *) echo -e "用法：bash install.sh [menu|agent|agent-reinstall|agent-uninstall|agent-reset-admin|master|master-docker|status]"; exit 1 ;;
+esac

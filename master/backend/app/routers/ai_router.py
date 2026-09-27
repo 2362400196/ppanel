@@ -1,15 +1,17 @@
-"""AI 助手：DeepSeek 对话代理（管理员）+ 平台操作工具（Function Calling）。
+"""AI 助手：DeepSeek 对话代理（管理员 + 用户双工具箱）+ 平台操作工具（Function Calling）。
 
 - API Key 存主控库 app_settings 表（不落前端），对话经主控转发 DeepSeek 并以
   SSE 流式透传给前端（OpenAI 兼容 /chat/completions，stream=true）。
-- 工具调用：模型可调用 list_nodes/add_node/list_plans/add_plan/compare_nodes，
-  后端在 SSE 生成器内多轮循环执行（最多 6 轮），每步以 {"tool": ...} 事件推给前端。
+- 按登录身份分流：管理员 17 个平台工具；普通用户 9 个「my_*」工具，全部在
+  服务端按 user_id 强制过滤（数据库层隔离，不靠提示词约束）。
+- 工具调用：后端在 SSE 生成器内多轮循环执行（最多 10 轮），每步以 {"tool": ...} 事件推给前端。
 """
 import json
 import secrets
 import socket
 import string
 import time
+import inspect
 from datetime import timedelta
 from typing import AsyncGenerator
 
@@ -20,13 +22,12 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.agent_client import agent_health, agent_json
-from app.auth import hash_password, require_admin
+from app.auth import Principal, get_principal, hash_password, require_admin
 from app.database import get_db
-from app.models import (AppSetting, Instance, InstanceEvent, Node, OpLog,
-                        Plan, User, utcnow)
+from app.models import (AppSetting, Checkin, Instance, InstanceEvent, Node, OpLog,
+                        Order, Plan, User, utcnow)
 
-router = APIRouter(prefix="/ai", tags=["ai"],
-                   dependencies=[Depends(require_admin)])
+router = APIRouter(prefix="/ai", tags=["ai"])
 
 DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
 ALLOWED_MODELS = ("deepseek-chat", "deepseek-reasoner")
@@ -145,13 +146,106 @@ TOOLS = [
          "required": ["username", "role"]}}},
 ]
 
+USER_SYSTEM_PROMPT = (
+    "你是 PPanel 云面板的用户助手，服务于当前登录用户，只能查看和操作该用户自己的资源"
+    "（服务端已按登录身份强制隔离，越权请求会直接失败，不要尝试）。\n"
+    "可用工具与使用准则：\n"
+    "- my_instances(keyword?)：查询我的实例清单（uuid/名称/状态/端口/到期）。\n"
+    "- my_instance_detail(instance_uuid)：我的实例详情（镜像/规格/状态/端口/到期/实时状态）。\n"
+    "- my_instance_power(instance_uuid, action)：启动/停止/重启我的实例，action=start/stop/restart。用户明确要求时执行。\n"
+    "- my_wallet：我的钱包余额与最近 20 条流水。\n"
+    "- my_points：我的积分、会员等级与折扣、今日签到状态。\n"
+    "- my_recharge(amount_yuan)：为用户创建微信充值单。用户说「充值 X 元」时使用（0.01~10000 元）；"
+    "创建成功后必须在回复中原样输出工具返回的 marker 标记（如 [充值码:RC123:10]），前端会自动渲染成扫码二维码，支付后自动到账。\n"
+    "- shop_plans：查询商城在售商品（公开信息），供选购咨询和套餐对比。\n"
+    "- my_files(instance_uuid, path?)：查看实例文件列表（默认 /app），用于定位用户上传的项目压缩包。\n"
+    "- my_deploy(instance_uuid, archive, start_cmd?, install_deps?)：一键部署项目：解压压缩包 →（可选）安装依赖 → "
+    "设置启动命令并启动实例 → 返回启动日志。用户说「帮我部署」时：先 my_files 找压缩包（如 /app/project.zip）；"
+    "start_cmd 缺省时按项目类型推断（Python: python main.py；Node: node app.js 或 npm start；不确定就先问用户）；"
+    "解压后用 my_files 检查目录结构（若解压出子目录，start_cmd 里用 cd 子目录 && …）。\n"
+    "- my_install_deps(instance_uuid, file?)：安装依赖（file 默认 requirements.txt，Node 项目传 package.json），耗时较长。\n"
+    "- my_set_start_cmd(instance_uuid, start_cmd)：修改实例启动命令并自动重启。\n"
+    "- my_logs(instance_uuid, tail?)：查看实例运行日志（部署后启动失败排查先用它）。\n"
+    "- my_backups(instance_uuid)：我的实例备份文件列表。\n"
+    "- my_create_backup(instance_uuid, kind, path?)：为我的实例创建备份。kind=db 数据库备份"
+    "（实例的库自动选定，无需传库名）；kind=dir 容器目录备份（path 默认 /app）。备份需数秒到数十秒，执行后如实汇报文件名。\n"
+    "- my_restore_backup(file, kind, instance_uuid, version?)：从备份恢复我的实例。⚠ 覆盖性操作："
+    "恢复数据库会覆盖实例库现有数据、恢复目录会覆盖同名文件。执行前必须先向用户复述目标与后果，"
+    "拿到明确的确认答复（如「确认恢复」）才能调用；kind=db 需 version（如 5.7/8.0）。\n"
+    "规则：只能操作用户自己的资源；涉及创建，用户指令明确（参数齐全）就执行，完成后一两句话汇报；"
+    "参数不全或含糊时列出所缺信息确认，绝不猜测。套餐对比用 Markdown 表格输出。全程简体中文、简洁友好。"
+)
+
+USER_TOOLS = [
+    {"type": "function", "function": {"name": "my_instances", "description": "查询我的实例清单（名称/状态/端口/到期/uuid）",
+     "parameters": {"type": "object", "properties": {
+         "keyword": {"type": "string", "description": "按实例名模糊过滤，可选"}}, "required": []}}},
+    {"type": "function", "function": {"name": "my_instance_detail", "description": "查询我的单个实例详细信息",
+     "parameters": {"type": "object", "properties": {
+         "instance_uuid": {"type": "string"}}, "required": ["instance_uuid"]}}},
+    {"type": "function", "function": {"name": "my_instance_power", "description": "启动/停止/重启我的实例",
+     "parameters": {"type": "object", "properties": {
+         "instance_uuid": {"type": "string"},
+         "action": {"type": "string", "enum": ["start", "stop", "restart"]}},
+         "required": ["instance_uuid", "action"]}}},
+    {"type": "function", "function": {"name": "my_wallet", "description": "查询我的钱包余额与最近流水",
+     "parameters": {"type": "object", "properties": {}, "required": []}}},
+    {"type": "function", "function": {"name": "my_points", "description": "查询我的积分、会员等级折扣与签到状态",
+     "parameters": {"type": "object", "properties": {}, "required": []}}},
+    {"type": "function", "function": {"name": "shop_plans", "description": "查询商城在售商品（公开配置）",
+     "parameters": {"type": "object", "properties": {}, "required": []}}},
+    {"type": "function", "function": {"name": "my_backups", "description": "查询我的实例备份文件列表",
+     "parameters": {"type": "object", "properties": {
+         "instance_uuid": {"type": "string"}}, "required": ["instance_uuid"]}}},
+    {"type": "function", "function": {"name": "my_create_backup", "description": "为我的实例创建备份（数据库或容器目录）",
+     "parameters": {"type": "object", "properties": {
+         "instance_uuid": {"type": "string"},
+         "kind": {"type": "string", "enum": ["db", "dir"], "description": "db=数据库备份（库名自动选定），dir=容器目录备份"},
+         "path": {"type": "string", "description": "kind=dir 时容器内绝对路径，默认 /app"}},
+         "required": ["instance_uuid", "kind"]}}},
+    {"type": "function", "function": {"name": "my_restore_backup", "description": "从备份恢复我的实例（覆盖性操作，须先获用户确认）",
+     "parameters": {"type": "object", "properties": {
+         "file": {"type": "string", "description": "备份文件名（my_backups 可查）"},
+         "kind": {"type": "string", "enum": ["db", "dir"]},
+         "instance_uuid": {"type": "string"},
+         "version": {"type": "string", "description": "kind=db 时 MySQL 版本，如 5.7 / 8.0"}},
+         "required": ["file", "kind", "instance_uuid"]}}},
+    {"type": "function", "function": {"name": "my_recharge", "description": "创建微信充值单，生成扫码支付二维码",
+     "parameters": {"type": "object", "properties": {
+         "amount_yuan": {"type": "number", "description": "充值金额（元），0.01~10000"}},
+         "required": ["amount_yuan"]}}},
+    {"type": "function", "function": {"name": "my_files", "description": "查看我的实例文件列表（用于定位上传的项目压缩包）",
+     "parameters": {"type": "object", "properties": {
+         "instance_uuid": {"type": "string"},
+         "path": {"type": "string", "description": "容器内绝对路径，默认 /app"}}, "required": ["instance_uuid"]}}},
+    {"type": "function", "function": {"name": "my_deploy", "description": "一键部署项目：解压压缩包→可选装依赖→设启动命令并启动",
+     "parameters": {"type": "object", "properties": {
+         "instance_uuid": {"type": "string"},
+         "archive": {"type": "string", "description": "压缩包在容器内的路径，如 /app/project.zip"},
+         "start_cmd": {"type": "string", "description": "启动命令；缺省沿用原命令（Python 默认 python main.py）"},
+         "install_deps": {"type": "string", "description": "依赖文件名（如 requirements.txt / package.json），不需要传空"}},
+         "required": ["instance_uuid", "archive"]}}},
+    {"type": "function", "function": {"name": "my_install_deps", "description": "为我的实例安装依赖（requirements.txt / package.json）",
+     "parameters": {"type": "object", "properties": {
+         "instance_uuid": {"type": "string"},
+         "file": {"type": "string", "description": "依赖文件名，默认 requirements.txt"}}, "required": ["instance_uuid"]}}},
+    {"type": "function", "function": {"name": "my_set_start_cmd", "description": "修改我的实例启动命令并自动重启",
+     "parameters": {"type": "object", "properties": {
+         "instance_uuid": {"type": "string"},
+         "start_cmd": {"type": "string"}}, "required": ["instance_uuid", "start_cmd"]}}},
+    {"type": "function", "function": {"name": "my_logs", "description": "查看我的实例运行日志",
+     "parameters": {"type": "object", "properties": {
+         "instance_uuid": {"type": "string"},
+         "tail": {"type": "integer", "description": "末尾行数，默认 50，最大 200"}}, "required": ["instance_uuid"]}}},
+]
+
 
 def _get_key(db: Session) -> str:
     row = db.get(AppSetting, KEY_NAME)
     return (row.value if row else "") or ""
 
 
-@router.get("/config")
+@router.get("/config", dependencies=[Depends(require_admin)])
 def ai_config(db: Session = Depends(get_db)):
     key = _get_key(db)
     return {"has_key": bool(key),
@@ -162,7 +256,7 @@ class KeyIn(BaseModel):
     api_key: str
 
 
-@router.put("/config")
+@router.put("/config", dependencies=[Depends(require_admin)])
 def save_key(body: KeyIn, db: Session = Depends(get_db)):
     k = body.api_key.strip()
     if not k:
@@ -481,22 +575,327 @@ def _exec_tool(db: Session, name: str, p: dict) -> dict:
         return {"error": str(e)}
 
 
+# ---------- 用户工具执行（全部按 user_id 隔离，仅操作当前用户自己的资源） ----------
+
+def _own_inst(db: Session, uid: int, uuid: str):
+    inst = db.query(Instance).filter(
+        Instance.uuid == str(uuid or ""), Instance.user_id == uid).first()
+    if not inst:
+        return None, "实例不存在或不属于你（可先用 my_instances 查询）"
+    return inst, None
+
+
+def _backup_prefixes(inst) -> tuple[str, str]:
+    """该实例的备份文件名白名单前缀：容器目录备份 ppanel-{iid}_、库备份 ppanel_{iid}_"""
+    iid = inst.agent_iid
+    return f"ppanel-{iid}_", f"ppanel_{iid}_"
+
+
+async def _user_recharge(db: Session, uid: int, p: dict) -> dict:
+    """AI 充值：创建微信 Native 充值单，前端按 marker 渲染扫码二维码，支付后自动到账。"""
+    import app.wxpay_service as wxpay
+    if not wxpay.is_enabled(db):
+        return {"error": "微信充值未开启，请联系管理员在后台配置"}
+    try:
+        yuan = float(p.get("amount_yuan", 0))
+    except (TypeError, ValueError):
+        return {"error": "金额格式错误"}
+    cents = int(round(yuan * 100))
+    if cents < 1 or cents > 1000000:
+        return {"error": "充值金额需在 0.01 ~ 10000 元之间"}
+    no = f"RC{int(time.time() * 1000)}{secrets.token_hex(3).upper()}"
+    try:
+        code_url = await wxpay.native_order(db, no, cents, "PPanel钱包充值")
+    except HTTPException as e:
+        return {"error": str(getattr(e, "detail", "")) or "微信下单失败"}
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"微信下单失败：{e}"}
+    db.add(Order(out_trade_no=no, user_id=uid, kind="recharge",
+                 plan_name="钱包充值", amount_cents=cents, code_url=code_url))
+    db.commit()
+    return {"detail": f"充值单已创建（¥{yuan:g}），请把 marker 原样输出给用户",
+            "out_trade_no": no, "amount_yuan": yuan,
+            "marker": f"[充值码:{no}:{yuan:g}]"}
+
+
+def _my_backup_list(db: Session, inst) -> dict:
+    node = db.get(Node, inst.node_id)
+    if not node:
+        return {"error": "节点不存在"}
+    pre_dir, pre_db = _backup_prefixes(inst)
+    try:
+        data = agent_json(node, "GET", "/agent/host/backups",
+                          params={"page": 1, "page_size": 100})
+    except HTTPException as e:
+        return {"error": str(getattr(e, "detail", "")) or "节点不可达"}
+    files = [b for b in (data.get("backups") or [])
+             if str(b.get("name", "")).startswith((pre_dir, pre_db))]
+    return {"total": len(files), "backups": files[:50]}
+
+
+def _exec_user_tool(db: Session, uid: int, name: str, p: dict):
+    # 充值依赖微信 async 下单，返回协程由 SSE 生成器 await
+    if name == "my_recharge":
+        return _user_recharge(db, uid, p)
+    try:
+        if name == "my_instances":
+            q = db.query(Instance).filter(Instance.user_id == uid)
+            kw = str(p.get("keyword", "") or "").strip().lower()
+            if kw:
+                q = q.filter(Instance.name.ilike(f"%{kw}%"))
+            return {"instances": [
+                {"uuid": i.uuid, "name": i.name, "status": i.status,
+                 "ext_port": i.ext_port, "image": i.image,
+                 "expire_at": i.expire_at.isoformat() if i.expire_at else None}
+                for i in q.order_by(Instance.created_at.desc()).limit(50).all()]}
+        if name == "my_instance_detail":
+            inst, err = _own_inst(db, uid, p.get("instance_uuid"))
+            if err:
+                return {"error": err}
+            node = db.get(Node, inst.node_id)
+            item = {"uuid": inst.uuid, "name": inst.name, "image": inst.image,
+                    "status": inst.status, "ext_port": inst.ext_port,
+                    "cpu_limit": inst.cpu_limit, "mem_limit": inst.mem_limit,
+                    "traffic_gb": inst.traffic_gb,
+                    "expire_at": inst.expire_at.isoformat() if inst.expire_at else None,
+                    "created_at": inst.created_at.isoformat() if inst.created_at else None}
+            try:
+                data = agent_json(node, "GET", f"/agent/instances/{inst.agent_iid}")
+                item["agent_status"] = data.get("status")
+            except HTTPException as e:
+                item["agent_error"] = str(getattr(e, "detail", "")) or "节点不可达"
+            return item
+        if name == "my_instance_power":
+            action = str(p.get("action", ""))
+            if action not in ("start", "stop", "restart"):
+                return {"error": "action 只支持 start/stop/restart"}
+            inst, err = _own_inst(db, uid, p.get("instance_uuid"))
+            if err:
+                return {"error": err}
+            node = db.get(Node, inst.node_id)
+            data = agent_json(node, "POST", f"/agent/instances/{inst.agent_iid}/{action}")
+            if data.get("status"):
+                inst.status = data["status"]
+                db.commit()
+            label = {"start": "已启动", "stop": "已停止", "restart": "已重启"}[action]
+            return {"detail": f"实例「{inst.name}」{label}", "status": inst.status}
+        if name == "my_wallet":
+            user = db.get(User, uid)
+            rows = (db.query(Order).filter(Order.user_id == uid)
+                    .order_by(Order.id.desc()).limit(20).all())
+            kind_map = {"recharge": "充值", "shop": "消费", "admin": "调整", "refund": "退款"}
+            return {"balance_yuan": user.balance_cents / 100 if user else 0,
+                    "records": [{"kind": kind_map.get(r.kind, r.kind),
+                                 "amount_yuan": r.amount_cents / 100,
+                                 "status": r.status,
+                                 "plan_name": r.plan_name,
+                                 "created_at": r.created_at.isoformat() if r.created_at else None}
+                                for r in rows]}
+        if name == "my_points":
+            from app.routers.rewards import _today, get_cfg, level_of
+            user = db.get(User, uid)
+            exp = user.level_exp if user else 0
+            lv, pct, nxt = level_of(exp, get_cfg(db)["levels"])
+            return {"points": user.points if user else 0,
+                    "level": lv, "discount_pct": pct,
+                    "level_exp_yuan": exp / 100,
+                    "next_level_exp_yuan": (nxt / 100) if nxt else None,
+                    "checked_today": db.query(Checkin).filter(
+                        Checkin.user_id == uid, Checkin.day == _today()).first() is not None}
+        if name == "shop_plans":
+            rows = (db.query(Plan).filter(Plan.enabled == True)  # noqa: E712
+                    .order_by(Plan.sort, Plan.id).all())
+            return {"plans": [{"id": r.id, "name": r.name, "desc": r.desc, "cpu": r.cpu,
+                               "mem_mb": r.mem, "disk_mb": r.disk, "days": r.days,
+                               "traffic_gb": r.traffic_gb, "price_yuan": r.price_cents / 100,
+                               "image": r.image} for r in rows]}
+        if name == "my_backups":
+            inst, err = _own_inst(db, uid, p.get("instance_uuid"))
+            if err:
+                return {"error": err}
+            return _my_backup_list(db, inst)
+        if name == "my_create_backup":
+            inst, err = _own_inst(db, uid, p.get("instance_uuid"))
+            if err:
+                return {"error": err}
+            node = db.get(Node, inst.node_id)
+            kind = str(p.get("kind", ""))
+            if kind == "db":
+                # 实例库自动选定（ppanel_{iid}），不接受用户传库名，杜绝跨库操作
+                dbname = f"ppanel_{inst.agent_iid}"
+                try:
+                    rows = agent_json(node, "GET", "/agent/host/backups/dbs").get("dbs", [])
+                except HTTPException as e:
+                    return {"error": str(getattr(e, "detail", "")) or "获取数据库信息失败"}
+                opt = next((r for r in rows if r.get("db_name") == dbname), None)
+                if not opt:
+                    return {"error": "该实例尚未开通数据库，请先在独立面板开通"}
+                res = agent_json(node, "POST", "/agent/host/backups/database",
+                                 json={"version": opt["version"], "db_name": dbname,
+                                       "tables": []}, timeout=300)
+                return {"detail": res.get("detail", "数据库备份完成"), "file": res.get("file")}
+            if kind == "dir":
+                res = agent_json(node, "POST", "/agent/host/backups/dir",
+                                 json={"container_id": f"ppanel-{inst.agent_iid}",
+                                       "path": str(p.get("path", "") or "/app")},
+                                 timeout=300)
+                return {"detail": res.get("detail", "目录备份完成"), "file": res.get("file")}
+            return {"error": "kind 只支持 db（数据库）或 dir（容器目录）"}
+        if name == "my_restore_backup":
+            f = str(p.get("file", "")).strip()
+            kind = str(p.get("kind", ""))
+            inst, err = _own_inst(db, uid, p.get("instance_uuid"))
+            if err:
+                return {"error": err}
+            node = db.get(Node, inst.node_id)
+            # 文件白名单：只能恢复本实例前缀的备份文件，杜绝恢复他人文件
+            backups = _my_backup_list(db, inst)
+            names = [b.get("name") for b in backups.get("backups", [])]
+            if f not in names:
+                return {"error": "备份文件不存在或不属于该实例（可用 my_backups 查询）"}
+            pre_dir, pre_db = _backup_prefixes(inst)
+            if kind == "db":
+                version = str(p.get("version", "")).strip()
+                if not version:
+                    return {"error": "恢复数据库需要 version（如 5.7/8.0）"}
+                if not f.startswith(pre_db):
+                    return {"error": "该文件不是本实例的数据库备份"}
+                res = agent_json(node, "POST", "/agent/host/backups/restore/database",
+                                 json={"file": f, "version": version,
+                                       "db_name": f"ppanel_{inst.agent_iid}"},
+                                 timeout=300)
+                return {"detail": res.get("detail", "数据库已恢复")}
+            if kind == "dir":
+                if not f.startswith(pre_dir):
+                    return {"error": "该文件不是本实例的目录备份"}
+                res = agent_json(node, "POST", "/agent/host/backups/restore/dir",
+                                 json={"file": f, "container_id": f"ppanel-{inst.agent_iid}",
+                                       "path": str(p.get("path", "") or "/app")}, timeout=300)
+                return {"detail": res.get("detail", "目录已恢复")}
+            return {"error": "kind 只支持 db / dir（容器整包恢复不开放给用户）"}
+        if name == "my_files":
+            inst, err = _own_inst(db, uid, p.get("instance_uuid"))
+            if err:
+                return {"error": err}
+            node = db.get(Node, inst.node_id)
+            path = str(p.get("path", "") or "/app")
+            data = agent_json(node, "GET", f"/agent/instances/{inst.agent_iid}/files",
+                              params={"path": path})
+            # 只挑用户用得上的字段，控制 token 消耗
+            entries = [{"name": e.get("name"), "type": e.get("type", ""),
+                        "size": e.get("size")} for e in (data.get("entries") or [])[:80]]
+            return {"path": data.get("path", path), "entries": entries}
+        if name == "my_deploy":
+            inst, err = _own_inst(db, uid, p.get("instance_uuid"))
+            if err:
+                return {"error": err}
+            node = db.get(Node, inst.node_id)
+            arc = str(p.get("archive", "")).strip()
+            if not arc:
+                return {"error": "archive 必填（my_files 查到的压缩包路径，如 /app/project.zip）"}
+            base = f"/agent/instances/{inst.agent_iid}"
+            try:  # 1. 解压到压缩包所在目录
+                up = agent_json(node, "POST", f"{base}/files/unzip", json={"src": arc}, timeout=300)
+            except HTTPException as e:
+                return {"error": f"解压失败：{getattr(e, 'detail', '') or e}"}
+            dest = up.get("dest", "")
+            deps_msg = ""
+            dep_file = str(p.get("install_deps", "") or "").strip()
+            if dep_file:  # 2. 可选安装依赖
+                try:
+                    d = agent_json(node, "POST", f"{base}/deps/install",
+                                   params={"file": dep_file}, timeout=600)
+                    deps_msg = f"，依赖安装：{d.get('detail', '完成')}"
+                except HTTPException as e:
+                    deps_msg = f"，依赖安装失败：{getattr(e, 'detail', '') or e}（可稍后用 my_install_deps 重试）"
+            sc = str(p.get("start_cmd", "") or "").strip()
+            cmd_note = ""
+            if sc and sc != inst.start_cmd:  # 3. 更新启动命令（被控会重建容器）
+                agent_json(node, "PATCH", base, json={"start_cmd": sc})
+                inst.start_cmd = sc
+                db.commit()
+                cmd_note = f"启动命令已设为「{sc}」"
+            else:
+                sc = inst.start_cmd
+                cmd_note = f"沿用启动命令「{sc}」"
+            try:  # 4. 确保运行中
+                agent_json(node, "POST", f"{base}/start")
+            except HTTPException:
+                pass  # 已在运行等场景
+            time.sleep(2)
+            logs = ""
+            try:  # 5. 抓启动日志尾部供 AI 判断是否正常
+                logs = str(agent_json(node, "GET", f"{base}/logs",
+                                      params={"tail": 30}).get("logs", ""))[-1500:]
+            except HTTPException:
+                pass
+            return {"detail": (f"部署流程完成：{arc} 已解压（{dest}）{deps_msg}，{cmd_note}，实例已启动。"
+                               "请根据 recent_logs 判断服务是否正常启动（报错就建议用户 my_logs 排查）"),
+                    "start_cmd": sc, "recent_logs": logs}
+        if name == "my_install_deps":
+            inst, err = _own_inst(db, uid, p.get("instance_uuid"))
+            if err:
+                return {"error": err}
+            node = db.get(Node, inst.node_id)
+            f = str(p.get("file", "") or "requirements.txt")
+            res = agent_json(node, "POST",
+                             f"/agent/instances/{inst.agent_iid}/deps/install",
+                             params={"file": f}, timeout=600)
+            return {"detail": res.get("detail", f"依赖安装完成（{f}）")}
+        if name == "my_set_start_cmd":
+            inst, err = _own_inst(db, uid, p.get("instance_uuid"))
+            if err:
+                return {"error": err}
+            sc = str(p.get("start_cmd", "") or "").strip()
+            if not sc:
+                return {"error": "start_cmd 必填"}
+            node = db.get(Node, inst.node_id)
+            if sc != inst.start_cmd:
+                agent_json(node, "PATCH", f"/agent/instances/{inst.agent_iid}",
+                           json={"start_cmd": sc})
+                inst.start_cmd = sc
+                db.commit()
+            try:
+                agent_json(node, "POST", f"/agent/instances/{inst.agent_iid}/start")
+            except HTTPException:
+                pass
+            return {"detail": f"启动命令已更新为「{sc}」，实例已重启"}
+        if name == "my_logs":
+            inst, err = _own_inst(db, uid, p.get("instance_uuid"))
+            if err:
+                return {"error": err}
+            node = db.get(Node, inst.node_id)
+            tail = max(1, min(int(p.get("tail", 50) or 50), 200))
+            logs = agent_json(node, "GET", f"/agent/instances/{inst.agent_iid}/logs",
+                              params={"tail": tail}).get("logs", "")
+            return {"instance": inst.name, "logs": str(logs)[-3000:]}
+        return {"error": f"未知工具 {name}"}
+    except Exception as e:  # noqa: BLE001
+        db.rollback()
+        return {"error": str(e)}
+
+
 class ChatIn(BaseModel):
     messages: list[dict]          # [{role, content}]，不含 system
     model: str = "deepseek-chat"
 
 
 @router.post("/chat")
-async def ai_chat(body: ChatIn, db: Session = Depends(get_db)):
+async def ai_chat(body: ChatIn, p: Principal = Depends(get_principal),
+                  db: Session = Depends(get_db)):
     key = _get_key(db)
     if not key:
-        raise HTTPException(status_code=400, detail="未配置 DeepSeek API Key，请先在右上角设置")
+        raise HTTPException(status_code=400, detail="未配置 DeepSeek API Key，请联系管理员")
     if body.model not in ALLOWED_MODELS:
         raise HTTPException(status_code=400, detail="不支持的模型")
+    # 按登录身份分流工具箱：管理员=平台工具；普通用户=my_* 个人工具（服务端强制隔离）
+    is_admin = bool(p.is_admin)
+    tools = TOOLS if is_admin else USER_TOOLS
+    sys_prompt = SYSTEM_PROMPT if is_admin else USER_SYSTEM_PROMPT
     # 只保留 user/assistant 消息，限制轮数与长度，防上下文炸掉
     history = [m for m in body.messages
                if m.get("role") in ("user", "assistant") and m.get("content")][-40:]
-    payload_messages = [{"role": "system", "content": SYSTEM_PROMPT}] + [
+    payload_messages = [{"role": "system", "content": sys_prompt}] + [
         {"role": m["role"], "content": str(m.get("content", ""))[:8000]} for m in history
     ]
 
@@ -514,7 +913,7 @@ async def ai_chat(body: ChatIn, db: Session = Depends(get_db)):
                         headers={"Authorization": f"Bearer {key}",
                                  "Content-Type": "application/json"},
                         json={"model": body.model, "messages": payload_messages,
-                              "stream": True, "tools": TOOLS},
+                              "stream": True, "tools": tools},
                     ) as resp:
                         if resp.status_code != 200:
                             detail = (await resp.aread()).decode(errors="replace")[:300]
@@ -566,7 +965,12 @@ async def ai_chat(body: ChatIn, db: Session = Depends(get_db)):
                     except Exception:
                         params = {}
                     yield _sse({"tool": {"name": a["name"], "status": "running"}})
-                    result = _exec_tool(db, a["name"], params)
+                    if is_admin:
+                        result = _exec_tool(db, a["name"], params)
+                    else:
+                        result = _exec_user_tool(db, p.user_id, a["name"], params)
+                    if inspect.isawaitable(result):
+                        result = await result
                     ok = "error" not in result
                     yield _sse({"tool": {"name": a["name"],
                                          "status": "ok" if ok else "fail",
