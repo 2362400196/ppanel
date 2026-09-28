@@ -6,7 +6,9 @@ FROM node:20-slim AS web
 WORKDIR /web
 # npm 10 装大依赖树会间歇性触发内部崩溃（Exit handler never called，且进程以 0 退出留下残缺树）。
 # 首选 pnpm（corepack 自带，无此 bug）；pnpm 不可用时退回 npm 并校验 vite 就位，问题拦在安装步。
+# COREPACK_NPM_REGISTRY：corepack 拉 pnpm 本体走国内镜像（它不认 npm_config_registry）
 ENV npm_config_registry=https://registry.npmmirror.com \
+    COREPACK_NPM_REGISTRY=https://registry.npmmirror.com \
     COREPACK_INTEGRITY_KEYS=0 \
     NPM_CONFIG_AUDIT=false \
     NPM_CONFIG_FUND=false \
