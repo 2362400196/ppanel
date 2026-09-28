@@ -137,6 +137,11 @@ master_install_base() {
   step "1/6 基础依赖（Python / Node）"
   pkg_install curl git ca-certificates
   command -v python3 >/dev/null 2>&1 || pkg_install python3 python3-venv python3-pip
+  # Ubuntu/Debian 自带 python3 但常缺 venv/ensurepip（python3-venv 包），缺它建不了虚拟环境
+  if [ "$PKG" = "apt" ] && ! python3 -m ensurepip --version >/dev/null 2>&1; then
+    info "补装 python3-venv（缺 ensurepip，虚拟环境创建必需）..."
+    pkg_install python3-venv
+  fi
   if python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)'; then
     ok "Python $(python3 -V 2>&1 | awk '{print $2}')"
   elif python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)'; then
@@ -454,7 +459,7 @@ UNIT
 
 docker_online_cn() {  # 国内在线：阿里云一键脚本一次 → docker-ce 国内源
   info "尝试阿里云一键脚本（get.docker.com --mirror Aliyun）..."
-  curl -fsSL --max-time 40 https://get.docker.com | sh -s -- --mirror Aliyun >/dev/null 2>&1 || true
+  curl -fsSL --max-time 40 https://get.docker.com | sh -s -- --mirror Aliyun 2>&1 | tee /tmp/ppanel-docker-install.log || true
   systemctl enable --now docker >/dev/null 2>&1 || true
   if docker info >/dev/null 2>&1; then ok "Docker 安装成功（阿里云镜像脚本）"; return 0; fi
   docker_ce_repo_install || return 1
@@ -471,8 +476,8 @@ install_docker() {
       info "检测到国内网络..."
       docker_online_cn || { warn "在线安装失败，转离线安装..."; docker_offline_install; }
     else
-      info "安装 Docker（官方脚本）..."
-      curl -fsSL --max-time 120 https://get.docker.com | sh >/dev/null 2>&1 || true
+      info "安装 Docker（官方脚本，实时日志如下）..."
+      curl -fsSL --max-time 120 https://get.docker.com | sh 2>&1 | tee /tmp/ppanel-docker-install.log || true
       systemctl enable --now docker >/dev/null 2>&1 || true
       docker info >/dev/null 2>&1 || { warn "官方脚本失败，转离线安装..."; docker_offline_install; }
     fi
@@ -641,6 +646,11 @@ agent_install_base() {
       *)   pkg_install python3 python3-pip ;;
     esac
   fi
+  # Ubuntu/Debian 自带 python3 但常缺 venv/ensurepip（python3-venv 包），缺它建不了虚拟环境
+  if [ "$PKG" = "apt" ] && ! python3 -m ensurepip --version >/dev/null 2>&1; then
+    info "补装 python3-venv（缺 ensurepip，虚拟环境创建必需）..."
+    pkg_install python3-venv
+  fi
   PYV=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
   if python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)'; then
     ok "Python $PYV"
@@ -659,8 +669,10 @@ install_caddy() {
     if [ "$PKG" = "apt" ]; then
       info "安装 Caddy（caddy 官方仓库）..."
       apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https curl >/dev/null 2>&1 || true
-      curl -fsSL "https://caddyserver.com/api/download-gpg" 2>/dev/null | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg 2>/dev/null \
-        || curl -fsSL "https://dl.cloudsmith.io/public/caddy/stable/gpg.key" 2>/dev/null | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg 2>/dev/null || true
+      # gpg 输出文件已存在时会交互式询问 Overwrite?，无 stdin 直接失败 → 先删旧文件 + --yes 强制覆盖
+      rm -f /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+      curl -fsSL "https://caddyserver.com/api/download-gpg" 2>/dev/null | gpg --dearmor --yes -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg 2>/dev/null \
+        || curl -fsSL "https://dl.cloudsmith.io/public/caddy/stable/gpg.key" 2>/dev/null | gpg --dearmor --yes -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg 2>/dev/null || true
       echo "deb [signed-by=/usr/share/keyrings/caddy-stable-archive-keyring.gpg] https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version main" \
         > /etc/apt/sources.list.d/caddy-stable.list 2>/dev/null || true
       apt-get update -qq >/dev/null 2>&1 || true
@@ -668,8 +680,11 @@ install_caddy() {
         # 仓库不可达时退回静态二进制（GitHub 直链 / 国内加速）
         info "apt 安装失败，尝试静态二进制..."
         ARCH=$(uname -m); case "$ARCH" in x86_64) CA=amd64 ;; aarch64) CA=arm64 ;; *) CA=amd64 ;; esac
-        curl -fsSL --max-time 120 "https://github.com/caddyserver/caddy/releases/latest/download/caddy_${CA}.tar.gz" -o /tmp/caddy.tgz 2>/dev/null \
-          || curl -fsSL --max-time 120 "https://ghfast.top/https://github.com/caddyserver/caddy/releases/latest/download/caddy_${CA}.tar.gz" -o /tmp/caddy.tgz 2>/dev/null \
+        CADDY_TGZ="https://github.com/caddyserver/caddy/releases/latest/download/caddy_${CA}.tar.gz"
+        curl -fsSL --max-time 180 "$CADDY_TGZ" -o /tmp/caddy.tgz 2>/dev/null \
+          || curl -fsSL --max-time 180 "https://ghfast.top/$CADDY_TGZ" -o /tmp/caddy.tgz 2>/dev/null \
+          || curl -fsSL --max-time 180 "https://gh-proxy.com/$CADDY_TGZ" -o /tmp/caddy.tgz 2>/dev/null \
+          || curl -fsSL --max-time 180 "https://github.moeyy.xyz/$CADDY_TGZ" -o /tmp/caddy.tgz 2>/dev/null \
           || { warn "Caddy 安装失败（不影响面板运行，仅「域名与 SSL」功能不可用）"; return 0; }
         tar -xzf /tmp/caddy.tgz -C /usr/local/bin caddy && chmod +x /usr/local/bin/caddy && rm -f /tmp/caddy.tgz
         # 静态安装补 systemd 单元

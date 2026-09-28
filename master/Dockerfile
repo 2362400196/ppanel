@@ -12,7 +12,7 @@ ENV npm_config_registry=https://registry.npmmirror.com \
     NPM_CONFIG_FUND=false \
     NPM_CONFIG_MAXSOCKETS=3
 COPY frontend/package.json frontend/package-lock.json ./
-RUN { npm i -g pnpm@9 --loglevel=error && pnpm --version; } \
+RUN { { npm i -g pnpm@9 --loglevel=error || npm i -g pnpm@9 --loglevel=error; } && pnpm --version; } \
     || { corepack enable && COREPACK_NPM_REGISTRY=https://registry.npmmirror.com corepack prepare pnpm@9 --activate; }; \
     { pnpm import && pnpm install; } \
     || { npm ci --loglevel=error || npm install --loglevel=error; }; \
