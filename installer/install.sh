@@ -577,6 +577,25 @@ master_docker_summary() {
   echo -e "  ${c_g}${c_b}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c_off}"
 }
 
+ensure_swap_for_build() {  # 小内存机构建保险：可用内存+swap 不足 2.5G 时临时加 2G swap（vite 构建吃内存）
+  local mem_avail swap_total sf
+  mem_avail=$(awk '/^MemAvailable:/{print int($2/1024)}' /proc/meminfo)
+  swap_total=$(awk '/^SwapTotal:/{print int($2/1024)}' /proc/meminfo)
+  [ "$((mem_avail + swap_total))" -ge 2560 ] && return 0
+  [ "$swap_total" -ge 1024 ] && return 0
+  sf=/swapfile
+  if [ -f /swapfile ]; then
+    swapon /swapfile 2>/dev/null || true
+    return 0
+  fi
+  sf=/swap-ppanel
+  info "内存偏小（可用约 ${mem_avail}MB），创建 2G swap 保障前端构建..."
+  dd if=/dev/zero of="$sf" bs=1M count=2048 status=none \
+    && chmod 600 "$sf" && mkswap -q "$sf" >/dev/null && swapon "$sf" 2>/dev/null \
+    && ok "swap 已启用（临时，重启不保留）" \
+    || warn "swap 创建失败，继续尝试构建"
+}
+
 ensure_base_images() {  # 预拉基础镜像：国内走加速站限时拉取，避免 docker build 直连 Docker Hub 无限挂起
   if docker image inspect node:20-slim >/dev/null 2>&1 \
      && docker image inspect python:3.12-slim >/dev/null 2>&1; then
@@ -621,6 +640,7 @@ action_master_docker() {
   DOCKER_COMPOSE="docker compose"
   ensure_repo "$MASTER_BACKEND/main.py"
   ensure_base_images
+  ensure_swap_for_build
   step "配置"
   master_docker_env
   step "构建并启动容器"
