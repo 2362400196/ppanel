@@ -539,17 +539,55 @@ master_docker_summary() {
   echo -e "  ${c_g}${c_b}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c_off}"
 }
 
+ensure_base_images() {  # 预拉基础镜像：国内走加速站限时拉取，避免 docker build 直连 Docker Hub 无限挂起
+  if docker image inspect node:20-slim >/dev/null 2>&1 \
+     && docker image inspect python:3.12-slim >/dev/null 2>&1; then
+    ok "基础镜像已存在，跳过预拉取"
+    return 0
+  fi
+  if ! is_cn; then
+    info "拉取基础镜像（Docker Hub）..."
+    docker pull node:20-slim || true
+    docker pull python:3.12-slim || true
+    return 0
+  fi
+  step "预拉取基础镜像（国内加速站）"
+  for img in node:20-slim python:3.12-slim; do
+    if docker image inspect "$img" >/dev/null 2>&1; then
+      ok "$img 已存在"
+      continue
+    fi
+    PULL_OK=0
+    # 官方镜像在加速站的路径为 <mirror>/library/<name>；单源限时 240s，防止挂死
+    for m in docker.1ms.run docker.m.daocloud.io dockerpull.org hub.rat.dev; do
+      info "拉取 $img <- $m ..."
+      if timeout 240 docker pull "$m/library/$img"; then
+        docker tag "$m/library/$img" "$img"
+        PULL_OK=1
+        break
+      fi
+      warn "$m 不可用，换下一个源..."
+    done
+    if [ "$PULL_OK" != 1 ]; then
+      warn "加速站均失败，直连 Docker Hub（可能较慢）..."
+      timeout 600 docker pull "$img" || fail "基础镜像 $img 拉取失败，请检查网络后重跑"
+    fi
+    ok "$img 就绪"
+  done
+}
+
 action_master_docker() {
   detect_env
   install_docker
   docker_install_compose || fail "Docker Compose 安装失败，请手动安装 docker-compose 后重跑"
   DOCKER_COMPOSE="docker compose"
   ensure_repo "$MASTER_BACKEND/main.py"
+  ensure_base_images
   step "配置"
   master_docker_env
   step "构建并启动容器"
   cd "$MASTER_DIR"
-  info "首次构建需要拉取基础镜像并编译前端，约几分钟..."
+  info "首次构建需编译前端，依赖已预拉取，通常 1-3 分钟..."
   $DOCKER_COMPOSE up -d --build || fail "构建/启动失败：$DOCKER_COMPOSE logs"
   sleep 3
   docker ps --filter "name=ppanel-master" --filter "status=running" | grep -q ppanel-master \

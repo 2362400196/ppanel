@@ -16,7 +16,12 @@ WORKDIR /srv/master/backend
 COPY backend/ ./
 COPY --from=web /web/dist /srv/master/frontend/dist
 
-RUN pip install --no-cache-dir \
+# pip 优先清华源（全球可达），失败回退官方 PyPI
+RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple \
+        "bcrypt>=5.0.0" "cryptography>=50.0.1" "fastapi>=0.141.1" "httpx>=0.28.1" \
+        "pillow>=12.3.0" "pyjwt>=2.14.0" "python-multipart>=0.0.32" "qrcode>=8.2" \
+        "sqlalchemy>=2.0.54" "uvicorn[standard]>=0.53.0" "websockets>=13.0" \
+    || pip install --no-cache-dir \
         "bcrypt>=5.0.0" "cryptography>=50.0.1" "fastapi>=0.141.1" "httpx>=0.28.1" \
         "pillow>=12.3.0" "pyjwt>=2.14.0" "python-multipart>=0.0.32" "qrcode>=8.2" \
         "sqlalchemy>=2.0.54" "uvicorn[standard]>=0.53.0" "websockets>=13.0"
