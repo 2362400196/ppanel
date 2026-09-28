@@ -13,5 +13,6 @@ services:
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?请在 master/.env 中设置 ADMIN_PASSWORD}
     volumes:
-      # SQLite 数据库与上传的工单附件等持久化在宿主机 backend/data
-      - ./backend/data:/srv/master/backend/data
+      # SQLite 数据库与上传的工单附件持久化在 /opt/ppanel/master-data（仓库树之外，
+      # 防止重装/裁剪仓库代码时数据被连带删除）
+      - /opt/ppanel/master-data:/srv/master/backend/data

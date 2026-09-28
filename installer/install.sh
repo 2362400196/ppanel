@@ -538,6 +538,15 @@ docker_install_compose() {  # compose 插件缺失时补装（master-docker 需�
   return 1
 }
 
+master_docker_migrate_data() {  # 旧版数据目录在仓库树内（backend/data），迁移到仓库外的 /opt/ppanel/master-data
+  local OLD="$MASTER_BACKEND/data" NEW="/opt/ppanel/master-data"
+  mkdir -p "$NEW"
+  if [ -d "$OLD" ] && [ -n "$(ls -A "$OLD" 2>/dev/null)" ]; then
+    cp -an "$OLD/." "$NEW/" 2>/dev/null || true
+    info "已迁移旧数据目录 -> $NEW（仓库树外，重装/裁剪代码不再连带删数据）"
+  fi
+}
+
 master_docker_env() {  # master/.env 供 docker-compose 变量替换
   NEW_INSTALL=0
   if [ ! -f "$MASTER_DIR/.env" ]; then
@@ -658,6 +667,7 @@ action_master_docker() {
   docker_install_compose || fail "Docker Compose 安装失败，请手动安装 docker-compose 后重跑"
   DOCKER_COMPOSE="docker compose"
   ensure_repo "$MASTER_BACKEND/main.py"
+  master_docker_migrate_data
   if ensure_master_image; then
     info "使用预构建镜像，直接启动..."
   else
@@ -690,7 +700,7 @@ master_wipe() {  # 主控全新重装清理：systemd 服务 + Docker 容器 + �
   systemctl disable --now "$MASTER_SERVICE" >/dev/null 2>&1 || true
   rm -f "/etc/systemd/system/$MASTER_SERVICE.service"; systemctl daemon-reload
   command -v docker >/dev/null 2>&1 && docker rm -f ppanel-master >/dev/null 2>&1 || true
-  rm -rf "$SRC_DIR" /tmp/ppanel-uv-sync.log
+  rm -rf "$SRC_DIR" /opt/ppanel/master-data /tmp/ppanel-uv-sync.log
   ok "旧主控已清除"
   return 0
 }
