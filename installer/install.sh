@@ -123,8 +123,10 @@ ensure_repo() {  # $1=安装后校验的文件路径（缺省主控 main.py）
   else
     MODE_UPGRADE=0
     info "克隆仓库 -> $SRC_DIR"
-    git clone --depth 1 "$REPO_URL" "$SRC_DIR" >/dev/null 2>&1 \
-      || fail "克隆失败，检查网络或用 REPO_URL= 指定仓库地址"
+    if ! git clone --depth 1 "$REPO_URL" "$SRC_DIR" > /tmp/ppanel-git-clone.log 2>&1; then
+      tail -4 /tmp/ppanel-git-clone.log
+      fail "克隆失败，检查网络或用 REPO_URL= 指定仓库地址"
+    fi
   fi
   [ -f "$CHECK" ] || fail "仓库结构异常：找不到 $CHECK"
   ok "代码就绪"
@@ -603,6 +605,29 @@ action_master_docker() {
   master_docker_summary
 }
 
+master_wipe() {  # 主控全新重装清理：systemd 服务 + Docker 容器 + 代码/配置/数据库
+  echo -e "  ${c_y}将删除：$SRC_DIR（代码+配置+数据库）、$MASTER_SERVICE 服务、ppanel-master 容器${c_off}"
+  confirm "确认完全清除并重新安装主控？" || { warn "已取消"; return 1; }
+  systemctl disable --now "$MASTER_SERVICE" >/dev/null 2>&1 || true
+  rm -f "/etc/systemd/system/$MASTER_SERVICE.service"; systemctl daemon-reload
+  command -v docker >/dev/null 2>&1 && docker rm -f ppanel-master >/dev/null 2>&1 || true
+  rm -rf "$SRC_DIR" /tmp/ppanel-uv-sync.log
+  ok "旧主控已清除"
+  return 0
+}
+
+action_master_reinstall() {        # 全新重装主控（本机直装）
+  detect_env
+  master_wipe || return 0
+  action_master
+}
+
+action_master_docker_reinstall() { # 全新重装主控（Docker）
+  detect_env
+  master_wipe || return 0
+  action_master_docker
+}
+
 # ============================================================
 #  被控：独立面板安装 / 管理（原 agent/install.sh 已并入）
 # ============================================================
@@ -952,28 +977,75 @@ action_status() {
 # ============================================================
 #  菜单与入口
 # ============================================================
-menu() {
+menu_master_mode() {  # 主控三级菜单：安装方式（$1=直装动作 $2=Docker动作）
   banner
   echo ""
-  echo -e "  ${c_b}[1]${c_off} 安装/升级 独立面板（被控）  ${c_dim}面板 + Docker 实例编排${c_off}"
-  echo -e "  ${c_b}[2]${c_off} 全新重装 被控               ${c_dim}清除旧面板与全部数据后重装${c_off}"
-  echo -e "  ${c_b}[3]${c_off} 卸载 被控                   ${c_dim}移除面板，可选保留实例数据${c_off}"
-  echo -e "  ${c_b}[4]${c_off} 重置 被控管理员             ${c_dim}删除内置管理员，按随机密码重建${c_off}"
-  echo -e "  ${c_b}[5]${c_off} 安装 主控面板（服务器直装） ${c_dim}systemd 运行，需 Node 构建前端${c_off}"
-  echo -e "  ${c_b}[6]${c_off} 安装 主控面板（Docker）     ${c_dim}容器化部署，环境更干净${c_off}"
-  echo -e "  ${c_b}[7]${c_off} 运行状态"
-  echo -e "  ${c_b}[0]${c_off} 退出"
+  echo -e "  ${c_b}[1]${c_off} 本机直装                ${c_dim}systemd 运行，需 Node 构建前端${c_off}"
+  echo -e "  ${c_b}[2]${c_off} Docker 安装              ${c_dim}容器化部署，环境更干净${c_off}"
+  echo -e "  ${c_b}[0]${c_off} 返回上级"
   echo ""
-  read -rp "  请选择 [0-7]: " c
+  read -rp "  请选择 [0-2]: " c
+  echo ""
+  case "$c" in
+    1) "$1" ;;
+    2) "$2" ;;
+    0) menu_master ;;
+    *) warn "无效选择"; exit 1 ;;
+  esac
+}
+
+menu_master() {  # 主控二级菜单：升级或重装
+  banner
+  echo ""
+  echo -e "  ${c_b}[1]${c_off} 安装 / 升级              ${c_dim}保留数据；已有安装自动升级${c_off}"
+  echo -e "  ${c_b}[2]${c_off} 全新重装                 ${c_dim}清除代码、配置与数据库后重装${c_off}"
+  echo -e "  ${c_b}[0]${c_off} 返回上级"
+  echo ""
+  read -rp "  请选择 [0-2]: " c
+  echo ""
+  case "$c" in
+    1) menu_master_mode action_master action_master_docker ;;
+    2) menu_master_mode action_master_reinstall action_master_docker_reinstall ;;
+    0) menu ;;
+    *) warn "无效选择"; exit 1 ;;
+  esac
+}
+
+menu_agent() {  # 被控二级菜单：升级或重装
+  banner
+  echo ""
+  echo -e "  ${c_b}[1]${c_off} 安装 / 升级              ${c_dim}保留数据；已有安装自动升级${c_off}"
+  echo -e "  ${c_b}[2]${c_off} 全新重装                 ${c_dim}清除旧面板与全部实例数据后重装${c_off}"
+  echo -e "  ${c_b}[0]${c_off} 返回上级"
+  echo ""
+  read -rp "  请选择 [0-2]: " c
   echo ""
   case "$c" in
     1) action_agent ;;
     2) action_agent_reinstall ;;
+    0) menu ;;
+    *) warn "无效选择"; exit 1 ;;
+  esac
+}
+
+menu() {
+  banner
+  echo ""
+  echo -e "  ${c_b}[1]${c_off} 安装 主控面板               ${c_dim}升级/重装 · 本机直装或 Docker${c_off}"
+  echo -e "  ${c_b}[2]${c_off} 安装 独立面板（被控）       ${c_dim}升级/重装${c_off}"
+  echo -e "  ${c_b}[3]${c_off} 卸载 被控                   ${c_dim}移除面板，可选保留实例数据${c_off}"
+  echo -e "  ${c_b}[4]${c_off} 重置 被控管理员             ${c_dim}删除内置管理员，按随机密码重建${c_off}"
+  echo -e "  ${c_b}[5]${c_off} 运行状态"
+  echo -e "  ${c_b}[0]${c_off} 退出"
+  echo ""
+  read -rp "  请选择 [0-5]: " c
+  echo ""
+  case "$c" in
+    1) menu_master ;;
+    2) menu_agent ;;
     3) action_agent_uninstall ;;
     4) action_agent_reset_admin ;;
-    5) action_master ;;
-    6) action_master_docker ;;
-    7) action_status ;;
+    5) action_status ;;
     0) exit 0 ;;
     *) warn "无效选择"; exit 1 ;;
   esac
@@ -987,6 +1059,8 @@ case "${1:-menu}" in
   agent-reset-admin) banner; action_agent_reset_admin ;;
   master)            banner; action_master ;;
   master-docker)     banner; action_master_docker ;;
+  master-reinstall)  banner; action_master_reinstall ;;
+  master-docker-reinstall) banner; action_master_docker_reinstall ;;
   status)            banner; action_status ;;
-  *) echo -e "用法：bash install.sh [menu|agent|agent-reinstall|agent-uninstall|agent-reset-admin|master|master-docker|status]"; exit 1 ;;
+  *) echo -e "用法：bash install.sh [menu|agent|agent-reinstall|agent-uninstall|agent-reset-admin|master|master-docker|master-reinstall|master-docker-reinstall|status]"; exit 1 ;;
 esac
