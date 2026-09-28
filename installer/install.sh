@@ -596,6 +596,25 @@ ensure_swap_for_build() {  # 小内存机构建保险：可用内存+swap 不足
     || warn "swap 创建失败，继续尝试构建"
 }
 
+ensure_master_image() {  # 优先拉预构建镜像（加速站轮换→直连），拉到后对齐 compose 名；失败由调用方走本地构建兜底
+  local MASTER_IMAGE="2362400196/ppanel-master:latest" m src
+  if docker image inspect ppanel-master:latest >/dev/null 2>&1; then
+    ok "主控镜像已存在：ppanel-master:latest"
+    return 0
+  fi
+  for m in "" docker.1ms.run docker.m.daocloud.io dockerpull.org hub.rat.dev; do
+    src="${m:+$m/}$MASTER_IMAGE"
+    info "拉取主控镜像：$src ..."
+    if timeout 900 docker pull "$src"; then
+      [ -n "$m" ] && docker tag "$src" "$MASTER_IMAGE"
+      docker tag "$MASTER_IMAGE" ppanel-master:latest
+      ok "镜像就绪（预构建，跳过前端编译）"
+      return 0
+    fi
+  done
+  return 1
+}
+
 ensure_base_images() {  # 预拉基础镜像：国内走加速站限时拉取，避免 docker build 直连 Docker Hub 无限挂起
   if docker image inspect node:20-slim >/dev/null 2>&1 \
      && docker image inspect python:3.12-slim >/dev/null 2>&1; then
@@ -641,12 +660,21 @@ action_master_docker() {
   ensure_repo "$MASTER_BACKEND/main.py"
   ensure_base_images
   ensure_swap_for_build
+  if ensure_master_image; then
+    info "使用预构建镜像，直接启动..."
+  else
+    info "预构建镜像不可用，改为本地构建（首次需编译前端，约 1-3 分钟）..."
+  fi
   step "配置"
   master_docker_env
   step "构建并启动容器"
   cd "$MASTER_DIR"
-  info "首次构建需编译前端，依赖已预拉取，通常 1-3 分钟..."
-  $DOCKER_COMPOSE up -d --build || fail "构建/启动失败：$DOCKER_COMPOSE logs"
+  if [ "${MASTER_BUILD:-0}" = 1 ]; then
+    info "已指定 MASTER_BUILD=1，强制本地构建..."
+    $DOCKER_COMPOSE up -d --build || fail "构建/启动失败：$DOCKER_COMPOSE logs"
+  else
+    $DOCKER_COMPOSE up -d || fail "启动失败：$DOCKER_COMPOSE logs"
+  fi
   sleep 3
   docker ps --filter "name=ppanel-master" --filter "status=running" | grep -q ppanel-master \
     || fail "容器未运行：docker logs ppanel-master"
