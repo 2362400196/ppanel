@@ -4,9 +4,19 @@
 # ---------- 阶段一：前端构建 ----------
 FROM node:20-slim AS web
 WORKDIR /web
+# npm 10 在部分环境装大依赖树时会触发内部崩溃（Exit handler never called）且 node_modules 残缺：
+# 降并发 + 失败清缓存重试 + 最终校验 vite 就位，把问题拦在安装步而非构建步
+ENV NPM_CONFIG_REGISTRY=https://registry.npmmirror.com \
+    NPM_CONFIG_MAXSOCKETS=3 \
+    NPM_CONFIG_FETCH_RETRIES=5 \
+    NPM_CONFIG_FETCH_RETRY_MINTIMEOUT=2000 \
+    NPM_CONFIG_AUDIT=false \
+    NPM_CONFIG_FUND=false
 COPY frontend/package.json frontend/package-lock.json ./
-RUN npm ci --registry=https://registry.npmmirror.com 2>/dev/null \
-    || npm install --registry=https://registry.npmmirror.com
+RUN npm ci --loglevel=error \
+ || { npm cache clean --force && npm install --loglevel=error; } \
+ && test -x node_modules/.bin/vite \
+ || { rm -rf node_modules && npm install --loglevel=error && test -x node_modules/.bin/vite; }
 COPY frontend/ ./
 RUN npm run build
 
