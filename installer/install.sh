@@ -658,12 +658,12 @@ action_master_docker() {
   docker_install_compose || fail "Docker Compose 安装失败，请手动安装 docker-compose 后重跑"
   DOCKER_COMPOSE="docker compose"
   ensure_repo "$MASTER_BACKEND/main.py"
-  ensure_base_images
-  ensure_swap_for_build
   if ensure_master_image; then
     info "使用预构建镜像，直接启动..."
   else
-    info "预构建镜像不可用，改为本地构建（首次需编译前端，约 1-3 分钟）..."
+    info "预构建镜像不可用，准备本地构建（首次需编译前端，约 1-3 分钟）..."
+    ensure_base_images
+    ensure_swap_for_build
   fi
   step "配置"
   master_docker_env
