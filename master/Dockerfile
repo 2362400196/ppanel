@@ -5,16 +5,15 @@
 FROM node:20-slim AS web
 WORKDIR /web
 # npm 10 装大依赖树会间歇性触发内部崩溃（Exit handler never called，且进程以 0 退出留下残缺树）。
-# 首选 pnpm（corepack 自带，无此 bug）；pnpm 不可用时退回 npm 并校验 vite 就位，问题拦在安装步。
-# COREPACK_NPM_REGISTRY：corepack 拉 pnpm 本体走国内镜像（它不认 npm_config_registry）
+# 首选 pnpm（无此 bug）：用 npm 全局装 pnpm（单包小安装，走 npm 自己的 fetch 栈，实测可用）；
+# corepack 拉 pnpm 会 ConnectTimeout（undici 行为差异），仅作兜底。npm 装依赖失败时校验 vite 拦截残缺树。
 ENV npm_config_registry=https://registry.npmmirror.com \
-    COREPACK_NPM_REGISTRY=https://registry.npmmirror.com \
-    COREPACK_INTEGRITY_KEYS=0 \
     NPM_CONFIG_AUDIT=false \
     NPM_CONFIG_FUND=false \
     NPM_CONFIG_MAXSOCKETS=3
 COPY frontend/package.json frontend/package-lock.json ./
-RUN corepack enable && corepack prepare pnpm@9 --activate; \
+RUN { npm i -g pnpm@9 --loglevel=error && pnpm --version; } \
+    || { corepack enable && COREPACK_NPM_REGISTRY=https://registry.npmmirror.com corepack prepare pnpm@9 --activate; }; \
     { pnpm import && pnpm install; } \
     || { npm ci --loglevel=error || npm install --loglevel=error; }; \
     test -x node_modules/.bin/vite \
