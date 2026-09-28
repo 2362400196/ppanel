@@ -17,7 +17,9 @@
 # ============================================================
 set -euo pipefail
 
-REPO_URL="${REPO_URL:-https://gitee.com/zhuxiaohuaqn/ppanel.git}"
+REPO_URL="${REPO_URL:-}"   # 显式指定则优先；留空时按服务器位置自动选源（国内 gitee / 海外含香港 github）
+REPO_URL_GITEE="https://gitee.com/zhuxiaohuaqn/ppanel.git"
+REPO_URL_GITHUB="https://github.com/2362400196/ppanel.git"
 SRC_DIR="${SRC_DIR:-/opt/ppanel}"
 MASTER_SERVICE="ppanel-master"
 MASTER_PORT="${MASTER_PORT:-8001}"
@@ -98,6 +100,31 @@ open_port() {  # 防火墙放行端口（有防火墙才操作）
 # ============================================================
 #  代码获取（主控/被控共用一个仓库：/opt/ppanel）
 # ============================================================
+pick_repo_url() {  # 国内→gitee；海外（含香港）→github；探测失败默认 gitee（gitee 全球可达）
+  if [ -n "$REPO_URL" ]; then GEO_SRC="指定"; REPO_URL_ALT="$REPO_URL_GITEE"; return; fi
+  local tz="" c=""
+  tz=$(cat /etc/timezone 2>/dev/null || timedatectl show -p Timezone --value 2>/dev/null || echo "")
+  case "$tz" in
+    Asia/Shanghai|Asia/Chongqing|Asia/Harbin|Asia/Urumqi)
+      REPO_URL="$REPO_URL_GITEE"; GEO_SRC="gitee(国内)"; REPO_URL_ALT="$REPO_URL_GITHUB"; return ;;
+    Asia/Hong_Kong|Asia/Macau|Asia/Taipei)  # 港澳台按海外走 github
+      REPO_URL="$REPO_URL_GITHUB"; GEO_SRC="github(海外)"; REPO_URL_ALT="$REPO_URL_GITEE"; return ;;
+  esac
+  if command -v curl >/dev/null 2>&1; then
+    c=$(curl -fsS --max-time 5 https://ipinfo.io/country 2>/dev/null | tr -d '[:space:]' || true)
+  fi
+  case "$c" in
+    CN)          REPO_URL="$REPO_URL_GITEE";  GEO_SRC="gitee(国内)" ;;
+    ""|CN*)      REPO_URL="$REPO_URL_GITEE";  GEO_SRC="gitee(默认)" ;;  # 探测失败默认 gitee
+    *)           REPO_URL="$REPO_URL_GITHUB"; GEO_SRC="github(海外)" ;;
+  esac
+  case "$GEO_SRC" in
+    gitee*) REPO_URL_ALT="$REPO_URL_GITHUB" ;;
+    *)      REPO_URL_ALT="$REPO_URL_GITEE" ;;
+  esac
+  return 0
+}
+
 ensure_repo() {  # $1=安装后校验的文件路径（缺省主控 main.py）
   local CHECK="${1:-$MASTER_BACKEND/main.py}"
   step "拉取代码"
@@ -122,10 +149,18 @@ ensure_repo() {  # $1=安装后校验的文件路径（缺省主控 main.py）
     fi
   else
     MODE_UPGRADE=0
-    info "克隆仓库 -> $SRC_DIR"
-    if ! git clone --depth 1 "$REPO_URL" "$SRC_DIR" > /tmp/ppanel-git-clone.log 2>&1; then
-      tail -4 /tmp/ppanel-git-clone.log
-      fail "克隆失败，检查网络或用 REPO_URL= 指定仓库地址"
+    pick_repo_url
+    info "代码源：$GEO_SRC -> $REPO_URL"
+    if git clone --depth 1 "$REPO_URL" "$SRC_DIR" > /tmp/ppanel-git-clone.log 2>&1; then
+      :
+    else
+      tail -3 /tmp/ppanel-git-clone.log || true
+      warn "首选源克隆失败，改用备用源：$REPO_URL_ALT"
+      [ -d "$SRC_DIR/.git" ] || rm -rf "$SRC_DIR"   # 只清理克隆残留，不动已有目录
+      if ! git clone --depth 1 "$REPO_URL_ALT" "$SRC_DIR" > /tmp/ppanel-git-clone.log 2>&1; then
+        tail -4 /tmp/ppanel-git-clone.log
+        fail "克隆失败，检查网络或用 REPO_URL= 指定仓库地址"
+      fi
     fi
   fi
   [ -f "$CHECK" ] || fail "仓库结构异常：找不到 $CHECK"
