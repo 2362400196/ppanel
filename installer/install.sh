@@ -134,10 +134,9 @@ ensure_repo() {  # $1=安装后校验的文件路径（缺省主控 main.py）
     # 预清理：恢复上次安装裁剪/本地改动，清残留 merge 状态，避免二次安装 pull 失败
     git -C "$SRC_DIR" merge --abort 2>/dev/null || true
     git -C "$SRC_DIR" checkout -- . 2>/dev/null || true
-    if git -C "$SRC_DIR" pull --ff-only > /tmp/ppanel-git.log 2>&1; then
+    if git -C "$SRC_DIR" pull --ff-only 2>&1 | tee /tmp/ppanel-git.log; then
       ok "代码已是最新"
     else
-      tail -4 /tmp/ppanel-git.log
       warn "git pull 失败，硬对齐远程分支..."
       BR=$(git -C "$SRC_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)
       if git -C "$SRC_DIR" fetch origin > /dev/null 2>&1 \
@@ -151,16 +150,13 @@ ensure_repo() {  # $1=安装后校验的文件路径（缺省主控 main.py）
     MODE_UPGRADE=0
     pick_repo_url
     info "代码源：$GEO_SRC -> $REPO_URL"
-    if git clone --depth 1 "$REPO_URL" "$SRC_DIR" > /tmp/ppanel-git-clone.log 2>&1; then
+    if git clone --progress --depth 1 "$REPO_URL" "$SRC_DIR" 2>&1 | tee /tmp/ppanel-git-clone.log; then
       :
     else
-      tail -3 /tmp/ppanel-git-clone.log || true
       warn "首选源克隆失败，改用备用源：$REPO_URL_ALT"
       [ -d "$SRC_DIR/.git" ] || rm -rf "$SRC_DIR"   # 只清理克隆残留，不动已有目录
-      if ! git clone --depth 1 "$REPO_URL_ALT" "$SRC_DIR" > /tmp/ppanel-git-clone.log 2>&1; then
-        tail -4 /tmp/ppanel-git-clone.log
-        fail "克隆失败，检查网络或用 REPO_URL= 指定仓库地址"
-      fi
+      git clone --progress --depth 1 "$REPO_URL_ALT" "$SRC_DIR" 2>&1 | tee /tmp/ppanel-git-clone.log \
+        || fail "克隆失败，检查网络或用 REPO_URL= 指定仓库地址"
     fi
   fi
   [ -f "$CHECK" ] || fail "仓库结构异常：找不到 $CHECK"
@@ -227,10 +223,10 @@ bootstrap_uv() {  # $1=backend 目录；成功后 UV_BIN 指向可用 uv，失�
     info "安装 uv 包管理器（清华 PyPI 镜像）..."
     # uv 创建的 venv 不带 pip：缺 pip 先重建，保证 bootstrap 可用
     [ -x "$1/.venv/bin/pip" ] || python3 -m venv --clear "$1/.venv"
-    "$1/.venv/bin/pip" install -q uv -i "$PYPI_MIRROR" && UV_BIN="$1/.venv/bin/uv" || true
+    "$1/.venv/bin/pip" install uv -i "$PYPI_MIRROR" && UV_BIN="$1/.venv/bin/uv" || true
     if [ -z "$UV_BIN" ]; then
       info "pip 安装 uv 失败，尝试官方安装脚本..."
-      curl -LsSf --max-time 60 https://astral.sh/uv/install.sh | sh >/dev/null 2>&1 || true
+      curl -LsSf --max-time 60 https://astral.sh/uv/install.sh | sh || true
       [ -x "$HOME/.local/bin/uv" ] && UV_BIN="$HOME/.local/bin/uv"
     fi
   fi
@@ -251,15 +247,15 @@ master_deps() {
   UV_OK=0
   if [ -n "$UV_BIN" ]; then
     info "uv sync 安装后端依赖..."
-    if "$UV_BIN" sync --inexact --no-dev --no-install-project > /tmp/ppanel-uv-master.log 2>&1; then
+    if "$UV_BIN" sync --inexact --no-dev --no-install-project 2>&1 | tee /tmp/ppanel-uv-master.log; then
       UV_OK=1; git checkout -- uv.lock 2>/dev/null || true
     fi
   fi
   if [ "$UV_OK" != 1 ]; then
     warn "uv 不可用，退回 pip 安装..."
     [ -x "$MASTER_BACKEND/.venv/bin/pip" ] || python3 -m venv --clear "$MASTER_BACKEND/.venv"
-    "$MASTER_BACKEND/.venv/bin/pip" install -q --upgrade pip -i "$PYPI_MIRROR"
-    "$MASTER_BACKEND/.venv/bin/pip" install -q . -i "$PYPI_MIRROR"
+    "$MASTER_BACKEND/.venv/bin/pip" install --upgrade pip -i "$PYPI_MIRROR"
+    "$MASTER_BACKEND/.venv/bin/pip" install . -i "$PYPI_MIRROR"
   fi
   "$MASTER_BACKEND/.venv/bin/python" -c "import fastapi, uvicorn, sqlalchemy" \
     || fail "后端依赖校验失败"
@@ -808,28 +804,23 @@ agent_deps() {
   if [ -n "$UV_BIN" ]; then
     info "uv sync 安装依赖..."
     # --inexact：保留 venv 内 uv 本体；--no-install-project：平铺结构不构建项目本身
-    if "$UV_BIN" sync --inexact --no-dev --no-install-project > /tmp/ppanel-uv-sync.log 2>&1; then
+    if "$UV_BIN" sync --inexact --no-dev --no-install-project 2>&1 | tee /tmp/ppanel-uv-sync.log; then
       UV_OK=1
       git checkout -- uv.lock 2>/dev/null || true
-    else
-      tail -5 /tmp/ppanel-uv-sync.log
-      if [ "$PKG" = "apt" ]; then
-        warn "疑似缺编译头文件（aarch64 常见），安装工具链后重试..."
-        pkg_install libffi-dev python3-dev gcc
-        if "$UV_BIN" sync --inexact --no-dev --no-install-project > /tmp/ppanel-uv-sync.log 2>&1; then
-          UV_OK=1
-          git checkout -- uv.lock 2>/dev/null || true
-        else
-          tail -5 /tmp/ppanel-uv-sync.log
-        fi
+    elif [ "$PKG" = "apt" ]; then
+      warn "疑似缺编译头文件（aarch64 常见），安装工具链后重试..."
+      pkg_install libffi-dev python3-dev gcc
+      if "$UV_BIN" sync --inexact --no-dev --no-install-project 2>&1 | tee /tmp/ppanel-uv-sync.log; then
+        UV_OK=1
+        git checkout -- uv.lock 2>/dev/null || true
       fi
     fi
   fi
   if [ "$UV_OK" != 1 ]; then
     warn "uv 不可用，退回 pip 安装（较慢）..."
     [ -x "$AGENT_APP/.venv/bin/pip" ] || python3 -m venv --clear "$AGENT_APP/.venv"
-    "$AGENT_APP/.venv/bin/pip" install -q --upgrade pip -i "$PYPI_MIRROR"
-    "$AGENT_APP/.venv/bin/pip" install -q . -i "$PYPI_MIRROR"
+    "$AGENT_APP/.venv/bin/pip" install --upgrade pip -i "$PYPI_MIRROR"
+    "$AGENT_APP/.venv/bin/pip" install . -i "$PYPI_MIRROR"
   fi
   "$AGENT_APP/.venv/bin/python" -c "import fastapi, docker, uvicorn" \
     || fail "依赖校验失败（fastapi/docker/uvicorn 导入失败）"
