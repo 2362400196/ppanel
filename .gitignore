@@ -19,3 +19,6 @@ dist/
 # 日志与环境变量（含密钥）
 *.log
 .env
+
+# Docker 离线包（72MB，走 Release 附件分发，不入 git 树）
+installer/docker-*.tgz

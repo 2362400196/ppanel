@@ -447,12 +447,14 @@ docker_offline_install() {  # 离线兜底：优先本地离线包，无包则�
     ok "使用本地离线包：$LOCAL_TGZ"
     cp -f "$LOCAL_TGZ" /tmp/ppanel-docker.tgz
   else
-    # ② 无本地包 → 多源在线下载（gitee 仓库内置离线包，国内最稳）
+  # ② 无本地包 → 多源在线下载（Release 附件 / 官方直链 / 加速代理）
     warn "未找到本地离线包（可预先把 docker-27.5.1.tgz 放到脚本同目录 / /opt/ppanel / /tmp）"
     BASE="https://download.docker.com/linux/static/stable/$DA/docker-$DVER.tgz"
-    GITEE_RAW="https://gitee.com/zhuxiaohuaqn/ppanel/raw/master/installer/docker-$DVER.tgz"
+    # 主源为 Release 附件（72MB 离线包已移出 git 树，克隆提速）；官方直链与代理为兜底
+    REL_GITEE="https://gitee.com/zhuxiaohuaqn/ppanel/releases/download/v1.0/docker-$DVER.tgz"
+    REL_GITHUB="https://github.com/2362400196/ppanel/releases/download/v1.0/docker-$DVER.tgz"
     DL_OK=0
-    for u in "$GITEE_RAW" "$BASE" "https://ghfast.top/$BASE" "https://gh-proxy.com/$BASE"; do
+    for u in "$REL_GITEE" "$BASE" "https://ghfast.top/$BASE" "https://gh-proxy.com/$BASE" "$REL_GITHUB"; do
       info "下载离线包：$u"
       if curl -fL --max-time 300 --retry 1 -o /tmp/ppanel-docker.tgz "$u" 2>/dev/null && [ -s /tmp/ppanel-docker.tgz ]; then
         DL_OK=1; break
@@ -549,6 +551,7 @@ master_docker_migrate_data() {  # 旧版数据目录在仓库树内（backend/da
 }
 
 master_docker_env() {  # master/.env 供 docker-compose 变量替换
+  mkdir -p "$MASTER_DIR"
   NEW_INSTALL=0
   if [ ! -f "$MASTER_DIR/.env" ]; then
     NEW_INSTALL=1
@@ -580,9 +583,9 @@ master_docker_summary() {
     echo -e "  管理员    沿用既有账号（密码见 $MASTER_DIR/.env）"
   fi
   echo -e "  ${c_dim}─────────────────────────────────────────────${c_off}"
-  echo -e "  数据      宿主机 $MASTER_DIR/backend/data（SQLite 与附件）"
+  echo -e "  数据      宿主机 /opt/ppanel/master-data（SQLite 与附件，仓库树外）"
   echo -e "  常用      cd $MASTER_DIR && $DOCKER_COMPOSE restart · logs -f"
-  echo -e "  升级      cd $MASTER_DIR && git -C $SRC_DIR pull && $DOCKER_COMPOSE up -d --build"
+  echo -e "  升级      重跑安装脚本菜单 [1]（自动拉取最新镜像；MASTER_BUILD=1 强制本地构建）"
   echo -e "  提醒      云服务器请在安全组放行 TCP $MPORT"
   echo -e "  ${c_g}${c_b}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c_off}"
 }
@@ -662,29 +665,67 @@ ensure_base_images() {  # 预拉基础镜像：国内走加速站限时拉取，
   done
 }
 
+fetch_master_compose() {  # 快路径：只单文件下载 compose.yml（KB 级），避免为拉镜像克隆整仓（含 72MB 历史）
+  [ -s "$MASTER_DIR/docker-compose.yml" ] && { ok "编排文件已存在"; return 0; }
+  mkdir -p "$MASTER_DIR"
+  step "获取编排文件"
+  local u
+  for u in "https://gitee.com/zhuxiaohuaqn/ppanel/raw/master/master/docker-compose.yml" \
+           "https://cdn.jsdelivr.net/gh/2362400196/ppanel@master/master/docker-compose.yml" \
+           "https://raw.githubusercontent.com/2362400196/ppanel/master/master/docker-compose.yml"; do
+    info "下载 docker-compose.yml <- $u"
+    if curl -fsSL --max-time 30 "$u" -o "$MASTER_DIR/docker-compose.yml" 2>/dev/null \
+       && grep -q 'services:' "$MASTER_DIR/docker-compose.yml"; then
+      ok "编排文件就绪"
+      return 0
+    fi
+  done
+  # gitee raw 风控（451）时的 API base64 兜底
+  info "尝试 gitee API 兜底..."
+  if curl -fsSL --max-time 30 "https://gitee.com/api/v5/repos/zhuxiaohuaqn/ppanel/contents/master/docker-compose.yml?ref=master" 2>/dev/null \
+     | sed 's/.*"content":"\([^"]*\)".*/\1/' | base64 -di > "$MASTER_DIR/docker-compose.yml" 2>/dev/null \
+     && grep -q 'services:' "$MASTER_DIR/docker-compose.yml" 2>/dev/null; then
+    ok "编排文件就绪（gitee API）"
+    return 0
+  fi
+  rm -f "$MASTER_DIR/docker-compose.yml"
+  return 1
+}
+
 action_master_docker() {
   detect_env
   install_docker
   docker_install_compose || fail "Docker Compose 安装失败，请手动安装 docker-compose 后重跑"
   DOCKER_COMPOSE="docker compose"
-  ensure_repo "$MASTER_BACKEND/main.py"
   master_docker_migrate_data
-  if ensure_master_image; then
-    info "使用预构建镜像，直接启动..."
-  else
-    info "预构建镜像不可用，准备本地构建（首次需编译前端，约 1-3 分钟）..."
+  step "镜像"
+  if [ "${MASTER_BUILD:-0}" = 1 ]; then
+    ensure_repo "$MASTER_BACKEND/main.py"
     ensure_base_images
     ensure_swap_for_build
-  fi
-  step "配置"
-  master_docker_env
-  step "构建并启动容器"
-  cd "$MASTER_DIR"
-  if [ "${MASTER_BUILD:-0}" = 1 ]; then
-    info "已指定 MASTER_BUILD=1，强制本地构建..."
+    master_docker_env
+    cd "$MASTER_DIR"
+    info "已指定 MASTER_BUILD=1，本地构建并启动..."
     $DOCKER_COMPOSE up -d --build || fail "构建/启动失败：$DOCKER_COMPOSE logs"
-  else
+  elif ensure_master_image; then
+    # 快路径：镜像就绪，只需 compose.yml（已有仓库则 pull 更新，否则单文件下载）
+    if [ -d "$SRC_DIR/.git" ]; then
+      ensure_repo "$MASTER_BACKEND/main.py"
+    else
+      fetch_master_compose || { warn "编排文件获取失败，回退克隆整库..."; ensure_repo "$MASTER_BACKEND/main.py"; }
+    fi
+    master_docker_env
+    cd "$MASTER_DIR"
+    info "使用预构建镜像，直接启动..."
     $DOCKER_COMPOSE up -d || fail "启动失败：$DOCKER_COMPOSE logs"
+  else
+    ensure_repo "$MASTER_BACKEND/main.py"
+    ensure_base_images
+    ensure_swap_for_build
+    master_docker_env
+    cd "$MASTER_DIR"
+    info "预构建镜像不可用，本地构建（首次需编译前端，约 1-3 分钟）..."
+    $DOCKER_COMPOSE up -d --build || fail "构建/启动失败：$DOCKER_COMPOSE logs"
   fi
   sleep 3
   docker ps --filter "name=ppanel-master" --filter "status=running" | grep -q ppanel-master \
