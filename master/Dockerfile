@@ -11,7 +11,7 @@ ENV npm_config_registry=https://registry.npmmirror.com \
     NPM_CONFIG_AUDIT=false \
     NPM_CONFIG_FUND=false \
     NPM_CONFIG_MAXSOCKETS=3 \
-    NODE_OPTIONS=--max-old-space-size=1536
+    NODE_OPTIONS=--max-old-space-size=2048
 COPY frontend/package.json frontend/package-lock.json ./
 RUN { { npm i -g pnpm@9 --loglevel=error || npm i -g pnpm@9 --loglevel=error; } && pnpm --version; } \
     || { corepack enable && COREPACK_NPM_REGISTRY=https://registry.npmmirror.com corepack prepare pnpm@9 --activate; }; \
