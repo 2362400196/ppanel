@@ -34,7 +34,8 @@ AGENT_SERVICE="ppanel-agent"
 AGENT_APP="$SRC_DIR/agent/backend"
 AGENT_PORT="${PORT:-9100}"
 
-c_g='\033[0;32m'; c_c='\033[0;36m'; c_y='\033[0;33m'; c_r='\033[0;31m'; c_dim='\033[2m'; c_b='\033[1m'; c_off='\033[0m'
+# 颜色用 $'...' 定义为真实 ESC 字节：read -rp 的提示符不解析 \033 转义，字面定义会在确认提示里打出乱码
+c_g=$'\033[0;32m'; c_c=$'\033[0;36m'; c_y=$'\033[0;33m'; c_r=$'\033[0;31m'; c_dim=$'\033[2m'; c_b=$'\033[1m'; c_off=$'\033[0m'
 info()  { echo -e "  ${c_g}➜${c_off} $*"; }
 ok()    { echo -e "  ${c_g}✔${c_off} $*"; }
 warn()  { echo -e "  ${c_y}⚠${c_off} $*"; }
@@ -1058,6 +1059,33 @@ action_status() {
   echo ""
 }
 
+action_agent_info() {  # 被控安装信息：服务/地址/Token/主控接入参数一览
+  banner
+  echo ""
+  step "被控安装信息"
+  if ! systemctl is-active --quiet "$AGENT_SERVICE" 2>/dev/null; then
+    warn "被控未安装或未运行（$AGENT_SERVICE），先执行菜单 [2] 安装"
+    echo ""
+    return 1
+  fi
+  local IP TOKEN
+  IP=$(curl -s --max-time 5 https://api.ip.sb/ip 2>/dev/null | tr -d '[:space:]')
+  [ -n "$IP" ] || IP=$(curl -s --max-time 5 https://ifconfig.me 2>/dev/null | tr -d '[:space:]')
+  [ -n "$IP" ] || IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+  TOKEN=$(grep -E '^NODE_TOKEN=' "$AGENT_APP/.env" 2>/dev/null | cut -d= -f2)
+  ok "服务状态：运行中（$AGENT_SERVICE，端口 $AGENT_PORT）"
+  ok "面板地址：http://${IP:-<服务器IP>}:$AGENT_PORT/panel"
+  info "节点 Token：${TOKEN:-未找到（检查 $AGENT_APP/.env 的 NODE_TOKEN）}"
+  info "Caddy：$(systemctl is-active caddy >/dev/null 2>&1 && echo '运行中' || echo '未安装/未运行')"
+  info "代码目录：$SRC_DIR"
+  info "实时日志：journalctl -u $AGENT_SERVICE -f"
+  echo ""
+  info "主控接入（节点管理 → 添加节点）："
+  info "  节点地址：http://${IP:-<服务器IP>}:$AGENT_PORT"
+  info "  节点 Token：${TOKEN:-见上方 .env}"
+  echo ""
+}
+
 # ============================================================
 #  菜单与入口
 # ============================================================
@@ -1120,9 +1148,10 @@ menu() {
   echo -e "  ${c_b}[3]${c_off} 卸载 被控                   ${c_dim}移除面板，可选保留实例数据${c_off}"
   echo -e "  ${c_b}[4]${c_off} 重置 被控管理员             ${c_dim}删除内置管理员，按随机密码重建${c_off}"
   echo -e "  ${c_b}[5]${c_off} 运行状态"
+  echo -e "  ${c_b}[6]${c_off} 被控安装信息             ${c_dim}服务状态 / 节点地址 / Token${c_off}"
   echo -e "  ${c_b}[0]${c_off} 退出"
   echo ""
-  read -rp "  请选择 [0-5]: " c
+  read -rp "  请选择 [0-6]: " c
   echo ""
   case "$c" in
     1) menu_master ;;
@@ -1130,6 +1159,7 @@ menu() {
     3) action_agent_uninstall ;;
     4) action_agent_reset_admin ;;
     5) action_status ;;
+    6) action_agent_info ;;
     0) exit 0 ;;
     *) warn "无效选择"; exit 1 ;;
   esac
@@ -1146,5 +1176,6 @@ case "${1:-menu}" in
   master-reinstall)  banner; action_master_reinstall ;;
   master-docker-reinstall) banner; action_master_docker_reinstall ;;
   status)            banner; action_status ;;
-  *) echo -e "用法：bash install.sh [menu|agent|agent-reinstall|agent-uninstall|agent-reset-admin|master|master-docker|master-reinstall|master-docker-reinstall|status]"; exit 1 ;;
+  agent-info)        banner; action_agent_info ;;
+  *) echo -e "用法：bash install.sh [menu|agent|agent-reinstall|agent-uninstall|agent-reset-admin|agent-info|master|master-docker|master-reinstall|master-docker-reinstall|status]"; exit 1 ;;
 esac
