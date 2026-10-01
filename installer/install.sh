@@ -1127,6 +1127,80 @@ action_agent_info() {  # 被控安装信息：服务/地址/Token/主控接入�
   echo ""
 }
 
+_reset_admin_sql() {  # 输出重置管理员的 Python 片段（$1=新密码 $2=DB绝对路径）；直接写库，无论面板是否改过密码都生效
+  cat <<PYEOF
+import bcrypt, sqlite3, sys
+new_pwd = sys.argv[1]
+h = bcrypt.hashpw(new_pwd.encode(), bcrypt.gensalt()).decode()
+db = sqlite3.connect(sys.argv[2])
+try:
+    db.execute("UPDATE users SET password_hash=? WHERE role='admin'", (h,))
+    if db.total_changes == 0:
+        import os
+        uname = sys.argv[3] if len(sys.argv) > 3 else "admin"
+        db.execute("INSERT INTO users (username, password_hash, role) VALUES (?, ?, 'admin')", (uname, h))
+    db.commit()
+    print("RESET_OK rows=", db.total_changes)
+finally:
+    db.close()
+PYEOF
+}
+
+action_master_reset_admin() {  # 重置主控管理员密码：Docker 容器内或直装 venv 直接写库，随机新密码并同步 .env
+  banner
+  echo ""
+  step "重置 主控管理员密码"
+  local NEWPASS
+  NEWPASS="$(openssl rand -base64 18 2>/dev/null | tr -dc 'A-Za-z0-9' | head -c 14)"
+  [ -n "$NEWPASS" ] || NEWPASS="$(head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 14)"
+
+  if command -v docker >/dev/null 2>&1 && docker ps --filter "name=ppanel-master" --filter "status=running" --format '{{.Names}}' 2>/dev/null | grep -q ppanel-master; then
+    # Docker 模式：容器内执行（bcrypt 与 DB 都在容器里，DB 走挂载卷真实落盘）
+    local DB_IN_CTR="/srv/master/backend/data/master.db"
+    [ "$(docker exec ppanel-master sh -c "[ -f '$DB_IN_CTR' ] && echo 1")" = "1" ] \
+      || fail "容器内未找到数据库 $DB_IN_CTR"
+    _reset_admin_sql > /tmp/ppanel-reset-admin.py
+    docker cp /tmp/ppanel-reset-admin.py ppanel-master:/tmp/reset-admin.py
+    docker exec ppanel-master python /tmp/reset-admin.py "$NEWPASS" "$DB_IN_CTR" admin \
+      | grep -q RESET_OK || fail "重置失败：docker logs ppanel-master"
+    rm -f /tmp/ppanel-reset-admin.py
+    # 同步 .env，保持重建容器时配置一致
+    if [ -f "$MASTER_DIR/.env" ] && grep -q '^ADMIN_PASSWORD=' "$MASTER_DIR/.env"; then
+      sed -i "s|^ADMIN_PASSWORD=.*|ADMIN_PASSWORD=$NEWPASS|" "$MASTER_DIR/.env"
+    fi
+    echo ""
+    echo -e "  ${c_g}✔ 主控管理员密码已重置（Docker）${c_off}"
+    echo -e "  账号      ${c_b}admin${c_off} / ${c_b}$NEWPASS${c_off}"
+    echo -e "  ${c_y}⚠ 密码只显示这一次，请立即登录并修改${c_off}"
+    echo ""
+    return 0
+  fi
+
+  if systemctl is-active --quiet "$MASTER_SERVICE" 2>/dev/null; then
+    # 直装模式：venv python 写库
+    local VENV_PY="$MASTER_BACKEND/.venv/bin/python" DB="$MASTER_BACKEND/data/master.db"
+    [ -x "$VENV_PY" ] || fail "直装主控虚拟环境不存在：$VENV_PY"
+    [ -f "$DB" ] || fail "直装主控数据库不存在：$DB"
+    _reset_admin_sql > /tmp/ppanel-reset-admin.py
+    "$VENV_PY" /tmp/ppanel-reset-admin.py "$NEWPASS" "$DB" admin | grep -q RESET_OK \
+      || fail "重置失败，检查数据库权限"
+    rm -f /tmp/ppanel-reset-admin.py
+    if [ -f "$MASTER_BACKEND/.env" ] && grep -q '^ADMIN_PASSWORD=' "$MASTER_BACKEND/.env"; then
+      sed -i "s|^ADMIN_PASSWORD=.*|ADMIN_PASSWORD=$NEWPASS|" "$MASTER_BACKEND/.env"
+    fi
+    echo ""
+    echo -e "  ${c_g}✔ 主控管理员密码已重置（直装）${c_off}"
+    echo -e "  账号      ${c_b}admin${c_off} / ${c_b}$NEWPASS${c_off}"
+    echo -e "  ${c_y}⚠ 密码只显示这一次，请立即登录并修改${c_off}"
+    echo ""
+    return 0
+  fi
+
+  warn "未检测到运行中的主控（Docker 容器或 systemd 服务），无需重置"
+  echo ""
+  return 1
+}
+
 # ============================================================
 #  菜单与入口
 # ============================================================
@@ -1190,9 +1264,10 @@ menu() {
   echo -e "  ${c_b}[4]${c_off} 重置 被控管理员             ${c_dim}删除内置管理员，按随机密码重建${c_off}"
   echo -e "  ${c_b}[5]${c_off} 运行状态"
   echo -e "  ${c_b}[6]${c_off} 被控安装信息             ${c_dim}服务状态 / 节点地址 / Token${c_off}"
+  echo -e "  ${c_b}[7]${c_off} 重置 主控管理员密码      ${c_dim}随机新密码，只显示一次${c_off}"
   echo -e "  ${c_b}[0]${c_off} 退出"
   echo ""
-  read -rp "  请选择 [0-6]: " c
+  read -rp "  请选择 [0-7]: " c
   echo ""
   case "$c" in
     1) menu_master ;;
@@ -1201,6 +1276,7 @@ menu() {
     4) action_agent_reset_admin ;;
     5) action_status ;;
     6) action_agent_info ;;
+    7) action_master_reset_admin ;;
     0) exit 0 ;;
     *) warn "无效选择"; exit 1 ;;
   esac
@@ -1218,5 +1294,6 @@ case "${1:-menu}" in
   master-docker-reinstall) banner; action_master_docker_reinstall ;;
   status)            banner; action_status ;;
   agent-info)        banner; action_agent_info ;;
-  *) echo -e "用法：bash install.sh [menu|agent|agent-reinstall|agent-uninstall|agent-reset-admin|agent-info|master|master-docker|master-reinstall|master-docker-reinstall|status]"; exit 1 ;;
+  master-reset-admin) banner; action_master_reset_admin ;;
+  *) echo -e "用法：bash install.sh [menu|agent|agent-reinstall|agent-uninstall|agent-reset-admin|agent-info|master|master-docker|master-reinstall|master-docker-reinstall|master-reset-admin|status]"; exit 1 ;;
 esac
