@@ -54,9 +54,17 @@ async function pollTask() {
   finally { _polling = false }
 }
 
+/** 生成任务 id：crypto.randomUUID 仅安全上下文（HTTPS/localhost）可用，
+ *  通过 http://IP:端口 访问时为 undefined，用 getRandomValues 兜底生成 v4 UUID。 */
+function genTaskId() {
+  if (crypto.randomUUID) return crypto.randomUUID()
+  return ([1e7] + -1e3 + -4e3 + -8e3 + -1e11).replace(/[018]/g, c =>
+    (+c ^ crypto.getRandomValues(new Uint8Array(1))[0] & (15 >> (+c / 4))).toString(16))
+}
+
 /** 生成任务 id 并打开终端；返回应随请求携带的 X-Task-Id。 */
 export function startTask(node = '') {
-  const tid = crypto.randomUUID()
+  const tid = genTaskId()
   openTask(tid, { node })
   return tid
 }
