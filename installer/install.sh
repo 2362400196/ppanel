@@ -742,7 +742,21 @@ master_wipe() {  # 主控全新重装清理：systemd 服务 + Docker 容器 + �
   systemctl disable --now "$MASTER_SERVICE" >/dev/null 2>&1 || true
   rm -f "/etc/systemd/system/$MASTER_SERVICE.service"; systemctl daemon-reload
   command -v docker >/dev/null 2>&1 && docker rm -f ppanel-master >/dev/null 2>&1 || true
+  # 同机装有被控时保全其运行环境（.venv/.env 在 agent/ 内，删整个仓库会连带清掉，
+  # 导致被控 203/EXEC 崩循环）：先搬走 agent/，清完仓库再搬回并重启
+  local AGENT_KEEP=0
+  if [ -d "$AGENT_APP" ]; then
+    AGENT_KEEP=1
+    mv "$SRC_DIR/agent" /tmp/ppanel-agent-keep
+    info "检测到本机被控，已临时保全 agent 环境..."
+  fi
   rm -rf "$SRC_DIR" /opt/ppanel/master-data /tmp/ppanel-uv-sync.log
+  if [ "$AGENT_KEEP" = 1 ]; then
+    mkdir -p "$SRC_DIR"
+    mv /tmp/ppanel-agent-keep "$SRC_DIR/agent"
+    systemctl is-enabled --quiet "$AGENT_SERVICE" 2>/dev/null && systemctl restart "$AGENT_SERVICE" 2>/dev/null || true
+    ok "被控环境已保全并恢复运行"
+  fi
   ok "旧主控已清除"
   return 0
 }
