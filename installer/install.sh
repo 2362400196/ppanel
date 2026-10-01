@@ -150,14 +150,29 @@ ensure_repo() {  # $1=安装后校验的文件路径（缺省主控 main.py）
   else
     MODE_UPGRADE=0
     pick_repo_url
+    # 目录已存在但不是 git 仓库（如主控 Docker 快路径只留下 master/.env）：
+    # 先把现有内容搬到临时目录，克隆后搬回（cp -an 不覆盖仓库文件），
+    # 否则 git clone 会因目录非空失败，走 rm -rf 兜底时连带删掉 master/.env
+    KEEP_SRC=""
+    if [ -d "$SRC_DIR" ] && [ -n "$(ls -A "$SRC_DIR" 2>/dev/null)" ]; then
+      KEEP_SRC=$(mktemp -d /tmp/ppanel-keep.XXXXXX)
+      mv "$SRC_DIR"/* "$KEEP_SRC/" 2>/dev/null || true
+      mv "$SRC_DIR"/.??* "$KEEP_SRC/" 2>/dev/null || true
+      info "已临时保全 $SRC_DIR 既有内容（含配置）"
+    fi
     info "代码源：$GEO_SRC -> $REPO_URL"
     if git clone --progress --depth 1 "$REPO_URL" "$SRC_DIR" 2>&1 | tee /tmp/ppanel-git-clone.log; then
       :
     else
       warn "首选源克隆失败，改用备用源：$REPO_URL_ALT"
-      [ -d "$SRC_DIR/.git" ] || rm -rf "$SRC_DIR"   # 只清理克隆残留，不动已有目录
+      [ -d "$SRC_DIR/.git" ] || rm -rf "$SRC_DIR"   # 只清理克隆残留
       git clone --progress --depth 1 "$REPO_URL_ALT" "$SRC_DIR" 2>&1 | tee /tmp/ppanel-git-clone.log \
         || fail "克隆失败，检查网络或用 REPO_URL= 指定仓库地址"
+    fi
+    if [ -n "$KEEP_SRC" ]; then
+      cp -an "$KEEP_SRC/." "$SRC_DIR/" 2>/dev/null || true
+      rm -rf "$KEEP_SRC"
+      ok "既有配置已恢复（.env 等用户数据保留）"
     fi
   fi
   [ -f "$CHECK" ] || fail "仓库结构异常：找不到 $CHECK"
@@ -747,6 +762,7 @@ master_wipe() {  # 主控全新重装清理：systemd 服务 + Docker 容器 + �
   local AGENT_KEEP=0
   if [ -d "$AGENT_APP" ]; then
     AGENT_KEEP=1
+    rm -rf /tmp/ppanel-agent-keep   # 上次中断可能残留，防 mv 嵌套进旧目录
     mv "$SRC_DIR/agent" /tmp/ppanel-agent-keep
     info "检测到本机被控，已临时保全 agent 环境..."
   fi
@@ -1047,6 +1063,10 @@ action_agent_reinstall() {  # 全新重装：清除旧安装（含数据）后�
   confirm "确认完全清除并重新安装？" || { warn "已取消"; return 0; }
   systemctl disable --now "$AGENT_SERVICE" >/dev/null 2>&1 || true
   rm -f "/etc/systemd/system/$AGENT_SERVICE.service"; systemctl daemon-reload
+  # 同机主控一并停用并移除（其代码即将被清，不停会留下握着已删文件的半残运行态）
+  systemctl disable --now "$MASTER_SERVICE" >/dev/null 2>&1 || true
+  rm -f "/etc/systemd/system/$MASTER_SERVICE.service"; systemctl daemon-reload
+  command -v docker >/dev/null 2>&1 && docker rm -f ppanel-master >/dev/null 2>&1 || true
   rm -rf "$SRC_DIR" /data/inst /tmp/ppanel-uv-sync.log
   ok "旧安装已清除"
   switch_mirror
@@ -1070,6 +1090,10 @@ action_agent_uninstall() {
   info "停止服务..."
   systemctl disable --now "$AGENT_SERVICE" >/dev/null 2>&1 || true
   rm -f "/etc/systemd/system/$AGENT_SERVICE.service"; systemctl daemon-reload
+  # 同机主控一并停用（其代码即将被清，不停会留下半残运行态）
+  systemctl disable --now "$MASTER_SERVICE" >/dev/null 2>&1 || true
+  rm -f "/etc/systemd/system/$MASTER_SERVICE.service"; systemctl daemon-reload
+  command -v docker >/dev/null 2>&1 && docker rm -f ppanel-master >/dev/null 2>&1 || true
   rm -rf "$SRC_DIR" /tmp/ppanel-uv-sync.log
   [ "$RM_DATA" = 1 ] && { rm -rf /data/inst; ok "实例数据已删除"; } || ok "实例数据保留于 /data/inst"
   ok "PPanel 独立面板已卸载"
