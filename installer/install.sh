@@ -743,9 +743,12 @@ action_master_docker() {
     $DOCKER_COMPOSE up -d --build || fail "构建/启动失败：$DOCKER_COMPOSE logs"
   fi
   sleep 3
-  docker ps --filter "name=ppanel-master" --filter "status=running" | grep -q ppanel-master \
-    || fail "容器未运行：docker logs ppanel-master"
-  ok "容器运行中"
+  # 未就绪只警告不退出：无论何种状态，安装摘要（地址/账号）都必须输出
+  if docker ps --filter "name=ppanel-master" --filter "status=running" 2>/dev/null | grep -q ppanel-master; then
+    ok "容器运行中"
+  else
+    warn "容器未处于 running 状态（可能仍在启动）：docker logs ppanel-master 查看"
+  fi
   open_port "$MASTER_PORT"
   prune_for_master
   master_docker_summary
@@ -781,6 +784,44 @@ action_master_reinstall() {        # 全新重装主控（本机直装）
   detect_env
   master_wipe || return 0
   action_master
+}
+
+action_master_uninstall() {  # 卸载主控：停用服务/容器，删代码与配置；数据可选删除
+  detect_env
+  local HAS_DOCKER=0 HAS_SYS=0
+  command -v docker >/dev/null 2>&1 \
+    && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "ppanel-master" && HAS_DOCKER=1
+  systemctl list-unit-files 2>/dev/null | awk '{print $1}' | grep -qx "$MASTER_SERVICE.service" && HAS_SYS=1
+  if [ "$HAS_DOCKER" = 0 ] && [ "$HAS_SYS" = 0 ] && [ ! -d "$MASTER_DIR" ]; then
+    warn "未检测到主控安装"; return 0
+  fi
+  echo -e "  ${c_y}将删除：$MASTER_DIR（compose/.env）${c_off}"
+  [ "$HAS_SYS" = 1 ] && echo -e "  ${c_y}        systemd 服务 $MASTER_SERVICE${c_off}"
+  [ "$HAS_DOCKER" = 1 ] && echo -e "  ${c_y}        Docker 容器 ppanel-master${c_off}"
+  confirm "确认卸载主控？" || { warn "已取消"; return 0; }
+  systemctl disable --now "$MASTER_SERVICE" >/dev/null 2>&1 || true
+  rm -f "/etc/systemd/system/$MASTER_SERVICE.service"; systemctl daemon-reload
+  command -v docker >/dev/null 2>&1 && docker rm -f ppanel-master >/dev/null 2>&1 || true
+  # 代码目录：同机被控保全 agent/ 后清理仓库
+  if [ -d "$AGENT_APP" ]; then
+    rm -rf /tmp/ppanel-agent-keep
+    mv "$SRC_DIR/agent" /tmp/ppanel-agent-keep
+    rm -rf "$SRC_DIR"
+    mkdir -p "$SRC_DIR"; mv /tmp/ppanel-agent-keep "$SRC_DIR/agent"
+    systemctl is-enabled --quiet "$AGENT_SERVICE" 2>/dev/null && systemctl restart "$AGENT_SERVICE" 2>/dev/null || true
+    ok "同机被控环境已保全并恢复运行"
+  else
+    [ -d "$SRC_DIR" ] && rm -rf "$SRC_DIR"
+  fi
+  if [ -d /opt/ppanel/master-data ]; then
+    if confirm "同时删除主控数据 /opt/ppanel/master-data（数据库/账号/附件，不可恢复）？"; then
+      rm -rf /opt/ppanel/master-data
+      ok "主控数据已删除"
+    else
+      info "数据已保留（重装主控后自动挂回）"
+    fi
+  fi
+  ok "主控已卸载"
 }
 
 action_master_docker_reinstall() { # 全新重装主控（Docker）
@@ -1242,79 +1283,25 @@ action_master_reset_admin() {  # 重置主控管理员密码：Docker 容器内�
 # ============================================================
 #  菜单与入口
 # ============================================================
-menu_master_mode() {  # 主控三级菜单：安装方式（$1=直装动作 $2=Docker动作）
-  banner
-  echo ""
-  echo -e "  ${c_b}[1]${c_off} 本机直装                ${c_dim}systemd 运行，需 Node 构建前端${c_off}"
-  echo -e "  ${c_b}[2]${c_off} Docker 安装              ${c_dim}容器化部署，环境更干净${c_off}"
-  echo -e "  ${c_b}[0]${c_off} 返回上级"
-  echo ""
-  read -rp "  请选择 [0-2]: " c
-  echo ""
-  case "$c" in
-    1) "$1" ;;
-    2) "$2" ;;
-    0) menu_master ;;
-    *) warn "无效选择"; exit 1 ;;
-  esac
-}
-
-menu_master() {  # 主控二级菜单：升级或重装
-  banner
-  echo ""
-  echo -e "  ${c_b}[1]${c_off} 安装 / 升级              ${c_dim}保留数据；已有安装自动升级${c_off}"
-  echo -e "  ${c_b}[2]${c_off} 全新重装                 ${c_dim}清除代码、配置与数据库后重装${c_off}"
-  echo -e "  ${c_b}[0]${c_off} 返回上级"
-  echo ""
-  read -rp "  请选择 [0-2]: " c
-  echo ""
-  case "$c" in
-    1) menu_master_mode action_master action_master_docker ;;
-    2) menu_master_mode action_master_reinstall action_master_docker_reinstall ;;
-    0) menu ;;
-    *) warn "无效选择"; exit 1 ;;
-  esac
-}
-
-menu_agent() {  # 被控二级菜单：升级或重装
-  banner
-  echo ""
-  echo -e "  ${c_b}[1]${c_off} 安装 / 升级              ${c_dim}保留数据；已有安装自动升级${c_off}"
-  echo -e "  ${c_b}[2]${c_off} 全新重装                 ${c_dim}清除旧面板与全部实例数据后重装${c_off}"
-  echo -e "  ${c_b}[0]${c_off} 返回上级"
-  echo ""
-  read -rp "  请选择 [0-2]: " c
-  echo ""
-  case "$c" in
-    1) action_agent ;;
-    2) action_agent_reinstall ;;
-    0) menu ;;
-    *) warn "无效选择"; exit 1 ;;
-  esac
-}
-
 menu() {
   banner
   echo ""
-  echo -e "  ${c_b}[1]${c_off} 安装 主控面板               ${c_dim}升级/重装 · 本机直装或 Docker${c_off}"
-  echo -e "  ${c_b}[2]${c_off} 安装 独立面板（被控）       ${c_dim}升级/重装${c_off}"
-  echo -e "  ${c_b}[3]${c_off} 卸载 被控                   ${c_dim}移除面板，可选保留实例数据${c_off}"
-  echo -e "  ${c_b}[4]${c_off} 重置 被控管理员             ${c_dim}删除内置管理员，按随机密码重建${c_off}"
-  echo -e "  ${c_b}[5]${c_off} 运行状态"
-  echo -e "  ${c_b}[6]${c_off} 被控安装信息             ${c_dim}服务状态 / 节点地址 / Token${c_off}"
-  echo -e "  ${c_b}[7]${c_off} 重置 主控管理员密码      ${c_dim}随机新密码，只显示一次${c_off}"
+  echo -e "  ${c_b}[1]${c_off} 安装 主控面板               ${c_dim}Docker 部署 · 自动拉取预构建镜像${c_off}"
+  echo -e "  ${c_b}[2]${c_off} 安装 独立面板（被控）       ${c_dim}9100 端口 · 已有安装自动升级${c_off}"
+  echo -e "  ${c_b}[3]${c_off} 卸载 主控面板               ${c_dim}数据可选保留${c_off}"
+  echo -e "  ${c_b}[4]${c_off} 卸载 独立面板（被控）       ${c_dim}实例数据可选保留${c_off}"
   echo -e "  ${c_b}[0]${c_off} 退出"
   echo ""
-  read -rp "  请选择 [0-7]: " c
+  echo -e "  ${c_dim}更多子命令：bash install.sh status · agent-info · master-reset-admin${c_off}"
+  echo -e "  ${c_dim}主控本机直装（systemd）：bash install.sh master${c_off}"
+  echo ""
+  read -rp "  请选择 [0-4]: " c
   echo ""
   case "$c" in
-    1) menu_master ;;
-    2) menu_agent ;;
-    3) action_agent_uninstall ;;
-    4) action_agent_reset_admin ;;
-    5) action_status ;;
-    6) action_agent_info ;;
-    7) action_master_reset_admin ;;
+    1) action_master_docker ;;
+    2) action_agent ;;
+    3) action_master_uninstall ;;
+    4) action_agent_uninstall ;;
     0) exit 0 ;;
     *) warn "无效选择"; exit 1 ;;
   esac
@@ -1330,8 +1317,9 @@ case "${1:-menu}" in
   master-docker)     banner; action_master_docker ;;
   master-reinstall)  banner; action_master_reinstall ;;
   master-docker-reinstall) banner; action_master_docker_reinstall ;;
+  master-uninstall)  banner; action_master_uninstall ;;
   status)            banner; action_status ;;
   agent-info)        banner; action_agent_info ;;
   master-reset-admin) banner; action_master_reset_admin ;;
-  *) echo -e "用法：bash install.sh [menu|agent|agent-reinstall|agent-uninstall|agent-reset-admin|agent-info|master|master-docker|master-reinstall|master-docker-reinstall|master-reset-admin|status]"; exit 1 ;;
+  *) echo -e "用法：bash install.sh [menu|agent|agent-reinstall|agent-uninstall|agent-reset-admin|agent-info|master|master-docker|master-reinstall|master-docker-reinstall|master-uninstall|master-reset-admin|status]"; exit 1 ;;
 esac
