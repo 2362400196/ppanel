@@ -249,7 +249,10 @@ def pull_image(body: PullReq, request: Request = None):
         except docker.errors.APIError as e:
             raise HTTPException(status_code=502, detail=f"拉取失败：{e}")
         if tid:
-            tasks.log(tid, f"镜像层全部就位（{_fmt_size(_image_row(img).get('size') or 0)}）")
+            row = _image_row(img)
+            # row["size"] 已是格式化文本（如 "123.4 MB"），直接使用；
+            # 不能再传回 _fmt_size()（str >= int 会崩），数值用 row["size_bytes"]
+            tasks.log(tid, f"镜像层全部就位（{row.get('size') or ''}）")
             tasks.finish(tid, True, "✔ 拉取完成")
         return {"ok": True, "detail": f"拉取完成", "image": _image_row(img)}
     except Exception as e:  # noqa: BLE001
