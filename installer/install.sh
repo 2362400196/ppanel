@@ -98,6 +98,17 @@ open_port() {  # 防火墙放行端口（有防火墙才操作）
   fi
 }
 
+remove_master_container() {  # 删除主控 Docker 容器；删不掉必须中止——
+  # 若带着存活容器继续删数据卷/仓库，容器会握住幽灵挂载点（SQLite unable to
+  # open database file），且 up -d 会复用旧容器不重建，故障极难排查
+  command -v docker >/dev/null 2>&1 || return 0
+  docker rm -f ppanel-master >/dev/null 2>&1 || true
+  if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "ppanel-master"; then
+    fail "ppanel-master 容器删除失败，已中止（目录未动）。请手动执行 docker rm -f ppanel-master 后重试"
+  fi
+  return 0
+}
+
 # ============================================================
 #  代码获取（主控/被控共用一个仓库：/opt/ppanel）
 # ============================================================
@@ -759,7 +770,7 @@ master_wipe() {  # 主控全新重装清理：systemd 服务 + Docker 容器 + �
   confirm "确认完全清除并重新安装主控？" || { warn "已取消"; return 1; }
   systemctl disable --now "$MASTER_SERVICE" >/dev/null 2>&1 || true
   rm -f "/etc/systemd/system/$MASTER_SERVICE.service"; systemctl daemon-reload
-  command -v docker >/dev/null 2>&1 && docker rm -f ppanel-master >/dev/null 2>&1 || true
+  remove_master_container
   # 同机装有被控时保全其运行环境（.venv/.env 在 agent/ 内，删整个仓库会连带清掉，
   # 导致被控 203/EXEC 崩循环）：先搬走 agent/，清完仓库再搬回并重启
   local AGENT_KEEP=0
@@ -801,7 +812,7 @@ action_master_uninstall() {  # 卸载主控：停用服务/容器，删代码与
   confirm "确认卸载主控？" || { warn "已取消"; return 0; }
   systemctl disable --now "$MASTER_SERVICE" >/dev/null 2>&1 || true
   rm -f "/etc/systemd/system/$MASTER_SERVICE.service"; systemctl daemon-reload
-  command -v docker >/dev/null 2>&1 && docker rm -f ppanel-master >/dev/null 2>&1 || true
+  remove_master_container
   # 代码目录：同机被控保全 agent/ 后清理仓库
   if [ -d "$AGENT_APP" ]; then
     rm -rf /tmp/ppanel-agent-keep
@@ -1107,7 +1118,7 @@ action_agent_reinstall() {  # 全新重装：清除旧安装（含数据）后�
   # 同机主控一并停用并移除（其代码即将被清，不停会留下握着已删文件的半残运行态）
   systemctl disable --now "$MASTER_SERVICE" >/dev/null 2>&1 || true
   rm -f "/etc/systemd/system/$MASTER_SERVICE.service"; systemctl daemon-reload
-  command -v docker >/dev/null 2>&1 && docker rm -f ppanel-master >/dev/null 2>&1 || true
+  remove_master_container
   rm -rf "$SRC_DIR" /data/inst /tmp/ppanel-uv-sync.log
   ok "旧安装已清除"
   switch_mirror
@@ -1134,7 +1145,7 @@ action_agent_uninstall() {
   # 同机主控一并停用（其代码即将被清，不停会留下半残运行态）
   systemctl disable --now "$MASTER_SERVICE" >/dev/null 2>&1 || true
   rm -f "/etc/systemd/system/$MASTER_SERVICE.service"; systemctl daemon-reload
-  command -v docker >/dev/null 2>&1 && docker rm -f ppanel-master >/dev/null 2>&1 || true
+  remove_master_container
   rm -rf "$SRC_DIR" /tmp/ppanel-uv-sync.log
   [ "$RM_DATA" = 1 ] && { rm -rf /data/inst; ok "实例数据已删除"; } || ok "实例数据保留于 /data/inst"
   ok "PPanel 独立面板已卸载"
