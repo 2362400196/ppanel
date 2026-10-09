@@ -131,14 +131,17 @@ def allowed_images(client: docker.DockerClient | None = None) -> list[str]:
 def default_start_cmd(image: str, mem_limit_mb: int | None = None) -> str:
     """新实例默认启动命令：PHP 用内置服务器，-d 注入禁用函数/上传上限/内存限额
     （烧进容器入口，重建不丢）；Node 跑 index.js；Go 先 build 再跑（产物持久）；
-    Python 跑 main.py。"""
+    Python 先自动装 requirements.txt（有则装，幂等；pip 读容器 /etc/pip.conf 的
+    加速源），个别包装失败不阻塞启动，由应用 import 时直观报错。"""
     if runtime_kind(image) == "node":
         return "node index.js"
     if runtime_kind(image) == "go":
         # 无 go.mod 自动 init（零依赖示例可跑）；build 产物 /app/app 持久，重启增量编译秒级
         return "[ -f go.mod ] || go mod init ppanel-app; go build -o app . && ./app"
     if not is_php(image):
-        return "python main.py"
+        return ("if [ -f requirements.txt ]; then echo '[依赖] 检测到 requirements.txt，安装中...'; "
+                "pip install -r requirements.txt --no-input --disable-pip-version-check "
+                "|| echo '[依赖] 部分包安装失败，仍尝试启动'; fi; python main.py")
     parts = ["php"]
     if settings.php_disable_functions.strip():
         parts.append(f"-d disable_functions={settings.php_disable_functions.strip()}")

@@ -132,7 +132,14 @@ async def lifespan(_app):
             db.add(User(username="__agent__",
                         password_hash=hash_password(os.urandom(16).hex()),
                         role="user"))
-            db.commit()
+        db.commit()
+        # 默认启动命令升级：存量 Python 实例若仍是旧默认 "python main.py"（未自定义过），
+        # 升级为带 requirements.txt 自动安装的命令；用户改过的启动命令不动
+        _new_cmd = svc.default_start_cmd("python:3.12")
+        for _it in db.query(Instance).filter(
+                Instance.start_cmd == "python main.py").all():
+            _it.start_cmd = _new_cmd
+        db.commit()
     finally:
         db.close()
     if not settings.node_token:
