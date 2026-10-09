@@ -79,7 +79,7 @@ flowchart TB
 | 术语 | 含义 |
 | --- | --- |
 | 主控 | 中心端整体（管理员面板 + 用户面板），Windows 开发环境跑 8001 |
-| 被控 | `agent_install.sh` 安装的 Agent（9100 端口），管理单台服务器 |
+| 被控 | `installer/install.sh` 安装的 Agent（9100 端口），管理单台服务器 |
 | 独立面板 | 被控上租户使用的自助界面（域名 / SSL / 数据库 / 文件 / 备份） |
 | 节点面板 | 管理员在主控里打开的节点管理弹窗（Docker / SSH 防护等） |
 
@@ -102,7 +102,8 @@ ppanel/
 │   │   │   └── panel_ui/      # 独立面板（租户自助单页应用）
 │   │   ├── scripts/           # agent-wait / restart-agent / dbcheck
 │   │   └── tests/
-│   └── agent_install.sh       # 一键安装（Docker / Caddy / systemd 服务）
+├── installer/
+│   └── install.sh             # 总安装器（菜单/子命令：主控 Docker、被控、升级、重置、状态）
 ├── examples/                  # 示例
 └── docs/                      # 文档
 ```
@@ -119,6 +120,20 @@ ppanel/
 
 ## 快速开始
 
+**一键安装（Linux 服务器，root）**
+
+```bash
+bash <(curl -fsSL https://cdn.jsdelivr.net/gh/2362400196/ppanel@master/installer/install.sh)
+```
+
+海外节点（jsDelivr 不可达时）直连 GitHub：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/2362400196/ppanel/master/installer/install.sh)
+```
+
+菜单选 `[1]` 安装主控（本机直装或 Docker；Docker 模式自动拉取预构建镜像，免本地编译）、`[2]` 安装被控（自动装 Docker / Caddy，注册 9100 端口 systemd 服务）。装完在被控输出里拿到 `NODE_TOKEN`，到主控「节点管理 → 接入节点」填入被控地址与 Token 即可接入。
+
 **主控（开发机）**
 
 ```bash
@@ -129,12 +144,6 @@ uv run run.py            # 默认 http://127.0.0.1:8001
 cd ../frontend
 npm install
 npm run build            # 构建后由后端托管；开发调试可用 npm run dev
-```
-
-**被控（Linux 节点服务器）**
-
-```bash
-bash agent_install.sh    # 安装 Docker / Caddy，注册 ppanel-agent systemd 服务（9100）
 ```
 
 随后在主控「节点管理 → 接入节点」填入被控地址与 Token（与被控 `.env` 中 `NODE_TOKEN` 一致）即可接入。
