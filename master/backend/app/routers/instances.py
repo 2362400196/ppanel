@@ -4,6 +4,7 @@
 """
 import asyncio
 import re
+import secrets
 import time
 import uuid as uuidlib
 from datetime import timedelta
@@ -11,6 +12,7 @@ from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
 from fastapi.responses import Response
+from pydantic import BaseModel
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
@@ -18,9 +20,10 @@ from app import tasks
 from app.agent_client import (_error_detail, agent_json, agent_request,
                               owned_instance, resolve_node)
 from app.auth import Principal, get_principal
-from app.config import default_start_cmd, settings
+from app.config import settings
 from app.database import get_db
-from app.models import (Domain, Instance, Metric, Node, OpLog, User, utcnow)
+from app.models import (Domain, Instance, Metric, Node, OpLog, Order, Plan, User,
+                        utcnow)
 from app.schemas import InstanceCreate, InstanceUpdate, InstallIn
 from app.status_sync import sync_instances_status
 
@@ -47,6 +50,8 @@ def _out(inst: Instance, node: Node | None, extra: dict | None = None) -> dict:
         "created_at": inst.created_at.isoformat() if inst.created_at else None,
         "expire_at": inst.expire_at.isoformat() if inst.expire_at else None,
         "traffic_gb": getattr(inst, "traffic_gb", None),
+        "suspended_at": (inst.suspended_at.isoformat() if getattr(inst, "suspended_at", None) else None),
+        "suspend_reason": getattr(inst, "suspend_reason", "") or "",
         "user_id": inst.user_id,
         "node_id": inst.node_id,
         "node_name": node.name if node else None,
@@ -105,7 +110,7 @@ async def create_instance(body: InstanceCreate, p: Principal = Depends(get_princ
                           db: Session = Depends(get_db), request: Request = None):
     tid = (request.headers.get("x-task-id") if request else "") or ""
     if tid:
-        tasks.start(tid, f"开通实例 {body.name}（{body.image}）")
+        tasks.start(tid, f"开通实例 {body.name}（{body.image}）", owner=p.user_id)
     try:
         if tid:
             tasks.log(tid, "校验镜像与规格…")
@@ -143,7 +148,8 @@ async def create_instance(body: InstanceCreate, p: Principal = Depends(get_princ
             agent_iid=agent_data["id"],
             name=body.name.strip(),
             image=body.image,
-            start_cmd=body.start_cmd.strip() or default_start_cmd(body.image, body.mem_limit),
+            # 空 = 未自定义，由被控按入口文件决定默认命令（main.py 存在与否自动切换/空闲模式）
+            start_cmd=body.start_cmd.strip(),
             ext_port=agent_data.get("ext_port", 0),
             cpu_limit=body.cpu_limit,
             mem_limit=body.mem_limit,
@@ -206,7 +212,7 @@ def delete_instance(instance_uuid: str, p: Principal = Depends(get_principal),
                     db: Session = Depends(get_db), request: Request = None):
     tid = (request.headers.get("x-task-id") if request else "") or ""
     if tid:
-        tasks.start(tid, f"回收实例 {instance_uuid[:8]}…")
+        tasks.start(tid, f"回收实例 {instance_uuid[:8]}…", owner=p.user_id)
     try:
         inst = owned_instance(instance_uuid, p.user_id, p.is_admin, db)
         node = _node_of(db, inst)
@@ -240,11 +246,24 @@ def delete_instance(instance_uuid: str, p: Principal = Depends(get_principal),
 
 def _action(instance_uuid: str, action: str, p: Principal, db: Session) -> dict:
     inst = owned_instance(instance_uuid, p.user_id, p.is_admin, db)
+    if action in ("start", "restart"):
+        now = utcnow()
+        if inst.expire_at and inst.expire_at <= now:
+            raise HTTPException(status_code=403, detail="实例已到期，请先到商城续费")
+        if inst.suspended_at:
+            why = {"expire": "已到期", "traffic": "流量超限", "disk": "磁盘超限"}.get(
+                inst.suspend_reason, inst.suspend_reason or "平台策略")
+            raise HTTPException(status_code=403,
+                                detail=f"实例已被平台暂停（{why}），请处理后联系管理员或续费恢复")
     node = _node_of(db, inst)
     data = agent_json(node, "POST", f"/agent/instances/{inst.agent_iid}/{action}")
     if data.get("status"):
         inst.status = data["status"]
     _oplog(db, action, user_id=p.user_id, instance_uuid=inst.uuid)
+    if action in ("start", "restart"):
+        # 记录"重新拉起"：crash 判定据此区分"用户停机期间"与"启动后又崩"
+        from app.stability import record_event
+        record_event(db, inst, "started", f"user={p.user_id} action={action}")
     if action == "stop":  # 人为停止：供稳定性评分排除崩溃误判
         from app.stability import record_event
         record_event(db, inst, "stopped_planned", f"user={p.user_id}")
@@ -268,6 +287,124 @@ def stop(instance_uuid: str, p: Principal = Depends(get_principal),
 def restart(instance_uuid: str, p: Principal = Depends(get_principal),
             db: Session = Depends(get_db)):
     return _action(instance_uuid, "restart", p, db)
+
+
+@router.post("/instances/{instance_uuid}/reset")
+def reset(instance_uuid: str, p: Principal = Depends(get_principal),
+          db: Session = Depends(get_db)):
+    """一键重置：清空实例全部文件并重建容器，恢复到刚创建的样子（规格/端口/令牌不变）。"""
+    inst = owned_instance(instance_uuid, p.user_id, p.is_admin, db)
+    node = _node_of(db, inst)
+    data = agent_json(node, "POST", f"/agent/instances/{inst.agent_iid}/reset", timeout=180)
+    if data.get("status"):
+        inst.status = data["status"]
+        db.commit()
+    _oplog(db, "reset", user_id=p.user_id, instance_uuid=inst.uuid)
+    return data
+
+
+# ---------- 在线升配（按剩余天数补差价，立即生效） ----------
+
+class UpgradeIn(BaseModel):
+    plan_id: int
+
+
+def _upgrade_price(db: Session, inst: Instance, target) -> int:
+    """补差价 =（目标套餐价 − 当前套餐价）× 剩余天数/30，再乘等级折扣；最低 0。"""
+    from app.routers.rewards import get_cfg, level_of
+    user = db.get(User, inst.user_id)
+    _, pct, _ = level_of(user.level_exp if user else 0, get_cfg(db)["levels"])
+    last = (db.query(Order)
+            .filter(Order.instance_uuid == inst.uuid, Order.plan_id > 0,
+                    Order.kind.in_(("shop", "renew", "upgrade")))
+            .order_by(Order.id.desc()).first())
+    old_price = db.get(Plan, last.plan_id).price_cents if last and db.get(Plan, last.plan_id) else 0
+    remain = 0.0
+    if inst.expire_at:
+        remain = max(0.0, (inst.expire_at - utcnow()).total_seconds() / 86400.0)
+    delta = max(0, target.price_cents - old_price)
+    return int(round(delta * remain / 30.0 * pct / 100.0))
+
+
+@router.get("/instances/{instance_uuid}/upgrade/quote")
+def upgrade_quote(instance_uuid: str, plan_id: int,
+                  p: Principal = Depends(get_principal),
+                  db: Session = Depends(get_db)):
+    """升配询价：返回补差价（按剩余天数折算），供前端展示。"""
+    inst = owned_instance(instance_uuid, p.user_id, p.is_admin, db)
+    target = db.get(Plan, plan_id)
+    if not target or not target.enabled:
+        raise HTTPException(status_code=404, detail="套餐不存在或已下架")
+    return {"charge_cents": _upgrade_price(db, inst, target),
+            "target": {"id": target.id, "name": target.name,
+                       "cpu": target.cpu, "mem": target.mem, "disk": target.disk,
+                       "traffic_gb": target.traffic_gb,
+                       "price_cents": target.price_cents}}
+
+
+@router.post("/instances/{instance_uuid}/upgrade")
+def upgrade_instance(instance_uuid: str, body: UpgradeIn,
+                     p: Principal = Depends(get_principal),
+                     db: Session = Depends(get_db)):
+    """升配：换到更高规格的套餐，按剩余天数补差价（余额扣款），立即重建容器生效。"""
+    inst = owned_instance(instance_uuid, p.user_id, p.is_admin, db)
+    if inst.suspended_at:
+        raise HTTPException(status_code=403,
+                            detail="实例已被平台暂停，请先恢复（续费/清理磁盘）再升配")
+    target = db.get(Plan, body.plan_id)
+    if not target or not target.enabled:
+        raise HTTPException(status_code=404, detail="套餐不存在或已下架")
+    if (target.cpu < inst.cpu_limit or target.mem < inst.mem_limit
+            or target.disk < inst.disk_quota):
+        raise HTTPException(status_code=400,
+                            detail="目标套餐规格需不低于当前规格（暂不支持降配）")
+    if (target.cpu == inst.cpu_limit and target.mem == inst.mem_limit
+            and target.disk == inst.disk_quota):
+        raise HTTPException(status_code=400, detail="当前已是该规格，无需升配")
+
+    charge = _upgrade_price(db, inst, target)
+    user = db.get(User, inst.user_id)
+    if user is None:
+        raise HTTPException(status_code=400, detail="实例归属用户不存在")
+    if user.balance_cents < charge:
+        raise HTTPException(status_code=402,
+                            detail=f"余额不足，需补差价 ¥{charge / 100:.2f}，请先到钱包充值")
+
+    node = _node_of(db, inst)
+    was_running = inst.status == "running"
+    if was_running:
+        try:
+            agent_json(node, "POST", f"/agent/instances/{inst.agent_iid}/stop", timeout=30)
+        except HTTPException:
+            pass  # 可能本来就停着，继续
+    agent_json(node, "PATCH", f"/agent/instances/{inst.agent_iid}",
+               json={"cpu_limit": target.cpu, "mem_limit": target.mem,
+                     "disk_quota": target.disk})
+    if was_running:
+        agent_json(node, "POST", f"/agent/instances/{inst.agent_iid}/start", timeout=60)
+        inst.status = "running"
+    else:
+        inst.status = "exited"
+
+    inst.cpu_limit, inst.mem_limit, inst.disk_quota = target.cpu, target.mem, target.disk
+    if target.traffic_gb:
+        inst.traffic_gb = float(target.traffic_gb)
+    if user.balance_cents >= charge:
+        user.balance_cents -= charge
+    user.points += charge // 100 * 1
+    user.level_exp += charge
+    no = f"UP{int(time.time() * 1000)}{secrets.token_hex(3).upper()}"
+    db.add(Order(out_trade_no=no, user_id=inst.user_id, kind="upgrade", plan_id=target.id,
+                 plan_name=f"升配 {target.name}", amount_cents=charge, status="paid",
+                 paid_at=utcnow(), instance_uuid=inst.uuid))
+    _oplog(db, "upgrade_instance", user_id=p.user_id, instance_uuid=inst.uuid,
+           detail=f"{inst.cpu_limit}C/{inst.mem_limit}M/{inst.disk_quota}M → "
+                  f"{target.cpu}C/{target.mem}M/{target.disk}M 补差 ¥{charge / 100:.2f}")
+    db.commit()
+    return {"detail": "升配成功", "paid_cents": charge,
+            "balance_cents": user.balance_cents,
+            "cpu_limit": inst.cpu_limit, "mem_limit": inst.mem_limit,
+            "disk_quota": inst.disk_quota, "status": inst.status}
 
 
 @router.post("/instances/{instance_uuid}/panel-token")
@@ -325,9 +462,14 @@ def logs(instance_uuid: str, tail: int = 200, p: Principal = Depends(get_princip
 def install_deps(instance_uuid: str, body: InstallIn, p: Principal = Depends(get_principal),
                  db: Session = Depends(get_db)):
     inst = owned_instance(instance_uuid, p.user_id, p.is_admin, db)
-    return agent_json(_node_of(db, inst), "POST",
+    data = agent_json(_node_of(db, inst), "POST",
                       f"/agent/instances/{inst.agent_iid}/deps/install",
                       json={"file": body.file})
+    # 主控留档：依赖安装原先只在被控侧执行，用户端「操作记录」看不到这一步
+    _oplog(db, "install_deps", user_id=p.user_id, instance_uuid=inst.uuid,
+           detail=f"file={body.file}")
+    db.commit()
+    return data
 
 
 # ---------- 文件接口（原样转发，上传经主控中转） ----------

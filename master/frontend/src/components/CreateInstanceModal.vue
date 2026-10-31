@@ -8,6 +8,7 @@ import UIInput from './ui/UIInput.vue'
 import UISelect from './ui/UISelect.vue'
 import UITextarea from './ui/UITextarea.vue'
 import { startTask } from '../api/tasks'
+import { STATUS_TEXT } from '../utils/format'
 
 const props = defineProps({ open: Boolean })
 const emit = defineEmits(['update:open', 'created'])
@@ -77,7 +78,14 @@ async function submit() {
       disk_quota: parseInt(disk.value),
       start_cmd: startCmd.value.trim()
     }, { headers: { 'X-Task-Id': tid } })
-    toastOk(`实例「${data.name}」创建成功，外部端口 ${data.ext_port}`)
+    // 开通即启动：多数情况返回 running；若镜像/启动命令有问题，这里明确告知而不是显示"成功"
+    if (data.status === 'running') {
+      toastOk(`实例「${data.name}」已开通并启动，外部端口 ${data.ext_port}`)
+    } else if (data.status === 'restarting' || data.status === 'exited') {
+      toastErr(`实例已创建，但启动失败（${STATUS_TEXT[data.status] || data.status}），请进入实例查看日志`)
+    } else {
+      toastOk(`实例「${data.name}」创建成功，外部端口 ${data.ext_port}`)
+    }
     emit('update:open', false)
     emit('created', data)
   } catch (e) {

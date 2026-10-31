@@ -43,8 +43,12 @@ async function loadDashboard() {
   } catch { /* 仪表盘数据静默降级 */ }
 }
 
+// running 与 restarting 都属于"容器被拉起"：按钮语义按这个判定，避免崩溃循环时缺失停止入口
+const isUp = (s) => s === 'running' || s === 'restarting'
+
 async function togglePower(inst) {
-  const action = inst.status === 'running' ? 'stop' : 'start'
+  // restarting（崩溃重启循环）也算"在跑"：此时点按钮应该是停下来止损，而不是再启一次
+  const action = isUp(inst.status) ? 'stop' : 'start'
   try {
     await api.post(`/instances/${inst.id}/${action}`)
     toastOk(action === 'start' ? '已启动' : '已停止')
@@ -271,7 +275,7 @@ onUnmounted(() => clearInterval(timer))
     <!-- 实例卡片网格 -->
     <div class="sec-head">
       <h2>我的实例</h2>
-      <span class="sec-sub">每个实例 = 独立容器 + 挂载目录 + 外部端口，点击卡片一键进入独立面板</span>
+      <span class="sec-sub">每个实例 = 独立容器 + 挂载目录 + 外部端口；「管理」进独立面板，「详情」可续费 / 升配 / 重置面板密钥</span>
     </div>
 
     <EmptyState v-if="!loading && !instances.length" text="还没有实例，到商城选购套餐即可开通" />
@@ -305,8 +309,11 @@ onUnmounted(() => clearInterval(timer))
         </div>
         <div class="foot" @click.stop>
           <UIButton type="primary" :loading="openingId === inst.id" @click="openPanel(inst)">管理</UIButton>
+          <router-link :to="`/instances/${inst.id}`" class="detail-link">
+            <UIButton type="ghost">详情</UIButton>
+          </router-link>
           <div class="foot-right">
-            <UIButton v-if="inst.status === 'running'" type="ghost" @click="togglePower(inst)">停止</UIButton>
+            <UIButton v-if="isUp(inst.status)" type="ghost" @click="togglePower(inst)">停止</UIButton>
             <UIButton v-else :disabled="inst.status === 'creating'" @click="togglePower(inst)">启动</UIButton>
             <UIButton type="text" class="danger" @click="delTarget = inst; delOpen = true">删除</UIButton>
           </div>
@@ -401,7 +408,8 @@ onUnmounted(() => clearInterval(timer))
 .port { color: var(--primary-strong); font-weight: 700; font-size: 14px; }
 .expire-cell { display: inline-flex; align-items: center; gap: 6px; }
 .mini-tag { transform: scale(.88); }
-.foot { display: flex; justify-content: space-between; align-items: center; border-top: 1px solid var(--line); padding-top: 12px; }
+.foot { display: flex; justify-content: space-between; align-items: center; border-top: 1px solid var(--line); padding-top: 12px; gap: 6px; }
+.foot .detail-link { text-decoration: none; }
 .foot-right { display: flex; gap: 4px; align-items: center; }
 
 .fade-enter-active, .fade-leave-active { transition: all .25s ease; }

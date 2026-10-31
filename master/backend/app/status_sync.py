@@ -50,10 +50,12 @@ def sync_instances_status(db: Session) -> None:
             if row.get("status") and row["status"] != inst.status:
                 old = inst.status
                 inst.status = row["status"]
-                # 非人为 running→exited 视为崩溃（主动 stop 由 instances 接口记 planned 事件）
-                if old == "running" and row["status"] == "exited":
+                # 非人为进入异常状态视为崩溃（主动 stop 由 instances 接口记 planned 事件）。
+                # restarting 是容器在崩溃重启循环里：服务已不可用，必须记为崩溃，
+                # 否则实例反复崩、面板却一直绿灯。
+                if old in ("running", "restarting") and row["status"] in ("exited", "restarting"):
                     from app.stability import record_event
-                    record_event(db, inst, "crash", "被控回报实例退出")
+                    record_event(db, inst, "crash", f"被控回报实例状态 {row['status']}")
                 dirty = True
             if row.get("ext_port") and row["ext_port"] != inst.ext_port:
                 inst.ext_port = row["ext_port"]

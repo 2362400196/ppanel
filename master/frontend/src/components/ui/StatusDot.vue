@@ -19,6 +19,8 @@ defineProps({ status: String })
 .s-exited span { color: var(--text-dim); }
 .s-creating .dot { background: var(--warn); animation: pulse 1.2s ease-in-out infinite; }
 .s-creating span { color: #a9701c; }
+.s-restarting .dot { background: #e5484d; animation: pulse 1.2s ease-in-out infinite; }
+.s-restarting span { color: #c2373b; font-weight: 600; }
 .s-created .dot { background: var(--primary); }
 @keyframes pulse { 50% { opacity: .35; } }
 </style>

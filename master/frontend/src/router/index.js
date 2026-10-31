@@ -86,6 +86,16 @@ const routes = [
     meta: { admin: true }
   },
   {
+    path: '/system',
+    redirect: '/nodes' // 系统运维已并入「节点管理 → 节点面板 → 系统运维」
+  },
+  {
+    path: '/alerts',
+    name: 'alerts',
+    component: () => import('../views/AlertsView.vue'),
+    meta: { admin: true }
+  },
+  {
     path: '/backup',
     name: 'backup',
     component: () => import('../views/BackupCenterView.vue'),

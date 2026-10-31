@@ -8,12 +8,12 @@ import UIInput from '../components/ui/UIInput.vue'
 import UITag from '../components/ui/UITag.vue'
 import UIModal from '../components/ui/UIModal.vue'
 import ConfirmDialog from '../components/ui/ConfirmDialog.vue'
-import { startTask } from '../api/tasks'
 
 const router = useRouter()
 const buying = ref('')
 const plans = ref([])
 const loading = ref(true)
+const provisioning = ref('')  // 正在开通的商品名：非空时显示全屏转圈
 
 onMounted(async () => {
   try {
@@ -96,6 +96,7 @@ async function checkCoupon() {
 
 async function buy(plan, coupon = '') {
   buying.value = plan.id
+  provisioning.value = plan.name
   try {
     const { data: st } = await api.get('/pay/status')
     if (!st.enabled) { await directOpen(plan); return }  // 未启用支付：免费直接开通
@@ -109,6 +110,7 @@ async function buy(plan, coupon = '') {
     else toastErr(errText(e))
   } finally {
     buying.value = ''
+    provisioning.value = ''
   }
 }
 
@@ -118,7 +120,6 @@ function goWallet() {
 }
 
 async function directOpen(plan) {
-  const tid = startTask()  // 开通实例全程终端日志
   try {
     const suffix = Math.random().toString(36).slice(2, 6)
     const expire = new Date(Date.now() + plan.days * 86400000).toISOString()
@@ -131,7 +132,7 @@ async function directOpen(plan) {
       expire_at: expire,
       traffic_gb: plan.traffic_gb || null,  // 月流量限额，0=不限
       node_id: plan.node_id || undefined,  // 商品绑定节点则在该节点开通
-    }, { headers: { 'X-Task-Id': tid } })
+    })
     toastOk(`已开通「${data.name}」，有效期 ${plan.days} 天`)
     router.push('/instances')
   } finally {
@@ -230,6 +231,15 @@ async function directOpen(plan) {
     <ConfirmDialog v-model:open="rcOpen" title="余额不足"
                    message="钱包余额不够支付本商品，是否前往钱包充值？"
                    confirm-text="去充值" @confirm="goWallet" />
+
+    <!-- 开通中：全屏转圈（不再显示终端日志） -->
+    <div v-if="provisioning" class="prov-mask">
+      <div class="prov-box">
+        <span class="prov-spinner"></span>
+        <p class="prov-title">正在开通「{{ provisioning }}」</p>
+        <p class="prov-sub text-dim">正在创建容器与独立面板，通常需要十几秒，请勿关闭页面…</p>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -298,4 +308,25 @@ async function directOpen(plan) {
 }
 .dt-pay b { font-size: 16px; color: var(--primary-strong); }
 .dt-pay.err { color: var(--danger, #e5484d); font-size: 12.5px; justify-content: flex-start; }
+
+/* 开通中全屏转圈 */
+.prov-mask {
+  position: fixed; inset: 0; z-index: 1000;
+  background: color-mix(in srgb, var(--bg, #f7f8f9) 70%, transparent);
+  backdrop-filter: blur(3px);
+  display: flex; align-items: center; justify-content: center;
+}
+.prov-box {
+  display: flex; flex-direction: column; align-items: center; gap: 12px;
+  padding: 34px 44px; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 16px; box-shadow: var(--shadow-lg);
+}
+.prov-spinner {
+  width: 34px; height: 34px; border-radius: 50%;
+  border: 3px solid var(--line); border-top-color: var(--primary);
+  animation: prov-spin .8s linear infinite;
+}
+@keyframes prov-spin { to { transform: rotate(360deg); } }
+.prov-title { margin: 0; font-size: 14.5px; font-weight: 700; }
+.prov-sub { margin: 0; font-size: 12px; }
 </style>

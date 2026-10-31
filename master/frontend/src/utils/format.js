@@ -20,6 +20,7 @@ export const STATUS_TEXT = {
   creating: '创建中',
   created: '已创建',
   running: '运行中',
+  restarting: '崩溃重启中',
   exited: '已停止'
 }
 
@@ -27,5 +28,6 @@ export const STATUS_TONE = {
   creating: 'warn',
   created: 'dim',
   running: 'ok',
+  restarting: 'bad',
   exited: 'dim'
 }

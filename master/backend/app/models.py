@@ -44,7 +44,7 @@ class Instance(Base):
     agent_iid: Mapped[int] = mapped_column(Integer, index=True)  # 被控本地实例 ID
     name: Mapped[str] = mapped_column(String(64))
     image: Mapped[str] = mapped_column(String(128))
-    start_cmd: Mapped[str] = mapped_column(String(512), default="python main.py")
+    start_cmd: Mapped[str] = mapped_column(String(512), default="")  # 空 = 平台默认（按入口文件判断）
     ext_port: Mapped[int] = mapped_column(Integer, default=0)
     cpu_limit: Mapped[float] = mapped_column(Float, default=1.0)
     mem_limit: Mapped[int] = mapped_column(Integer, default=512)      # MB
@@ -56,6 +56,10 @@ class Instance(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     expire_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     traffic_gb: Mapped[float | None] = mapped_column(Float, nullable=True)  # 月流量限额 GB，空=不限
+    # 到期/超限被平台暂停的时间（续费或管理员恢复时清空；空=未被平台暂停）
+    suspended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 暂停原因：expire（到期）/ traffic（流量超限）/ disk（磁盘超限），空=未暂停
+    suspend_reason: Mapped[str] = mapped_column(String(16), default="")
 
 
 class OpLog(Base):
@@ -243,3 +247,51 @@ class Order(Base):
     instance_uuid: Mapped[str | None] = mapped_column(String(36), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
     paid_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class Notice(Base):
+    """站内信：到期提醒 / 暂停通知 / 额度告警等，面向实例归属用户。
+
+    去重交给写入方（每类通知自带周期性 dedup 判断），模型只负责存取。"""
+    __tablename__ = "notices"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True)
+    instance_uuid: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    level: Mapped[str] = mapped_column(String(16), default="info")  # info/warning/critical
+    title: Mapped[str] = mapped_column(String(128))
+    content: Mapped[str] = mapped_column(Text, default="")
+    read_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+
+
+class Alert(Base):
+    """告警事件：同一 dedup_key 同时只保留一条未恢复记录，避免重复轰炸。
+
+    status: firing（触发中）/ acked（人工确认，仍未恢复）/ resolved（已恢复）
+    dedup_key 不设唯一约束：恢复后再次触发需要新开一条记录，
+    历史才能追溯（唯一约束会让第二次触发撞 INSERT 而整轮回滚）。
+    """
+    __tablename__ = "alerts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    dedup_key: Mapped[str] = mapped_column(String(120), index=True)
+    rule: Mapped[str] = mapped_column(String(32), index=True)      # node_offline / disk_high ...
+    level: Mapped[str] = mapped_column(String(16), default="warning", index=True)  # info/warning/critical
+    scope: Mapped[str] = mapped_column(String(16), default="node")  # node / instance / platform
+    node_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    node_name: Mapped[str] = mapped_column(String(64), default="")
+    instance_uuid: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    instance_name: Mapped[str] = mapped_column(String(64), default="")
+    title: Mapped[str] = mapped_column(String(128), default="")
+    detail: Mapped[str] = mapped_column(Text, default="")
+    value: Mapped[float | None] = mapped_column(Float, nullable=True)       # 触发时的实测值
+    threshold: Mapped[float | None] = mapped_column(Float, nullable=True)   # 对应阈值
+    status: Mapped[str] = mapped_column(String(16), default="firing", index=True)
+    fired_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    notified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    notify_count: Mapped[int] = mapped_column(Integer, default=0)
+    acked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    acked_by: Mapped[str] = mapped_column(String(64), default="")

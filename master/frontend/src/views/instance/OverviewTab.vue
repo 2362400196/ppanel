@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { api, errText } from '../../api/client'
 import { toastErr, toastOk } from '../../components/ui/toast'
 import UIButton from '../../components/ui/UIButton.vue'
+import ConfirmDialog from '../../components/ui/ConfirmDialog.vue'
 
 const props = defineProps({ instance: Object })
 const emit = defineEmits(['changed'])
@@ -20,7 +21,13 @@ async function loadStats() {
     stats.value = await api.get(`/instances/${props.instance.id}/stats`).then(r => r.data)
   } catch { stats.value = null }
 }
-onMounted(() => { loadStats(); timer = setInterval(loadStats, 15000) })
+onMounted(() => {
+  loadStats()
+  // 幂等获取面板令牌（reset=0：有则原样返回，无则新建），
+  // 保证「复制链接 / 重置令牌 / 打开面板」常驻可见，而不是只在当次会话生成后才出现
+  issuePanelToken(false, true)
+  timer = setInterval(loadStats, 15000)
+})
 onUnmounted(() => clearInterval(timer))
 
 const pct = (used, limit) => (!limit ? 0 : Math.min(100, used / limit * 100))
@@ -45,19 +52,26 @@ const meters = computed(() => {
   return list
 })
 
-async function issuePanelToken(reset) {
+async function issuePanelToken(reset, silent = false) {
   panelBusy.value = true
   try {
     const { data } = await api.post(`/instances/${props.instance.id}/panel-token?reset=${reset ? 1 : 0}`)
     panelToken.value = data.panel_token
     panelUrl.value = data.panel_url
-    toastOk(reset ? '面板令牌已重置，旧链接立即失效' : '面板令牌已生成')
+    if (!silent) toastOk(reset ? '面板令牌已重置，旧链接立即失效' : '面板令牌已生成')
     emit('changed')
   } catch (e) {
-    toastErr(errText(e))
+    if (!silent) toastErr(errText(e))
   } finally {
     panelBusy.value = false
   }
+}
+
+// 重置面板密钥：旧一键登录链接立即失效（二次确认后执行）
+const resetOpen = ref(false)
+async function doReset() {
+  resetOpen.value = false
+  await issuePanelToken(true)
 }
 
 async function copyPanelLink() {
@@ -94,23 +108,33 @@ async function copyPanelLink() {
         <span class="tip">容器操作全部在独立面板完成，主控只负责开通与发令牌</span>
       </div>
       <p class="hint" style="margin-bottom:12px">
-        生成面板令牌后，把一键登录链接发给使用者，即可在浏览器中独立管理这个容器：
-        启停重启、文件管理、实时日志、依赖安装、启动命令——无需登录主控，也可脱离主控单独使用。
+        面板密钥（令牌）= 进入独立面板的一键登录凭证：把链接发给使用者，即可在浏览器中独立管理这个容器：
+        启停重启、文件管理、实时日志、依赖安装、启动命令——无需登录主控，也可脱离主控单独使用。泄露时可在下方一键重置。
       </p>
       <template v-if="panelToken">
         <div class="p-link mono">{{ panelUrl }}?t={{ panelToken.slice(0, 6) }}****</div>
         <div class="panel-btns">
           <UIButton size="sm" @click="copyPanelLink">复制一键登录链接</UIButton>
-          <UIButton size="sm" type="ghost" :loading="panelBusy" @click="issuePanelToken(true)">重置令牌</UIButton>
+          <UIButton size="sm" type="ghost" @click="resetOpen = true">重置面板密钥</UIButton>
           <a :href="`${panelUrl}?t=${panelToken}`" target="_blank">
             <UIButton size="sm" type="ghost">打开面板</UIButton>
           </a>
         </div>
       </template>
       <template v-else>
-        <UIButton size="sm" :loading="panelBusy" @click="issuePanelToken(false)">生成面板令牌</UIButton>
+        <p v-if="panelBusy" class="hint">正在获取面板令牌…</p>
+        <UIButton v-else size="sm" @click="issuePanelToken(false)">生成面板令牌</UIButton>
       </template>
     </div>
+
+    <ConfirmDialog
+      v-model:open="resetOpen"
+      title="重置面板密钥"
+      message="重置后，旧的一键登录链接将立即失效，需要把新链接重新发给使用者。确定重置吗？"
+      confirm-text="重置"
+      danger
+      @confirm="doReset"
+    />
   </div>
 </template>
 

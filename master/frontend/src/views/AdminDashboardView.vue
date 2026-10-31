@@ -14,7 +14,7 @@ const nodes = ref([])
 const runningCount = computed(() => instances.value.filter(i => i.status === 'running').length)
 const onlineNodes = computed(() => nodes.value.filter(n => n.online).length)
 const statusDist = computed(() => {
-  const c = { running: 0, stopped: 0, exited: 0, creating: 0 }
+  const c = { running: 0, stopped: 0, exited: 0, creating: 0, restarting: 0 }
   instances.value.forEach(i => { c[i.status] = (c[i.status] || 0) + 1 })
   return c
 })
@@ -22,6 +22,7 @@ const distTotal = computed(() => instances.value.length || 1)
 const distSegs = computed(() => [
   { key: 'running', label: '运行中', color: '#2fb59f', n: statusDist.value.running },
   { key: 'stopped', label: '已停止', color: '#8a94a0', n: statusDist.value.stopped },
+  { key: 'restarting', label: '崩溃重启', color: '#b32b2f', n: statusDist.value.restarting },
   { key: 'exited', label: '异常退出', color: '#e5484d', n: statusDist.value.exited },
   { key: 'creating', label: '创建中', color: '#f59e0b', n: statusDist.value.creating }
 ].filter(s => s.n > 0))

@@ -45,3 +45,36 @@ def create_user(body: UserCreate, db: Session = Depends(get_db)):
 @router.get("/admin/images")
 def admin_images():
     return settings.all_images
+
+
+@router.get("/admin/images/status")
+def admin_images_status(db: Session = Depends(get_db)):
+    """平台镜像在各节点的就绪状态：管理员上架商品前提前拉取用。
+
+    返回 platform_images（全局白名单）+ nodes[]（每节点每镜像 pulled/size），
+    节点不可达时该节点 images 置 pulled=None 并带 error。"""
+    import httpx
+
+    from app.agent_client import agent_url
+    from app.models import Node
+
+    wanted = list(settings.all_images)
+    nodes = db.query(Node).filter(Node.enabled.is_(True)).all()
+    out = []
+    for n in nodes:
+        items, err = [], ""
+        try:
+            r = httpx.get(agent_url(n, "/agent/docker/images"),
+                          headers={"X-Node-Token": n.token}, timeout=10)
+            r.raise_for_status()
+            local = {i.get("full_name"): i.get("size", "") for i in r.json()
+                     if isinstance(i, dict)}
+            for img in wanted:
+                items.append({"image": img, "pulled": img in local,
+                              "size": local.get(img, "")})
+        except Exception as e:  # 节点离线不阻塞其它节点
+            err = str(e) or "节点不可达"
+            items = [{"image": img, "pulled": None, "size": ""} for img in wanted]
+        out.append({"node_id": n.id, "node_name": n.name or f"节点#{n.id}",
+                    "ok": not err, "error": err, "images": items})
+    return {"platform_images": wanted, "nodes": out}

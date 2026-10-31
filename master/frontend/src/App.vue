@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from './stores/auth'
+import { api } from './api/client'
 import ToastHost from './components/ui/ToastHost.vue'
 import TaskTerminal from './components/TaskTerminal.vue'
 import UITag from './components/ui/UITag.vue'
@@ -12,11 +13,63 @@ const router = useRouter()
 const auth = useAuthStore()
 const bare = computed(() => route.meta.bare)
 
+// 侧边栏「告警中心」未处理数量徽标：每分钟刷新一次，失败静默
+const alertCount = ref(0)
+let alertTimer = null
+
+async function loadAlertCount() {
+  if (!auth.isAdmin) {
+    alertCount.value = 0
+    return
+  }
+  try {
+    const { data } = await api.get('/admin/alerts/summary')
+    alertCount.value = data.total || 0
+  } catch {
+    alertCount.value = 0
+  }
+}
+watch(() => auth.isAdmin, loadAlertCount)
+
 // 右上角用户下拉：点外部/切页自动收起
 const menuOpen = ref(false)
 function onDocClick() { menuOpen.value = false }
-onMounted(() => document.addEventListener('click', onDocClick))
-onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
+
+// ---------- 站内信（到期提醒 / 暂停通知 / 额度告警） ----------
+const noticeOpen = ref(false)
+const notices = ref([])
+const unreadCount = computed(() => notices.value.filter(n => !n.read).length)
+
+async function loadNotices() {
+  if (!auth.user) return
+  try {
+    const { data } = await api.get('/notices?limit=20')
+    notices.value = data
+  } catch { /* 静默：通知拉取失败不打扰 */ }
+}
+
+async function readOne(n) {
+  if (n.read) return
+  try { await api.post(`/notices/${n.id}/read`); n.read = true } catch { /* 静默 */ }
+}
+
+async function readAll() {
+  try {
+    await api.post('/notices/read-all')
+    notices.value.forEach(n => { n.read = true })
+  } catch { /* 静默 */ }
+}
+
+onMounted(() => {
+  document.addEventListener('click', onDocClick)
+  loadAlertCount()
+  loadNotices()
+  alertTimer = setInterval(() => { loadAlertCount(); loadNotices() }, 60000)
+})
+onBeforeUnmount(() => {
+  document.removeEventListener('click', onDocClick)
+  if (alertTimer) clearInterval(alertTimer)
+})
 watch(() => route.fullPath, () => { menuOpen.value = false })
 
 function logout() {
@@ -80,6 +133,11 @@ function logout() {
             <svg class="nav-icon" viewBox="0 0 24 24"><circle cx="18" cy="5" r="3" /><circle cx="6" cy="12" r="3" /><circle cx="18" cy="19" r="3" /><line x1="8.6" y1="10.5" x2="15.4" y2="6.5" /><line x1="8.6" y1="13.5" x2="15.4" y2="17.5" /></svg>
             <span>节点管理</span>
           </router-link>
+          <router-link to="/alerts" class="nav-item" :class="{ active: route.name === 'alerts' }">
+            <svg class="nav-icon" viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" /><path d="M13.7 21a2 2 0 0 1-3.4 0" /></svg>
+            <span>告警中心</span>
+            <span v-if="alertCount" class="nav-badge">{{ alertCount > 99 ? '99+' : alertCount }}</span>
+          </router-link>
           <router-link to="/backup" class="nav-item" :class="{ active: route.name === 'backup' }">
             <svg class="nav-icon" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3" /><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5" /><path d="M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6" /></svg>
             <span>备份中心</span>
@@ -125,8 +183,32 @@ function logout() {
     </aside>
 
     <main class="main">
-      <header class="topbar" v-if="auth.user" @click="menuOpen = false">
+      <header class="topbar" v-if="auth.user" @click="noticeOpen = false; menuOpen = false">
         <div class="top-right" @click.stop>
+          <!-- 站内信铃铛 -->
+          <div class="bell-wrap">
+            <button class="bell-btn" :class="{ open: noticeOpen }" @click="noticeOpen = !noticeOpen" title="通知">
+              <svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" /><path d="M13.7 21a2 2 0 0 1-3.4 0" /></svg>
+              <span v-if="unreadCount" class="bell-badge">{{ unreadCount > 9 ? '9+' : unreadCount }}</span>
+            </button>
+            <Transition name="dd">
+              <div class="notice-dd" v-if="noticeOpen">
+                <div class="notice-head">
+                  <span>通知</span>
+                  <button v-if="unreadCount" class="notice-readall" @click="readAll">全部已读</button>
+                </div>
+                <div class="notice-list">
+                  <button v-for="n in notices" :key="n.id" class="notice-item"
+                          :class="[n.level, { unread: !n.read }]" @click="readOne(n)">
+                    <span class="notice-title">{{ n.title }}</span>
+                    <span class="notice-content">{{ n.content }}</span>
+                    <span class="notice-time">{{ (n.created_at || '').slice(0, 16).replace('T', ' ') }}</span>
+                  </button>
+                  <div v-if="!notices.length" class="notice-empty">暂无通知</div>
+                </div>
+              </div>
+            </Transition>
+          </div>
           <button class="user-chip" :class="{ open: menuOpen }" @click="menuOpen = !menuOpen">
             <span class="avatar">{{ auth.user.username.slice(0, 1).toUpperCase() }}</span>
             <span class="chip-name">{{ auth.user.username }}</span>
@@ -190,11 +272,67 @@ function logout() {
   fill: none; stroke: currentColor; stroke-width: 1.8;
   stroke-linecap: round; stroke-linejoin: round;
 }
+.nav-badge {
+  margin-left: auto; min-width: 18px; height: 18px; padding: 0 5px;
+  border-radius: 9px; background: var(--danger); color: #fff;
+  font-size: 11px; font-weight: 500; line-height: 18px; text-align: center;
+}
 
 .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
 .main-body { flex: 1; overflow-y: auto; padding: 28px 32px; }
 
 /* 顶栏：右上角用户区 */
+/* 站内信铃铛 */
+.bell-wrap { position: relative; }
+.bell-btn {
+  position: relative; width: 33px; height: 33px; border-radius: 999px;
+  border: 1px solid var(--line); background: var(--panel); cursor: pointer;
+  display: flex; align-items: center; justify-content: center; transition: all .18s ease;
+  box-shadow: var(--shadow);
+}
+.bell-btn svg { width: 15px; height: 15px; fill: none; stroke: var(--text-2); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.bell-btn:hover, .bell-btn.open { background: var(--primary-soft-2); border-color: var(--primary); }
+.bell-btn:hover svg, .bell-btn.open svg { stroke: var(--primary-strong); }
+.bell-badge {
+  position: absolute; top: -4px; right: -4px; min-width: 16px; height: 16px; padding: 0 4px;
+  border-radius: 8px; background: var(--danger); color: #fff;
+  font-size: 10px; font-weight: 600; line-height: 16px; text-align: center;
+}
+.notice-dd {
+  position: absolute; right: 0; top: calc(100% + 7px); width: 330px;
+  border: 1px solid var(--line); border-radius: 12px; overflow: hidden;
+  background: var(--panel); box-shadow: var(--shadow-lg); z-index: 60;
+}
+.notice-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 9px 12px; border-bottom: 1px solid var(--line);
+  font-size: 12.5px; font-weight: 700; color: var(--text);
+}
+.notice-readall {
+  border: none; background: transparent; cursor: pointer; font-family: inherit;
+  color: var(--primary-strong); font-size: 12px; font-weight: 600;
+}
+.notice-list { max-height: 340px; overflow-y: auto; }
+.notice-item {
+  display: flex; flex-direction: column; gap: 3px; width: 100%; text-align: left;
+  padding: 9px 12px; border: none; border-bottom: 1px solid var(--line);
+  background: transparent; cursor: pointer; font-family: inherit;
+}
+.notice-item:last-child { border-bottom: none; }
+.notice-item:hover { background: var(--primary-soft); }
+.notice-item.unread { background: color-mix(in srgb, var(--primary-soft) 45%, transparent); }
+.notice-item.unread .notice-title::before {
+  content: ''; display: inline-block; width: 6px; height: 6px; border-radius: 3px;
+  background: var(--primary); margin-right: 6px; vertical-align: 2px;
+}
+.notice-item.critical.unread .notice-title::before { background: var(--danger); }
+.notice-title { font-size: 12.5px; font-weight: 600; color: var(--text); }
+.notice-content {
+  font-size: 11.5px; color: var(--text-2); line-height: 1.5;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.notice-time { font-size: 10.5px; color: var(--text-dim); }
+.notice-empty { padding: 26px 0; text-align: center; font-size: 12px; color: var(--text-dim); }
 .avatar {
   width: 24px; height: 24px; border-radius: 50%; flex-shrink: 0;
   background: var(--primary-soft); color: var(--primary-strong);
@@ -206,7 +344,7 @@ function logout() {
   background: color-mix(in srgb, var(--panel) 82%, transparent);
   backdrop-filter: blur(10px); position: relative; z-index: 40;
 }
-.top-right { position: relative; }
+.top-right { position: relative; display: flex; align-items: center; gap: 10px; }
 .user-chip {
   display: flex; align-items: center; gap: 7px; height: 33px; padding: 0 10px;
   border: 1px solid var(--line); border-radius: 999px; cursor: pointer;

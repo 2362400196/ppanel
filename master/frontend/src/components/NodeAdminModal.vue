@@ -13,6 +13,7 @@ import StatusDot from './ui/StatusDot.vue'
 import ConfirmDialog from './ui/ConfirmDialog.vue'
 import CodeEditor from './CodeEditor.vue'
 import HostTerminal from './HostTerminal.vue'
+import NodeSysOps from './NodeSysOps.vue'
 import { startTask } from '../api/tasks'
 
 // 节点管理面板：一个大模态框聚合节点级运维能力（概览/容器/镜像/文件/终端）
@@ -214,6 +215,59 @@ async function doPull() {
   } catch (e) { toastErr(errText(e)) }
   finally { pullLoading.value = false }
 }
+
+// ---------- 平台镜像就绪度（上架商品前提前拉取，用户开通即用） ----------
+const platformImages = ref([])
+const platformPulling = ref(false)
+async function loadPlatformImages() {
+  try { platformImages.value = (await api.get('/admin/images')).data }
+  catch { /* 平台镜像白名单加载失败静默 */ }
+}
+const platformRows = computed(() => platformImages.value.map(img => {
+  const hit = images.value.find(i => i.full_name === img)
+  return { image: img, pulled: !!hit, size: hit?.size || '' }
+}))
+const platformMissing = computed(() => platformRows.value.filter(r => !r.pulled).map(r => r.image))
+// 下拉选择单个镜像：查看状态 / 单独拉取
+const platSel = ref('')
+const platPullingOne = ref(false)
+const platSelRow = computed(() => platformRows.value.find(r => r.image === platSel.value))
+const platOpts = computed(() => platformRows.value.map(r => ({
+  value: r.image,
+  label: r.pulled ? `${r.image}（已就绪 ${r.size}）` : `${r.image}（未拉取）`,
+})))
+async function pullOnePlatform() {
+  const row = platSelRow.value
+  if (!row || row.pulled || platPullingOne.value) return
+  platPullingOne.value = true
+  try {
+    const tid = startTask(props.node?.id)
+    await api.post('/docker/images/pull', { image: row.image },
+      { params: np(), timeout: 600000, headers: { 'X-Task-Id': tid } })
+    toastOk(`拉取完成：${row.image}`)
+    loadImages()
+    loadInfo()
+  } catch (e) { toastErr(`拉取 ${row.image} 失败：${errText(e)}`) }
+  finally { platPullingOne.value = false }
+}
+async function pullAllPlatform() {
+  if (platformPulling.value || !platformMissing.value.length) return
+  platformPulling.value = true
+  const missing = [...platformMissing.value]
+  try {
+    for (const image of missing) {
+      try {
+        const tid = startTask(props.node?.id)
+        await api.post('/docker/images/pull', { image },
+          { params: np(), timeout: 600000, headers: { 'X-Task-Id': tid } })
+      } catch (e) { toastErr(`拉取 ${image} 失败：${errText(e)}`) }
+    }
+    toastOk('平台镜像已全部就绪，可正常上架售卖')
+    loadImages()
+    loadInfo()
+  } finally { platformPulling.value = false }
+}
+loadPlatformImages()
 
 // 清理悬空镜像
 const pruning = ref(false)
@@ -827,6 +881,7 @@ const navs = [
   { key: 'terminal', label: '宿主机终端' },
   { key: 'firewall', label: '防火墙' },
   { key: 'sec', label: 'SSH 防护' },
+  { key: 'sysops', label: '系统运维' },
   { key: 'mysql', label: 'MySQL 服务' },
   { key: 'backup', label: '备份' },
   { key: 'settings', label: '设置' }
@@ -1522,6 +1577,28 @@ onUnmounted(() => {
 
         <!-- 镜像 -->
         <div v-else-if="view === 'images'">
+          <!-- 平台镜像就绪度：上架商品前建议全部拉取 -->
+          <div v-if="platformImages.length" class="plat-box">
+            <div class="bar plat-bar">
+              <span class="hint-text"><b>平台镜像</b>（商品可选的运行环境）·
+                {{ platformRows.filter(r => r.pulled).length }}/{{ platformRows.length }} 已就绪</span>
+              <span class="sp" />
+              <UIButton v-if="platformMissing.length" type="ghost"
+                        :loading="platformPulling"
+                        @click="pullAllPlatform">一键拉取缺失 {{ platformMissing.length }} 个</UIButton>
+              <UITag v-else tone="ok">全部就绪</UITag>
+            </div>
+            <div class="plat-row">
+              <UISelect v-model="platSel" class="plat-sel" :options="platOpts"
+                        placeholder="选择平台镜像查看状态 / 拉取" />
+              <template v-if="platSelRow">
+                <UITag v-if="platSelRow.pulled" tone="ok">✓ {{ platSelRow.size }}</UITag>
+                <UITag v-else tone="warn">未拉取</UITag>
+                <UIButton v-if="!platSelRow.pulled" size="sm" :loading="platPullingOne"
+                          @click="pullOnePlatform">拉取此镜像</UIButton>
+              </template>
+            </div>
+          </div>
           <div class="bar">
             <span class="hint-text">共 {{ images.length }} 个镜像</span>
             <span class="sp" />
@@ -1764,6 +1841,11 @@ onUnmounted(() => {
             启用要求镜像已拉取（绝不自动拉取；mysql:5.7 无 ARM64 版本，树莓派节点不可用）。
             停用时需先清空该版本下所有实例数据库；数据卷默认保留，勾选「同时删除数据卷」才彻底清除。
           </p>
+        </div>
+
+        <!-- 系统运维：整机负载 / 进程 / 服务 / 端口 / 日志 / 登录审计 -->
+        <div v-else-if="view === 'sysops'">
+          <NodeSysOps :node-id="node?.id" />
         </div>
 
         <!-- 备份：容器导出 / 实例数据库导出 -->
@@ -2467,4 +2549,10 @@ tr[data-kind='file'] .f-svg { color: var(--text-2); }
 .sec-ban-ip { display: inline-flex; align-items: center; gap: 8px; color: #d98a7c; background: rgba(217, 138, 124, .1); border: 1px solid rgba(217, 138, 124, .28); border-radius: 9px; padding: 4px 6px 4px 10px; font-size: 13px; }
 .sec-ban-ip i { cursor: pointer; font-style: normal; font-weight: 700; width: 18px; height: 18px; line-height: 17px; text-align: center; border-radius: 50%; }
 .sec-ban-ip i:hover { background: rgba(217, 138, 124, .25); }
+
+/* 平台镜像就绪度 */
+.plat-box { border: 1px dashed var(--line, rgba(255,255,255,.1)); border-radius: 12px; padding: 12px 14px; margin-bottom: 12px; }
+.plat-bar { margin-bottom: 10px; }
+.plat-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.plat-sel { width: 360px; }
 </style>

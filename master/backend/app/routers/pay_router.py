@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 from app import wxpay_service
 from app.agent_client import agent_json, resolve_node
 from app.auth import Principal, get_principal, require_admin
-from app.config import default_start_cmd, env_display_name
+from app.config import env_display_name
 from app.database import get_db
 from app.models import (Coupon, CouponUse, Instance, OpLog, Order, Plan, User,
                         utcnow)
@@ -194,7 +194,7 @@ def _provision(db: Session, plan: Plan, user_id: int) -> Instance:
     inst = Instance(
         uuid=str(uuidlib.uuid4()), user_id=user_id, node_id=node.id,
         agent_iid=agent_data["id"], name=env_name, image=image,
-        start_cmd=default_start_cmd(image, plan.mem),
+        start_cmd="",  # 空 = 平台默认，由被控按入口文件判断
         ext_port=agent_data.get("ext_port", 0),
         cpu_limit=plan.cpu, mem_limit=plan.mem, disk_quota=plan.disk,
         status=agent_data.get("status", "created"),
@@ -268,6 +268,93 @@ def shop_buy(body: BuyIn, p: Principal = Depends(get_principal),
             "discount_pct": pct, "coupon_cut_cents": cut or 0,
             "points_earned": earned,
             "expire_at": inst.expire_at.isoformat() if inst.expire_at else None}
+
+
+# ---------- 用户：续费 ----------
+
+class RenewIn(BaseModel):
+    instance_uuid: str
+    plan_id: int           # 续费用哪个套餐（决定价格与天数）
+    coupon_code: str = ""
+
+
+@router.post("/shop/renew")
+def shop_renew(body: RenewIn, p: Principal = Depends(get_principal),
+               db: Session = Depends(get_db)):
+    """续费：按所选套餐价格扣余额，延长到期时间（从当前到期时间顺延，已到期从现在起算）。
+
+    因到期被平台暂停的实例，续费成功后自动恢复运行；流量/磁盘超限暂停的不在此恢复。
+    """
+    from app.routers.rewards import get_cfg, level_of
+    inst = (db.query(Instance).filter(Instance.uuid == body.instance_uuid,
+                                      Instance.user_id == p.user_id).first())
+    if not inst:
+        raise HTTPException(status_code=404, detail="实例不存在")
+    plan = db.get(Plan, body.plan_id)
+    if not plan or not plan.enabled:
+        raise HTTPException(status_code=404, detail="套餐不存在或已下架")
+    if not inst.expire_at:
+        raise HTTPException(status_code=400, detail="该实例无到期时间（长期有效），无需续费")
+    user = db.get(User, p.user_id)
+
+    cfg = get_cfg(db)
+    _, pct, _ = level_of(user.level_exp, cfg["levels"])
+    pay = plan.price_cents * pct // 100
+
+    coupon = cut = None
+    if body.coupon_code.strip():
+        code = body.coupon_code.strip().upper()
+        coupon = db.query(Coupon).filter(Coupon.code == code).first()
+        if not coupon:
+            raise HTTPException(status_code=404, detail="优惠券码不存在")
+        from app.routers.rewards import _valid
+        if err := _valid(coupon):
+            raise HTTPException(status_code=400, detail=err)
+        if plan.price_cents < coupon.min_spend_cents:
+            raise HTTPException(status_code=400,
+                                detail=f"未达优惠券使用门槛（需满 ¥{coupon.min_spend_cents / 100:.0f}）")
+        cut = min(coupon.amount_cents, pay)
+        pay = max(0, pay - cut)
+
+    if user.balance_cents < pay:
+        need = (pay - user.balance_cents) / 100
+        raise HTTPException(status_code=402,
+                            detail=f"余额不足，还差 ¥{need:.2f}，请先到钱包充值")
+
+    base = inst.expire_at if inst.expire_at > utcnow() else utcnow()
+    inst.expire_at = base + timedelta(days=plan.days)
+    resumed = False
+    if inst.suspended_at and inst.suspend_reason == "expire":
+        node = resolve_node(inst.node_id, db)
+        try:
+            agent_json(node, "POST", f"/agent/instances/{inst.agent_iid}/start", timeout=30)
+            inst.status = "running"
+            resumed = True
+        except Exception:  # noqa: BLE001 拉起失败不影响续费入账，可手动再启动
+            pass
+        inst.suspended_at = None
+        inst.suspend_reason = ""
+
+    earned = pay // 100 * cfg["earn_per_yuan"]
+    user.balance_cents -= pay
+    user.points += earned
+    user.level_exp += pay
+    no = f"RN{int(time.time() * 1000)}{secrets.token_hex(3).upper()}"
+    if coupon is not None and cut:
+        coupon.used += 1
+        db.add(CouponUse(coupon_id=coupon.id, user_id=p.user_id, order_no=no,
+                         amount_cents=cut))
+    db.add(Order(out_trade_no=no, user_id=p.user_id, kind="renew", plan_id=plan.id,
+                 plan_name=f"续费 {plan.name}", amount_cents=pay, status="paid",
+                 paid_at=utcnow(), instance_uuid=inst.uuid))
+    db.add(OpLog(user_id=p.user_id, instance_uuid=inst.uuid, action="renew",
+                 detail=f"套餐 {plan.name} ¥{pay / 100:.2f} 续至 {inst.expire_at:%Y-%m-%d %H:%M}"
+                        + (" 已自动恢复运行" if resumed else "")))
+    db.commit()
+    return {"detail": "续费成功", "expire_at": inst.expire_at.isoformat(),
+            "balance_cents": user.balance_cents, "paid_cents": pay,
+            "points_earned": earned, "resumed": resumed,
+            "status": inst.status}
 
 
 # ---------- 管理员：流水 ----------

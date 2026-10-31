@@ -37,9 +37,18 @@ def record_event(db: Session, inst: Instance, event: str, detail: str = "") -> N
                        .filter(InstanceEvent.instance_uuid == inst.uuid,
                                InstanceEvent.event == "stopped_planned",
                                InstanceEvent.ts >= ts - timedelta(seconds=CRASH_DEDUP_SEC + 300))
+                       .order_by(InstanceEvent.ts.desc())
                        .first())
         if recent_stop:
-            return
+            # 只有"停完之后没有再启动"才算人为停机；用户 stop→start 后再次崩溃
+            # 仍然是真崩溃（否则手动重启一次就永远记不上崩溃）
+            restarted = (db.query(InstanceEvent)
+                         .filter(InstanceEvent.instance_uuid == inst.uuid,
+                                 InstanceEvent.event == "started",
+                                 InstanceEvent.ts > recent_stop.ts)
+                         .first())
+            if restarted is None:
+                return
         dup = (db.query(InstanceEvent)
                .filter(InstanceEvent.instance_uuid == inst.uuid,
                        InstanceEvent.event == "crash",
@@ -54,11 +63,21 @@ def record_event(db: Session, inst: Instance, event: str, detail: str = "") -> N
 # ---------- 心跳循环 ----------
 
 def heartbeat_loop():
-    """每 60s 对所有启用节点 ping + 采样资源水位；滚动清理旧数据。"""
+    """每 60s 对所有启用节点 ping + 采样资源水位；随后跑一轮告警检测。
+
+    告警检测放在心跳落库之后：此时各节点的可达性、资源水位、异常摘要
+    都已写入库，检测只需查库，无需重新打被控。
+    """
+    from app.alerts import run_round  # 局部导入，避免模块级循环依赖
+
     while True:
         try:
             _beat_once()
         except Exception:  # noqa: BLE001
+            pass
+        try:
+            run_round()
+        except Exception:  # noqa: BLE001 告警异常绝不影响心跳主流程
             pass
         time.sleep(60)
 

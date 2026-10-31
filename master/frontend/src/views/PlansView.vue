@@ -9,6 +9,7 @@ import UIModal from '../components/ui/UIModal.vue'
 import UIInput from '../components/ui/UIInput.vue'
 import UISelect from '../components/ui/UISelect.vue'
 import ConfirmDialog from '../components/ui/ConfirmDialog.vue'
+import { startTask } from '../api/tasks'
 
 const plans = ref([])
 const nodes = ref([])
@@ -110,6 +111,10 @@ async function savePlan() {
       toastOk('商品已创建')
     }
     planEditOpen.value = false
+    if (missingNodes.value.length) {
+      toastOk(`商品已保存，正在提前拉取镜像（${missingNodes.value.map(m => m.node_name).join('、')}）…`)
+      ensureImagesPulled()
+    }
     loadPlans()
   } catch (e) {
     toastErr(errText(e))
@@ -143,7 +148,65 @@ onMounted(() => {
   loadPlans()
   loadNodes()
   loadImages()
+  loadImgStatus()
 })
+
+// ---------- 镜像就绪度（提前拉取，避免用户开通时等待） ----------
+const imgStatus = ref([])   // [{node_id, node_name, ok, error, images:[{image,pulled,size}]}]
+const pullingImg = ref(false)
+
+async function loadImgStatus() {
+  try { imgStatus.value = (await api.get('/admin/images/status')).data.nodes }
+  catch { /* 就绪度查询失败静默，不阻塞商品管理 */ }
+}
+
+// 返回所选镜像在某节点的就绪状态：true / false / null（不可达或未知）
+function nodeReady(nodeId) {
+  const img = planForm.value.image
+  const n = imgStatus.value.find(x => x.node_id === nodeId)
+  const hit = n && img && n.images.find(i => i.image === img)
+  return hit ? hit.pulled : null
+}
+
+const missingNodes = computed(() => {
+  const img = planForm.value.image
+  if (!img) return []
+  return imgStatus.value
+    .filter(n => n.images.some(i => i.image === img && i.pulled === false))
+    .map(n => ({ node_id: n.node_id, node_name: n.node_name }))
+})
+
+async function pullImageOn(nodeId) {
+  if (pullingImg.value) return
+  pullingImg.value = true
+  const img = planForm.value.image
+  try {
+    const tid = startTask(nodeId)
+    await api.post('/docker/images/pull', { image: img },
+      { params: { node: nodeId }, timeout: 600000, headers: { 'X-Task-Id': tid } })
+    toastOk(`镜像已在「${nodeMap.value[nodeId] || ('节点#' + nodeId)}」就绪`)
+    loadImgStatus()
+  } catch (e) { toastErr(errText(e)) }
+  finally { pullingImg.value = false }
+}
+
+// 保存商品后把缺失镜像在各节点提前拉好（任务终端实时展示进度）
+function ensureImagesPulled() {
+  const img = planForm.value.image
+  const missing = missingNodes.value
+  if (!img || !missing.length) return
+  ;(async () => {
+    for (const m of missing) {
+      try {
+        const tid = startTask(m.node_id)
+        await api.post('/docker/images/pull', { image: img },
+          { params: { node: m.node_id }, timeout: 600000, headers: { 'X-Task-Id': tid } })
+      } catch (e) { toastErr(`节点「${m.node_name}」拉取镜像失败：${errText(e)}`) }
+    }
+    toastOk(`镜像 ${img} 已提前拉取完成，用户开通即用`)
+    loadImgStatus()
+  })()
+}
 </script>
 
 <template>
@@ -227,6 +290,19 @@ onMounted(() => {
             />
           </label>
         </div>
+        <!-- 镜像就绪度：未拉取可一键提前拉取，用户开通时免等待 -->
+        <div v-if="planForm.image && nodes.length" class="img-ready">
+          <span class="ir-label">镜像就绪：</span>
+          <span v-for="n in nodes" :key="n.id" class="ir-chip">
+            {{ n.name }}
+            <b v-if="nodeReady(n.id) === true" class="ok">已就绪</b>
+            <template v-else-if="nodeReady(n.id) === false">
+              <b class="warn">未拉取</b>
+              <UIButton size="sm" type="ghost" :loading="pullingImg" @click="pullImageOn(n.id)">立即拉取</UIButton>
+            </template>
+            <b v-else class="dim">节点不可达</b>
+          </span>
+        </div>
         <div class="row2 row4">
           <label class="field">
             <span>有效期（天）</span>
@@ -271,4 +347,17 @@ onMounted(() => {
 .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .row2.row3 { grid-template-columns: 1fr 1fr 1fr; }
 .row2.row4 { grid-template-columns: 1fr 1fr 1fr 1fr; }
+
+/* 镜像就绪度 */
+.img-ready { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.ir-label { font-size: 12px; color: var(--text-dim); }
+.ir-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; padding: 3px 10px; border-radius: 999px;
+  background: var(--bg-2, #f2f4f5); border: 1px solid var(--line);
+}
+.ir-chip b { font-weight: 600; }
+.ir-chip b.ok { color: var(--primary-strong, #0b7a5c); }
+.ir-chip b.warn { color: #b45309; }
+.ir-chip b.dim { color: var(--text-dim); font-weight: 400; }
 </style>

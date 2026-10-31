@@ -106,6 +106,18 @@ class Settings:
     metrics_interval_seconds: int = field(default_factory=lambda: _env_int("METRICS_INTERVAL_SECONDS", 60))
     metrics_retention_hours: int = field(default_factory=lambda: _env_int("METRICS_RETENTION_HOURS", 24))
 
+    # ---------- 售卖生命周期（到期状态机 / 额度执行） ----------
+    # 到期后动作：suspend=停机保数据（面板只读）；off=只提醒不动容器
+    expire_action: str = field(default_factory=lambda: _env("EXPIRE_ACTION", "suspend"))
+    # 到期后宽限天数：期内可续费恢复，超过则删除回收（0=永不删除）
+    expire_grace_days: int = field(default_factory=lambda: _env_int("EXPIRE_GRACE_DAYS", 7))
+    # 到期前提醒天数（逗号分隔）
+    expire_remind_days: str = field(default_factory=lambda: _env("EXPIRE_REMIND_DAYS", "7,3,1"))
+    # 流量超限动作：stop=停机（可续费/买流量后恢复）；warn=只提醒
+    traffic_action: str = field(default_factory=lambda: _env("TRAFFIC_ACTION", "stop"))
+    # 磁盘超限动作：stop=停机；warn=只提醒（磁盘统计在被控，每分钟巡检）
+    disk_action: str = field(default_factory=lambda: _env("DISK_ACTION", "stop"))
+
 
 def _env_float(key: str, default: float) -> float:
     try:
@@ -126,16 +138,16 @@ def env_display_name(image: str) -> str:
 
 
 def default_start_cmd(image: str, mem_limit_mb: int | None = None) -> str:
-    """与被控一致的默认启动命令（空 start_cmd 时兜底，PHP 注入安全参数）。"""
-    if not (image or "").startswith("php:"):
-        return "python main.py"
-    parts = ["php"]
-    if settings.php_disable_functions.strip():
-        parts.append(f"-d disable_functions={settings.php_disable_functions.strip()}")
-    upload = 50  # 与被控 UPLOAD_LIMIT_MB 默认一致
-    parts.append(f"-d upload_max_filesize={upload}M")
-    parts.append(f"-d post_max_size={upload + 16}M")
-    if mem_limit_mb:
-        parts.append(f"-d memory_limit={int(mem_limit_mb)}M")
-    parts.append("-S 0.0.0.0:8000 -t /app")
-    return " ".join(parts)
+    """与被控一致的默认启动命令（空 start_cmd 时兜底）。
+
+    各运行时都是一行干净命令：依赖安装/运行参数由被控容器入口自动完成
+    （Python=requirements.txt 自举，PHP=禁用函数/上传/内存由入口动态注入）。
+    """
+    img = image or ""
+    if img.startswith("node:"):
+        return "node index.js"
+    if img.startswith("golang:"):
+        return "[ -f go.mod ] || go mod init ppanel-app; go build -o app . && ./app"
+    if img.startswith("php:"):
+        return "php -S 0.0.0.0:8000 -t /app"
+    return "python main.py"

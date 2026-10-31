@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.agent_client import agent_json, resolve_node
 from app.auth import hash_password
-from app.config import default_start_cmd, settings
+from app.config import settings
 from app.database import get_db
 from app.models import Instance, Node, OpLog, User
 from app.schemas import OpenInstanceCreate, OpenRenew
@@ -80,7 +80,7 @@ def open_create(body: OpenInstanceCreate, db: Session = Depends(get_db)):
         agent_iid=agent_data["id"],
         name=body.name.strip(),
         image=body.image,
-        start_cmd=body.start_cmd.strip() or default_start_cmd(body.image, body.mem_limit),
+        start_cmd=body.start_cmd.strip(),  # 空 = 平台默认，由被控按入口文件判断
         ext_port=agent_data.get("ext_port", 0),
         cpu_limit=body.cpu_limit,
         mem_limit=body.mem_limit,
