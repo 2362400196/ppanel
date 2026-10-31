@@ -6,7 +6,8 @@
 *.sqlite
 *.sqlite3
 *.sql.gz
-
+# ai
+.workbuddy/
 # Python
 __pycache__/
 *.pyc
@@ -22,3 +23,5 @@ dist/
 
 # Docker 离线包（72MB，走 Release 附件分发，不入 git 树）
 installer/docker-*.tgz
+# 旧构建产物备份
+master/frontend/dist-old*/

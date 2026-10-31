@@ -9,6 +9,9 @@ wheels/
 # Virtual environments
 .venv
 
+# Rust 构建产物（target 体积可达数 GB，禁止入库）
+target/
+
 # 运行数据与本地配置
 data/
 .env

@@ -5,6 +5,7 @@
 #  一个脚本管好主控 + 被控（交互菜单选择，或子命令免交互）：
 #    bash install.sh                   -> 菜单
 #    bash install.sh agent             -> 独立面板安装/升级（被控节点）
+#    bash install.sh agent-rs          -> 独立面板（Rust 预编译二进制，可原地替换 Python 版）
 #    bash install.sh agent-reinstall   -> 被控全新重装（清数据）
 #    bash install.sh agent-uninstall   -> 被控卸载
 #    bash install.sh agent-reset-admin -> 被控重置管理员
@@ -14,6 +15,10 @@
 #
 #  环境变量：SRC_DIR=/opt/ppanel  REPO_URL=...  MASTER_PORT=8001  PORT=9100
 #            PYPI_MIRROR=...  NPM_REGISTRY=...
+#            PPANEL_AGENT_IMPL=rust|python|auto   被控实现（默认 python；auto=有本地包则 rust）
+#            AGENT_RS_DIR=/opt/ppanel-agent       Rust 版安装目录
+#            AGENT_RS_TARBALL=/path/x.tar.gz      本地离线包（跳过网络下载）
+#            AGENT_RS_TAG=v1.0                    Release 标签
 # ============================================================
 set -euo pipefail
 
@@ -30,9 +35,15 @@ MASTER_DIR="$SRC_DIR/master"
 MASTER_BACKEND="$MASTER_DIR/backend"
 MASTER_FRONTEND="$MASTER_DIR/frontend"
 
-AGENT_SERVICE="ppanel-agent"
+AGENT_SERVICE="${AGENT_SERVICE:-ppanel-agent}"
 AGENT_APP="$SRC_DIR/agent/backend"
 AGENT_PORT="${PORT:-9100}"
+
+# 被控实现：rust（预编译二进制）/ python（源码 + venv）。空 = 自动（有发布包用 rust，否则 python）
+AGENT_IMPL="${PPANEL_AGENT_IMPL:-auto}"
+AGENT_RS_DIR="${AGENT_RS_DIR:-/opt/ppanel-agent}"   # Rust 版安装目录，与源码树解耦
+AGENT_RS_TAG="${AGENT_RS_TAG:-v1.0}"                # Release 标签（二进制附件所在版本）
+AGENT_RS_TARBALL="${AGENT_RS_TARBALL:-}"            # 本地离线包路径，设置后跳过下载
 
 # 颜色用 $'...' 定义为真实 ESC 字节：read -rp 的提示符不解析 \033 转义，字面定义会在确认提示里打出乱码
 c_g=$'\033[0;32m'; c_c=$'\033[0;36m'; c_y=$'\033[0;33m'; c_r=$'\033[0;31m'; c_dim=$'\033[2m'; c_b=$'\033[1m'; c_off=$'\033[0m'
@@ -1061,11 +1072,7 @@ EOF
   sleep 2
   systemctl is-active --quiet "$AGENT_SERVICE" || fail "服务启动失败：journalctl -u $AGENT_SERVICE -n 50"
 
-  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
-    ufw allow "$AGENT_PORT/tcp" >/dev/null 2>&1 && ok "ufw 已放行 $AGENT_PORT"
-  elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
-    firewall-cmd --permanent --add-port="$AGENT_PORT/tcp" >/dev/null 2>&1 && firewall-cmd --reload >/dev/null 2>&1 && ok "firewalld 已放行 $AGENT_PORT"
-  fi
+  agent_open_port
 }
 
 agent_summary() {
@@ -1096,8 +1103,242 @@ prune_for_agent() {  # 装完被控后移除仓库里用不到的主控/安装�
   [ -d "$SRC_DIR/installer" ] && rm -rf "$SRC_DIR/installer" && ok "已移除安装器目录"
 }
 
+# ============================================================
+#  Rust 版被控：预编译二进制部署（静态 musl，无需 Python/工具链）
+#  与 Python 版共存约定：同一 systemd 单元、同一 .env、同一 SQLite 库，
+#  因此切换实现只是一次「换二进制 + 重启」，实例数据（/data/inst）不受影响。
+# ============================================================
+agent_rs_arch() {
+  case "$(uname -m)" in
+    x86_64|amd64)  echo amd64 ;;
+    aarch64|arm64) echo arm64 ;;
+    *) return 1 ;;
+  esac
+}
+
+agent_rs_pick_local() {  # 本地离线包（脚本同目录 / 常见目录），输出路径；无则空
+  local name="$1" sdir cand
+  sdir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  for cand in "$AGENT_RS_TARBALL" "$sdir/$name" "/opt/ppanel/$name" "/tmp/$name" "/root/$name"; do
+    [ -n "$cand" ] || continue
+    if [ -s "$cand" ]; then echo "$cand"; return 0; fi
+  done
+  return 0
+}
+
+agent_rs_try_dl() {  # $1=base url $2=asset 名；成功则 /tmp/ppanel-agent-rs.tar.gz 就绪
+  local base="$1" name="$2" want got
+  curl -fL --max-time 180 --retry 1 -o /tmp/ppanel-agent-rs.tar.gz "$base/$name" 2>/dev/null \
+    && [ -s /tmp/ppanel-agent-rs.tar.gz ] || return 1
+  # 有 SHA256SUMS 就校验，没有也放行（首次发布可能只传 tarball）
+  if curl -fL --max-time 30 -o /tmp/ppanel-agent-rs.sums "$base/SHA256SUMS" 2>/dev/null \
+     && [ -s /tmp/ppanel-agent-rs.sums ]; then
+    want=$(awk -v n="$name" '$2==n || $2=="./"n {print $1}' /tmp/ppanel-agent-rs.sums | head -1)
+    if [ -n "$want" ]; then
+      got=$(sha256sum /tmp/ppanel-agent-rs.tar.gz | awk '{print $1}')
+      if [ "$want" != "$got" ]; then
+        warn "sha256 不匹配（期望 ${want:0:12}… 实际 ${got:0:12}…），换源重试"
+        return 1
+      fi
+      ok "sha256 校验通过"
+    fi
+  fi
+  return 0
+}
+
+agent_rs_fetch() {  # $1=local|net；成功导出 RS_TGZ
+  local mode="${1:-net}" arch name sdir gitee github base
+  arch=$(agent_rs_arch) || { warn "不支持的架构：$(uname -m)"; return 1; }
+  name="ppanel-agent-linux-$arch.tar.gz"
+  RS_TGZ=$(agent_rs_pick_local "$name")
+  if [ -n "$RS_TGZ" ]; then ok "使用本地离线包：$RS_TGZ"; return 0; fi
+  if [ "$mode" = "local" ]; then return 1; fi
+
+  gitee="https://gitee.com/zhuxiaohuaqn/ppanel/releases/download/$AGENT_RS_TAG"
+  github="https://github.com/2362400196/ppanel/releases/download/$AGENT_RS_TAG"
+  for base in "$gitee" "$github" "https://ghfast.top/$github" "https://gh-proxy.com/$github"; do
+    info "下载 $name"
+    info "  $base"
+    if agent_rs_try_dl "$base" "$name"; then RS_TGZ=/tmp/ppanel-agent-rs.tar.gz; return 0; fi
+  done
+  return 1
+}
+
+agent_open_port() {  # 放行被控端口（有防火墙才操作）
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+    ufw allow "$AGENT_PORT/tcp" >/dev/null 2>&1 && ok "ufw 已放行 $AGENT_PORT"
+  elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+    firewall-cmd --permanent --add-port="$AGENT_PORT/tcp" >/dev/null 2>&1 && firewall-cmd --reload >/dev/null 2>&1 && ok "firewalld 已放行 $AGENT_PORT"
+  fi
+}
+
+agent_rs_install() {  # 成功返回 0；无二进制可用返回 1（由调用方决定是否回落 Python）
+  local mode="${1:-net}" arch tmpd legacy_env legacy_db db_abs i healthy=0
+
+  step "1/5 检查环境"
+  arch=$(agent_rs_arch) || { warn "不支持的架构：$(uname -m)，Rust 版暂无对应二进制"; return 1; }
+  pkg_install curl ca-certificates
+  ok "$(uname -m) 对应发布包 ppanel-agent-linux-$arch.tar.gz"
+
+  step "2/5 获取预编译二进制"
+  if ! agent_rs_fetch "$mode"; then
+    warn "预编译包不可用（Release 未发布或网络不可达）"
+    return 1
+  fi
+
+  step "3/5 安装到 $AGENT_RS_DIR"
+  tmpd=$(mktemp -d /tmp/ppanel-agent-rs.XXXXXX)
+  if ! tar xzf "$RS_TGZ" -C "$tmpd" || [ ! -f "$tmpd/ppanel-agent" ]; then
+    warn "包内容异常（缺少 ppanel-agent）"
+    rm -rf "$tmpd"; return 1
+  fi
+  install -d -m 0755 "$AGENT_RS_DIR"
+  install -m 0755 "$tmpd/ppanel-agent" "$AGENT_RS_DIR/ppanel-agent"
+  rm -rf "$AGENT_RS_DIR/app/panel_ui"
+  if [ -d "$tmpd/app/panel_ui" ]; then
+    mkdir -p "$AGENT_RS_DIR/app"
+    cp -r "$tmpd/app/panel_ui" "$AGENT_RS_DIR/app/panel_ui"
+    ok "面板资源已就位（$(du -sh "$AGENT_RS_DIR/app/panel_ui" 2>/dev/null | awk '{print $1}')）"
+  else
+    warn "包内无 app/panel_ui，独立面板页面将不可用"
+  fi
+  [ -f "$tmpd/VERSION" ] && cp "$tmpd/VERSION" "$AGENT_RS_DIR/VERSION"
+  rm -rf "$tmpd"
+  [ "$RS_TGZ" = "/tmp/ppanel-agent-rs.tar.gz" ] && rm -f "$RS_TGZ" /tmp/ppanel-agent-rs.sums
+  ok "二进制已安装：$AGENT_RS_DIR/ppanel-agent（$(du -h "$AGENT_RS_DIR/ppanel-agent" | awk '{print $1}')）"
+
+  step "4/5 配置（复用现有 .env 与数据库）"
+  mkdir -p "$AGENT_RS_DIR/data" /data/inst
+  legacy_env="$AGENT_APP/.env"
+  legacy_db="$AGENT_APP/data/ppanel.db"
+  if [ -f "$AGENT_RS_DIR/.env" ]; then
+    ok "沿用现有配置：$AGENT_RS_DIR/.env"
+  elif [ -f "$legacy_env" ]; then
+    cp "$legacy_env" "$AGENT_RS_DIR/.env"
+    ok "复用 Python 版配置：$legacy_env（Token / 密钥不变，主控无需重接）"
+  else
+    { printf '# PPanel 被控配置（Rust 版，由 install.sh 生成）\nDATA_ROOT=/data/inst\n\n'
+      printf 'ADMIN_USERNAME=admin\n'
+      printf 'ADMIN_PASSWORD=%s\n\n' "$(openssl rand -base64 18 2>/dev/null || head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 14)"
+      printf 'JWT_SECRET=%s\n\n' "$(openssl rand -hex 24 2>/dev/null || head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+      printf '# 节点令牌：主控「节点管理」添加节点时填入\n'
+      printf 'NODE_TOKEN=ppnode_%s\n' "$(openssl rand -hex 16 2>/dev/null || head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    } > "$AGENT_RS_DIR/.env"
+    ok "已生成新配置（管理员密码随机化，不展示）"
+  fi
+  NODE_TOKEN=$(grep -E '^NODE_TOKEN=' "$AGENT_RS_DIR/.env" | head -1 | cut -d= -f2-)
+  [ -n "$NODE_TOKEN" ] || fail "配置缺少 NODE_TOKEN：$AGENT_RS_DIR/.env"
+
+  # 数据库：优先沿用已存在的库（Python 版建的），保证实例记录不断档
+  # 注意 URL 斜杠数量：绝对路径必须写 sqlite:////opt/...（四斜杠），
+  # 三斜杠会被 SQLAlchemy / sqlx 当成相对路径，症状是「实例全部消失」却无报错
+  db_abs=""
+  if grep -qE '^DB_URL=' "$AGENT_RS_DIR/.env"; then
+    db_abs=$(grep -E '^DB_URL=' "$AGENT_RS_DIR/.env" | head -1 | cut -d= -f2-)
+    db_abs="${db_abs#sqlite:///}"          # 四斜杠 -> /opt/...；三斜杠 -> opt/...
+    case "$db_abs" in
+      /*) ;;
+      *) db_abs="$AGENT_RS_DIR/$db_abs" ;;
+    esac
+  fi
+  if [ -z "$db_abs" ] || [ ! -f "$db_abs" ]; then
+    if [ -f "$legacy_db" ]; then
+      db_abs="$legacy_db"
+      ok "复用现有数据库：$db_abs（实例记录不丢，回滚 Python 版亦可用）"
+    else
+      db_abs="$AGENT_RS_DIR/data/ppanel.db"
+      ok "新建数据库：$db_abs"
+    fi
+  else
+    ok "沿用已配置数据库：$db_abs"
+  fi
+  if grep -qE '^DB_URL=' "$AGENT_RS_DIR/.env"; then
+    sed -i "s|^DB_URL=.*|DB_URL=sqlite:///$db_abs|" "$AGENT_RS_DIR/.env"
+  else
+    printf '\n# SQLite 库（与 Python 版表结构完全一致，可互换使用）\nDB_URL=sqlite:///%s\n' "$db_abs" >> "$AGENT_RS_DIR/.env"
+  fi
+  ok "DB_URL=sqlite:///$db_abs"
+
+  step "5/5 注册服务并启动"
+  if [ -f "/etc/systemd/system/$AGENT_SERVICE.service" ]; then
+    MODE_UPGRADE=1
+    info "已有 $AGENT_SERVICE，将原地替换启动方式"
+  else
+    MODE_UPGRADE=0
+  fi
+  cat > "/etc/systemd/system/$AGENT_SERVICE.service" <<EOF
+[Unit]
+Description=PPanel Agent (Rust, standalone panel + docker node agent)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=$AGENT_RS_DIR
+ExecStart=$AGENT_RS_DIR/ppanel-agent
+Environment=PPANEL_UI_DIR=$AGENT_RS_DIR/app/panel_ui
+Environment=AGENT_PORT=$AGENT_PORT
+Restart=on-failure
+RestartSec=3
+# 大量并发上传/下载与容器 exec 需要较高 fd 上限
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  systemctl enable "$AGENT_SERVICE" >/dev/null 2>&1 || true
+  systemctl restart "$AGENT_SERVICE"
+  for i in $(seq 1 15); do
+    if curl -fsS --max-time 2 "http://127.0.0.1:$AGENT_PORT/health" >/dev/null 2>&1; then healthy=1; break; fi
+    sleep 1
+  done
+  if [ "$healthy" = 1 ]; then
+    ok "服务已启动，健康检查通过（127.0.0.1:$AGENT_PORT/health）"
+  else
+    systemctl is-active --quiet "$AGENT_SERVICE" \
+      || fail "服务启动失败：journalctl -u $AGENT_SERVICE -n 50"
+    warn "服务进程存在但 /health 未响应，请查看：journalctl -u $AGENT_SERVICE -n 50"
+  fi
+  agent_open_port
+  return 0
+}
+
+agent_rs_summary() {
+  local IP VERSION_LINE
+  IP=$(hostname -I 2>/dev/null | awk '{print $1}'); [ -n "$IP" ] || IP="<服务器IP>"
+  VERSION_LINE=$(head -1 "$AGENT_RS_DIR/VERSION" 2>/dev/null || echo "Rust 版")
+  echo ""
+  if [ "${MODE_UPGRADE:-0}" = 1 ]; then
+    echo -e "  ${c_g}${c_b}━━━━━━━━━━━ 升 级 完 成（Rust） ━━━━━━━━━━━${c_off}"
+  else
+    echo -e "  ${c_g}${c_b}━━━━━━━━━━━ 安 装 完 成（Rust） ━━━━━━━━━━━${c_off}"
+  fi
+  echo -e "  独立面板  ${c_b}http://$IP:$AGENT_PORT/panel${c_off}"
+  echo -e "  实现      ${c_b}Rust 静态二进制${c_off} ${c_dim}（$VERSION_LINE）${c_off}"
+  echo -e "  安装目录  $AGENT_RS_DIR"
+  echo -e "  节点Token ${c_b}$NODE_TOKEN${c_off}"
+  echo -e "  ${c_dim}─────────────────────────────────────────────${c_off}"
+  echo -e "  下一步    主控「节点管理」→ 添加节点 → 填入上方 Token 与节点地址"
+  echo -e "  常用      systemctl restart $AGENT_SERVICE · journalctl -u $AGENT_SERVICE -f"
+  echo -e "  提醒      云服务器请在控制台安全组放行 TCP $AGENT_PORT"
+  echo -e "  ${c_g}${c_b}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c_off}"
+}
+
 action_agent() {
   detect_env
+  case "$AGENT_IMPL" in
+    rust)
+      if agent_rs_install net; then agent_rs_summary; return 0; fi
+      warn "Rust 版不可用，回退 Python 版安装"
+      ;;
+    auto)
+      # 自动模式只看本地是否有离线包，不发起网络探测（避免每次安装都等超时）
+      if agent_rs_install local; then agent_rs_summary; return 0; fi
+      ;;
+    python|"") ;;
+    *) fail "PPANEL_AGENT_IMPL 取值应为 rust / python / auto（当前：$AGENT_IMPL）" ;;
+  esac
   switch_mirror
   agent_install_base
   install_docker
@@ -1147,27 +1388,77 @@ action_agent_uninstall() {
   rm -f "/etc/systemd/system/$MASTER_SERVICE.service"; systemctl daemon-reload
   remove_master_container
   rm -rf "$SRC_DIR" /tmp/ppanel-uv-sync.log
+  if [ -d "$AGENT_RS_DIR" ]; then
+    rm -rf "$AGENT_RS_DIR" && ok "已移除 Rust 版被控目录 $AGENT_RS_DIR"
+  fi
   [ "$RM_DATA" = 1 ] && { rm -rf /data/inst; ok "实例数据已删除"; } || ok "实例数据保留于 /data/inst"
   ok "PPanel 独立面板已卸载"
 }
 
 action_agent_reset_admin() {
-  [ -f "$AGENT_APP/data/ppanel.db" ] || fail "未找到数据库（$AGENT_APP/data/ppanel.db）"
+  local DB PY
+  DB=$(agent_db_path)
+  [ -f "$DB" ] || fail "未找到数据库（$DB）"
   confirm "删除内置管理员并按 .env 随机密码重建？" || { warn "已取消"; return 0; }
-  "$AGENT_APP/.venv/bin/python" - <<PYEOF
-import sqlite3
-c = sqlite3.connect("$AGENT_APP/data/ppanel.db")
+  if command -v python3 >/dev/null 2>&1; then PY=python3
+  elif [ -x "$AGENT_APP/.venv/bin/python" ]; then PY="$AGENT_APP/.venv/bin/python"
+  else fail "需要 python3 写库"
+  fi
+  "$PY" - "$DB" <<'PYEOF'
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1])
 c.execute("DELETE FROM users WHERE username='admin'")
 c.commit()
 print("  管理员已删除")
 PYEOF
   systemctl restart "$AGENT_SERVICE"
-  ok "已重建（随机密码见 $AGENT_APP/.env 的 ADMIN_PASSWORD）"
+  ok "已重建（随机密码见 $(agent_env_file) 的 ADMIN_PASSWORD）"
 }
 
 # ============================================================
 #  状态
 # ============================================================
+agent_env_file() {  # 当前生效的 .env：Rust 版在自身目录，Python 版在源码树
+  if [ -f "$AGENT_RS_DIR/.env" ] && grep -q '^NODE_TOKEN=' "$AGENT_RS_DIR/.env" 2>/dev/null; then
+    echo "$AGENT_RS_DIR/.env"
+  elif [ -f "$AGENT_APP/.env" ]; then
+    echo "$AGENT_APP/.env"
+  else
+    echo "$AGENT_RS_DIR/.env"
+  fi
+}
+
+agent_impl_name() {  # 依据 systemd 单元判断当前跑的是哪套实现
+  local cmd
+  cmd=$(systemctl show -p ExecStart "$AGENT_SERVICE" 2>/dev/null || true)
+  if printf '%s' "$cmd" | grep -q uvicorn; then
+    echo "Python（uvicorn + venv）"
+  elif printf '%s' "$cmd" | grep -q ppanel-agent; then
+    echo "Rust 静态二进制"
+  else
+    echo "未知（服务未注册）"
+  fi
+}
+
+agent_db_path() {  # 当前生效的 SQLite 库（从 .env 的 DB_URL 反解，回落到已知位置）
+  local env raw f
+  env=$(agent_env_file)
+  raw=$(grep -E '^DB_URL=' "$env" 2>/dev/null | head -1 | cut -d= -f2-)
+  raw="${raw#sqlite:///}"                 # 四斜杠 -> /abs；三斜杠 -> rel
+  case "$raw" in
+    "") f="" ;;
+    /*) f="$raw" ;;
+    *)  f="$AGENT_RS_DIR/$raw"; [ -f "$f" ] || f="$SRC_DIR/$raw" ;;
+  esac
+  if [ -n "$f" ] && [ -f "$f" ]; then
+    echo "$f"
+  elif [ -f "$AGENT_APP/data/ppanel.db" ]; then
+    echo "$AGENT_APP/data/ppanel.db"
+  else
+    echo "$AGENT_RS_DIR/data/ppanel.db"
+  fi
+}
+
 action_status() {
   echo ""
   if systemctl is-active --quiet "$MASTER_SERVICE" 2>/dev/null; then
@@ -1182,8 +1473,9 @@ action_status() {
   fi
   if systemctl is-active --quiet "$AGENT_SERVICE" 2>/dev/null; then
     ok "被控（独立面板）：运行中（$AGENT_SERVICE，端口 $AGENT_PORT）"
-    [ -f "$AGENT_APP/.env" ] && info "节点 Token：$(grep -E '^NODE_TOKEN=' "$AGENT_APP/.env" 2>/dev/null | cut -d= -f2)"
-    info "实时日志：journalctl -u $AGENT_SERVICE -f"
+    info "实现：$(agent_impl_name)"
+    [ -f "$(agent_env_file)" ] && info "节点 Token：$(grep -E '^NODE_TOKEN=' "$(agent_env_file)" 2>/dev/null | cut -d= -f2)"
+    info "实时代码日志：journalctl -u $AGENT_SERVICE -f"
   else
     warn "被控（独立面板）：未安装或未运行"
   fi
@@ -1199,16 +1491,19 @@ action_agent_info() {  # 被控安装信息：服务/地址/Token/主控接入�
     echo ""
     return 1
   fi
-  local IP TOKEN
+  local IP TOKEN ENVFILE
+  ENVFILE=$(agent_env_file)
   IP=$(curl -s --max-time 5 https://api.ip.sb/ip 2>/dev/null | tr -d '[:space:]')
   [ -n "$IP" ] || IP=$(curl -s --max-time 5 https://ifconfig.me 2>/dev/null | tr -d '[:space:]')
   [ -n "$IP" ] || IP=$(hostname -I 2>/dev/null | awk '{print $1}')
-  TOKEN=$(grep -E '^NODE_TOKEN=' "$AGENT_APP/.env" 2>/dev/null | cut -d= -f2)
+  TOKEN=$(grep -E '^NODE_TOKEN=' "$ENVFILE" 2>/dev/null | cut -d= -f2)
   ok "服务状态：运行中（$AGENT_SERVICE，端口 $AGENT_PORT）"
+  ok "实现版本：$(agent_impl_name)"
   ok "面板地址：http://${IP:-<服务器IP>}:$AGENT_PORT/panel"
-  info "节点 Token：${TOKEN:-未找到（检查 $AGENT_APP/.env 的 NODE_TOKEN）}"
+  info "节点 Token：${TOKEN:-未找到（检查 $ENVFILE 的 NODE_TOKEN）}"
   info "Caddy：$(systemctl is-active caddy >/dev/null 2>&1 && echo '运行中' || echo '未安装/未运行')"
-  info "代码目录：$SRC_DIR"
+  info "配置目录：$ENVFILE"
+  info "代码目录：$( [ -d "$AGENT_RS_DIR" ] && echo "$AGENT_RS_DIR（Rust）" || echo "$SRC_DIR" )"
   info "实时日志：journalctl -u $AGENT_SERVICE -f"
   echo ""
   info "主控接入（节点管理 → 添加节点）："
@@ -1298,21 +1593,23 @@ menu() {
   banner
   echo ""
   echo -e "  ${c_b}[1]${c_off} 安装 主控面板               ${c_dim}Docker 部署 · 自动拉取预构建镜像${c_off}"
-  echo -e "  ${c_b}[2]${c_off} 安装 独立面板（被控）       ${c_dim}9100 端口 · 已有安装自动升级${c_off}"
-  echo -e "  ${c_b}[3]${c_off} 卸载 主控面板               ${c_dim}数据可选保留${c_off}"
-  echo -e "  ${c_b}[4]${c_off} 卸载 独立面板（被控）       ${c_dim}实例数据可选保留${c_off}"
+  echo -e "  ${c_b}[2]${c_off} 安装 独立面板（被控）       ${c_dim}9100 端口 · Python 源码部署${c_off}"
+  echo -e "  ${c_b}[3]${c_off} 安装 独立面板（Rust 版）    ${c_dim}预编译静态二进制 · 可原地替换 [2]${c_off}"
+  echo -e "  ${c_b}[4]${c_off} 卸载 主控面板               ${c_dim}数据可选保留${c_off}"
+  echo -e "  ${c_b}[5]${c_off} 卸载 独立面板（被控）       ${c_dim}实例数据可选保留${c_off}"
   echo -e "  ${c_b}[0]${c_off} 退出"
   echo ""
   echo -e "  ${c_dim}更多子命令：bash install.sh status · agent-info · master-reset-admin${c_off}"
   echo -e "  ${c_dim}主控本机直装（systemd）：bash install.sh master${c_off}"
   echo ""
-  read -rp "  请选择 [0-4]: " c
+  read -rp "  请选择 [0-5]: " c
   echo ""
   case "$c" in
     1) action_master_docker ;;
-    2) action_agent ;;
-    3) action_master_uninstall ;;
-    4) action_agent_uninstall ;;
+    2) AGENT_IMPL=python; action_agent ;;
+    3) AGENT_IMPL=rust; action_agent ;;
+    4) action_master_uninstall ;;
+    5) action_agent_uninstall ;;
     0) exit 0 ;;
     *) warn "无效选择"; exit 1 ;;
   esac
@@ -1321,6 +1618,7 @@ menu() {
 case "${1:-menu}" in
   menu)              menu ;;
   agent)             banner; action_agent ;;
+  agent-rs)          banner; AGENT_IMPL=rust; action_agent ;;
   agent-reinstall)   banner; action_agent_reinstall ;;
   agent-uninstall)   banner; action_agent_uninstall ;;
   agent-reset-admin) banner; action_agent_reset_admin ;;
@@ -1332,5 +1630,5 @@ case "${1:-menu}" in
   status)            banner; action_status ;;
   agent-info)        banner; action_agent_info ;;
   master-reset-admin) banner; action_master_reset_admin ;;
-  *) echo -e "用法：bash install.sh [menu|agent|agent-reinstall|agent-uninstall|agent-reset-admin|agent-info|master|master-docker|master-reinstall|master-docker-reinstall|master-uninstall|master-reset-admin|status]"; exit 1 ;;
+  *) echo -e "用法：bash install.sh [menu|agent|agent-rs|agent-reinstall|agent-uninstall|agent-reset-admin|agent-info|master|master-docker|master-reinstall|master-docker-reinstall|master-uninstall|master-reset-admin|status]"; exit 1 ;;
 esac

@@ -1,0 +1,10 @@
+# shell 脚本必须是 LF：CRLF 会让 `set -euo pipefail` 在 Linux 上直接报错退出
+*.sh        text eol=lf
+*.service   text eol=lf
+*.py        text eol=lf
+# 二进制/归档
+*.png binary
+*.jpg binary
+*.gz  binary
+*.tgz binary
+*.zip binary
