@@ -151,8 +151,84 @@ const portCols = [
   { key: 'proto', label: '协议', width: '80px' },
   { key: 'addr', label: '监听地址', width: '180px' },
   { key: 'process', label: '进程', width: '200px' },
-  { key: 'pid', label: 'PID', width: '100px' }
+  { key: 'pid', label: 'PID', width: '100px' },
+  { key: 'ops', label: '', width: '110px' }
 ]
+
+const portKill = ref({ open: false, row: null, loading: false })
+
+function askPortKill(row) {
+  portKill.value = { open: true, row, loading: false }
+}
+
+async function doPortKill() {
+  const row = portKill.value.row
+  if (!row) return
+  portKill.value.loading = true
+  try {
+    const { data } = await api.post('/host/ports/kill', { port: row.port, proto: row.proto }, {
+      params: np(), timeout: 60000
+    })
+    if (data.killed?.length) {
+      toastOk(`已终结端口 ${row.port} 的进程：${data.killed.map(k => `${k.process}(pid ${k.pid})`).join('、')}`)
+    } else {
+      toastErr(`未终结任何进程${data.skipped?.length ? '（目标为系统关键进程，已保护）' : ''}`)
+    }
+    if (data.skipped?.length) {
+      data.skipped.forEach(k => toastErr(`${k.process}(pid ${k.pid}) 是系统关键进程，已拒绝终结`))
+    }
+    portKill.value.open = false
+    await loadPorts()
+  } catch (e) {
+    toastErr(errText(e))
+  } finally {
+    portKill.value.loading = false
+  }
+}
+
+// ---------- 内存 ----------
+const sys = ref(null)
+const sysLoading = ref(false)
+
+async function loadSys() {
+  if (!props.nodeId) return
+  sysLoading.value = true
+  try {
+    const { data } = await api.get('/host/system', { params: np(), timeout: 20000 })
+    sys.value = data
+  } catch (e) {
+    sys.value = null
+  } finally {
+    sysLoading.value = false
+  }
+}
+
+const memClean = ref({ open: false, loading: false })
+const memCleanMsg = computed(() => {
+  const m = sys.value?.mem
+  if (!m) return '将执行 sync 并释放系统页缓存（drop_caches），不会杀任何进程、不影响运行中的服务。确认清理？'
+  return `当前内存 ${m.usedText || fmtBytes(m.used)} / ${m.totalText || fmtBytes(m.total)}（${m.percent}%）。将执行 sync 并释放页缓存（drop_caches），不会杀任何进程、不影响运行中的服务。确认清理？`
+})
+
+async function doMemClean() {
+  memClean.value.loading = true
+  try {
+    const { data } = await api.post('/host/mem/cleanup', {}, { params: np(), timeout: 60000 })
+    if (!data.ok) {
+      toastErr(data.error || '内存清理失败')
+    } else if (data.freed > 0) {
+      toastOk(`内存清理完成，可用内存增加约 ${fmtBytes(data.freed)}`)
+    } else {
+      toastOk('内存清理完成（当前页缓存不多，释放有限）')
+    }
+    memClean.value.open = false
+    await Promise.all([loadSys(), loadProcs()])
+  } catch (e) {
+    toastErr(errText(e))
+  } finally {
+    memClean.value.loading = false
+  }
+}
 
 // ---------- 系统日志 ----------
 const logs = ref({ lines: [] })
@@ -210,7 +286,7 @@ const loginCols = [
 
 // ---------- 切换 ----------
 function loadTab() {
-  if (tab.value === 'processes') loadProcs()
+  if (tab.value === 'processes') { loadProcs(); loadSys() }
   else if (tab.value === 'services') { if (!svcs.value.items.length) loadSvcs() }
   else if (tab.value === 'ports') loadPorts()
   else if (tab.value === 'logs') { if (!svcs.value.items.length) loadSvcs(); loadLogs() }
@@ -227,6 +303,7 @@ watch(() => props.nodeId, () => {
   logs.value = { lines: [] }
   logins.value = { items: [], accepted: 0, failed: 0 }
   accounts.value = []
+  sys.value = null
   tab.value = 'processes'
   loadTab()
 })
@@ -255,10 +332,19 @@ const svcState = r => (r.active === 'failed' || r.sub === 'failed' ? 'failed' : 
       <!-- 进程 -->
       <template v-if="tab === 'processes'">
         <div class="sec-head">
-          <span class="text-dim">共 {{ procs.total }} 个进程，按{{ procSort === 'cpu' ? ' CPU' : '内存' }}排序显示前 {{ procs.items.length }} 条</span>
+          <span class="text-dim">
+            共 {{ procs.total }} 个进程，按{{ procSort === 'cpu' ? ' CPU' : '内存' }}排序显示前 {{ procs.items.length }} 条
+            <template v-if="sys?.mem">
+              · 内存
+              <b class="mono" :class="{ hot: sys.mem.percent >= 85 }">{{ sys.mem.percent }}%</b>
+              （{{ fmtBytes(sys.mem.used) }} / {{ fmtBytes(sys.mem.total) }}）
+              <template v-if="sys.swap?.total"> · Swap {{ sys.swap.percent }}%</template>
+            </template>
+          </span>
           <div class="row-gap">
             <UISelect v-model="procSort" :options="[{ value: 'cpu', label: '按 CPU' }, { value: 'mem', label: '按内存' }]" class="w150" @update:model-value="loadProcs" />
             <UIButton type="ghost" @click="loadProcs">刷新</UIButton>
+            <UIButton type="ghost" :disabled="memClean.loading" @click="memClean.open = true">清理内存</UIButton>
           </div>
         </div>
         <UITable :columns="procCols" :rows="procs.items" :loading="procLoading">
@@ -323,6 +409,9 @@ const svcState = r => (r.active === 'failed' || r.sub === 'failed' ? 'failed' : 
           <template #col-addr="{ row }"><span class="mono text-dim">{{ row.addr }}</span></template>
           <template #col-process="{ row }"><span class="mono">{{ row.process || '-' }}</span></template>
           <template #col-pid="{ row }"><span class="mono text-dim">{{ row.pid || '-' }}</span></template>
+          <template #col-ops="{ row }">
+            <UIButton v-if="row.pid" type="text" class="danger" @click="askPortKill(row)">终结进程</UIButton>
+          </template>
         </UITable>
       </template>
 
@@ -377,6 +466,23 @@ const svcState = r => (r.active === 'failed' || r.sub === 'failed' ? 'failed' : 
         danger
         :loading="act.loading"
         @confirm="doAction(act.unit, act.action)"
+      />
+
+      <ConfirmDialog
+        v-model:open="portKill.open"
+        :message="portKill.row ? `确认终结端口 ${portKill.row.port}（${portKill.row.proto}）的进程 ${portKill.row.process || '-'}（pid ${portKill.row.pid}）？先尝试正常终止，1.5 秒后仍存活会强制结束，该端口服务会立即中断。` : ''"
+        confirm-text="终结进程"
+        danger
+        :loading="portKill.loading"
+        @confirm="doPortKill"
+      />
+
+      <ConfirmDialog
+        v-model:open="memClean.open"
+        :message="memCleanMsg"
+        confirm-text="清理内存"
+        :loading="memClean.loading"
+        @confirm="doMemClean"
       />
     </template>
   </div>

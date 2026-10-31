@@ -7,9 +7,11 @@
 //! - 返回字段一经确定即视为契约，供主控后台「节点运维」页面消费。
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use serde_json::{json, Value};
 
+use crate::error::{AppError, AppResult};
 use crate::models::round1;
 use crate::services::host_ops;
 
@@ -513,6 +515,148 @@ fn parse_ss_users(s: &str) -> (String, i64) {
         })
         .unwrap_or(0);
     (name, pid)
+}
+
+// ---------- 端口进程终结 ----------
+
+/// 保护名单：这些进程不允许被终结（防止自断 / 断 SSH / 断 Docker / 断 agent）。
+const PROTECTED_PROCS: &[&str] = &[
+    "systemd", "init", "sshd", "dockerd", "containerd", "ppanel-agent",
+];
+
+/// 列出某端口的监听进程（复用 ss 解析），返回 (进程列表, 是否存在无进程信息的监听)。
+async fn port_listeners(port: u16, proto: &str) -> (Vec<(String, i64)>, bool) {
+    let (code, out) = host_ops::run(&["ss", "-H", "-lnp"], 12).await;
+    let (code, out) = if code != 0 {
+        host_ops::run(&["ss", "-H", "-ln"], 12).await
+    } else {
+        (code, out)
+    };
+    let mut targets: Vec<(String, i64)> = Vec::new();
+    let mut saw_socket = false;
+    if code != 0 {
+        return (targets, saw_socket);
+    }
+    let suffix = format!(":{port}");
+    for line in out.lines() {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if f.len() < 5 || !f[0].starts_with(proto) {
+            continue;
+        }
+        if !f[4].ends_with(&suffix) {
+            continue;
+        }
+        saw_socket = true;
+        let (name, pid) = parse_ss_users(&f[5..].join(" "));
+        if pid > 0 && !targets.iter().any(|(_, p)| *p == pid) {
+            targets.push((name, pid));
+        }
+    }
+    (targets, saw_socket)
+}
+
+/// 终结监听指定端口的进程：先 SIGTERM，1.5s 后仍存活再 SIGKILL。
+/// 系统关键进程（sshd/dockerd/systemd/agent 自身等）拒绝终结。
+pub async fn port_kill(port: u16, proto: &str) -> AppResult<Value> {
+    if !(1..=65535).contains(&port) {
+        return Err(AppError::bad_request("端口无效"));
+    }
+    let proto = match proto.to_lowercase().as_str() {
+        "tcp" | "" => "tcp",
+        "udp" => "udp",
+        _ => return Err(AppError::bad_request("协议仅支持 tcp/udp")),
+    };
+    let (targets, saw_socket) = port_listeners(port, proto).await;
+    if targets.is_empty() {
+        return Err(AppError::bad_request(if saw_socket {
+            format!(
+                "端口 {port} 有监听但拿不到进程信息（agent 需要 root 权限，或进程属于其它用户）"
+            )
+        } else {
+            format!("端口 {port} 当前没有 {proto} 监听进程")
+        }));
+    }
+
+    let me = std::process::id() as i64;
+    let mut killed: Vec<Value> = Vec::new();
+    let mut skipped: Vec<Value> = Vec::new();
+    let mut failed: Vec<Value> = Vec::new();
+    for (name, pid) in targets {
+        if pid == me || PROTECTED_PROCS.contains(&name.as_str()) {
+            skipped.push(json!({"pid": pid, "process": name, "reason": "系统关键进程，禁止终结"}));
+            continue;
+        }
+        let _ = host_ops::run(&["kill", &pid.to_string()], 8).await;
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        if std::path::Path::new(&format!("/proc/{pid}")).exists() {
+            let _ = host_ops::run(&["kill", "-9", &pid.to_string()], 8).await;
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        let gone = !std::path::Path::new(&format!("/proc/{pid}")).exists();
+        let item = json!({"pid": pid, "process": name});
+        if gone {
+            killed.push(item);
+        } else {
+            failed.push(item);
+        }
+    }
+    let ok = !killed.is_empty() && failed.is_empty();
+    Ok(json!({
+        "ok": ok,
+        "port": port,
+        "proto": proto,
+        "killed": killed,
+        "skipped": skipped,
+        "failed": failed,
+    }))
+}
+
+// ---------- 内存清理 ----------
+
+/// 当前内存快照（MB 为单位原始 kB 值直接透出）。
+fn mem_snapshot() -> Value {
+    let info = meminfo();
+    let mt = info.get("MemTotal").copied().unwrap_or(0);
+    let ma = info.get("MemAvailable").copied().unwrap_or(0);
+    let st = info.get("SwapTotal").copied().unwrap_or(0);
+    let sf = info.get("SwapFree").copied().unwrap_or(0);
+    json!({
+        "total": mt,
+        "used": mt.saturating_sub(ma),
+        "available": ma,
+        "free": info.get("MemFree").copied().unwrap_or(0),
+        "buffers": info.get("Buffers").copied().unwrap_or(0),
+        "cached": info.get("Cached").copied().unwrap_or(0),
+        "percent": if mt > 0 { round1(mt.saturating_sub(ma) as f64 / mt as f64 * 100.0) } else { 0.0 },
+        "swap_used": st.saturating_sub(sf),
+        "swap_total": st,
+    })
+}
+
+/// 内存清理：sync + drop_caches（释放页缓存 / dentries / inodes）。
+/// 不杀任何进程、不碰 swap，对运行中的服务无影响。
+pub async fn mem_cleanup() -> Value {
+    let before = mem_snapshot();
+    let _ = host_ops::run(&["sync"], 30).await;
+    let direct = std::fs::write("/proc/sys/vm/drop_caches", b"3").is_ok();
+    let mode = if direct {
+        "proc"
+    } else {
+        let (rc, _) = host_ops::run(&["sh", "-c", "echo 3 > /proc/sys/vm/drop_caches"], 15).await;
+        if rc == 0 { "shell" } else { "" }
+    };
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let after = mem_snapshot();
+    let freed = after["available"].as_u64().unwrap_or(0)
+        .saturating_sub(before["available"].as_u64().unwrap_or(0));
+    json!({
+        "ok": !mode.is_empty(),
+        "mode": mode,
+        "error": if mode.is_empty() { "drop_caches 写入失败（agent 需要 root 权限）" } else { "" },
+        "before": before,
+        "after": after,
+        "freed": freed,
+    })
 }
 
 // ---------- 系统日志 ----------

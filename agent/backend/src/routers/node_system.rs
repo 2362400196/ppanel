@@ -61,6 +61,24 @@ async fn ports(_a: NodeAuth) -> Json<Value> {
     Json(host_info::ports().await)
 }
 
+#[derive(Debug, Deserialize)]
+struct PortKillIn {
+    port: u16,
+    #[serde(default)]
+    proto: Option<String>,
+}
+
+async fn port_kill(_a: NodeAuth, Json(body): Json<PortKillIn>) -> AppResult<Json<Value>> {
+    // port_kill 的错误本身就是 AppError（bad_request），直接透传
+    host_info::port_kill(body.port, body.proto.as_deref().unwrap_or("tcp"))
+        .await
+        .map(Json)
+}
+
+async fn mem_cleanup(_a: NodeAuth) -> Json<Value> {
+    Json(host_info::mem_cleanup().await)
+}
+
 #[derive(Debug, Deserialize, Default)]
 struct JournalQuery {
     #[serde(default)]
@@ -95,6 +113,8 @@ pub fn routes() -> Router<AppState> {
         .route("/host/services", get(services))
         .route("/host/services/action", post(service_action))
         .route("/host/ports", get(ports))
+        .route("/host/ports/kill", post(port_kill))
+        .route("/host/mem/cleanup", post(mem_cleanup))
         .route("/host/journal", get(journal))
         .route("/host/users", get(users))
         .route("/host/ssh-logins", get(ssh_logins))
