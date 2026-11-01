@@ -562,7 +562,6 @@ function showApidoc() {
   <div class="layout">
     <nav class="sidenav">
       <button class="active" data-view="overview" onclick="switchView('overview')">概览</button>
-      <button data-view="usage" onclick="switchView('usage')">用量统计</button>
       <button data-view="files" onclick="switchView('files')">文件管理</button>
       <button data-view="domain" onclick="switchView('domain')">域名与 SSL</button>
       <button data-view="database" onclick="switchView('database')">数据库</button>
@@ -716,17 +715,14 @@ function showApidoc() {
                 <button type="button" class="btn tpl-btn" data-cmd="php -S 0.0.0.0:8080 -t /app">自定义端口示例</button>
               </span>
             </div>
-            <div class="domain-row" style="margin-top:9px">
-              <input id="noteInput" placeholder="备注（可选）">
-              <button class="btn" onclick="saveCmd()">保存</button>
+            <div style="display:flex;justify-content:flex-end;margin-top:9px">
+              <button class="btn" onclick="saveCmd()">保存启动命令</button>
             </div>
             <p class="status-text" id="cmdHint" style="margin-top:8px;font-size:12px"></p>
           </div>
         </div>
-      </div>
 
-      <!-- 用量统计 -->
-      <div id="v-usage" class="view">
+        <!-- 历史负载（原「用量统计」独立页并入概览） -->
         <div class="card">
           <div class="page-title">历史负载</div>
           <div class="chart-range" id="usageRange">
@@ -1677,8 +1673,7 @@ function switchView (v) {
   if (v === 'files') refreshFiles()
   if (v === 'logs') connectLogs()
   else logStop()
-  if (v === 'overview') loadStats()
-  if (v === 'usage') loadUsage(usageHours)
+  if (v === 'overview') { loadStats(); loadUsage(usageHours) }
   if (v === 'domain') loadDomain()
   if (v === 'database') loadDatabase()
   if (v === 'backup') loadBackup()
@@ -1937,7 +1932,6 @@ function renderOverview () {
   $('cmdHint').innerHTML = isPhp
     ? '留空或保持默认即可——上传代码到 <code>/app</code> 后自动运行 <b>index.php</b>，无需启动命令。PHP 运行参数（扩展、禁用函数、上传大小、内存限制）分别在「扩展」「禁用函数」页管理，<b>不写进命令</b>。如需自定义（如换端口）可填 <code>php -S 0.0.0.0:8000 -t /app</code>；应用写死其它端口也能通（平台自动建端口桥转发），但建议按约定端口监听。'
     : '保存后自动应用——运行中会自动停止并重建容器再启动（需数秒）。Python 实例启动时会自动安装 <b>requirements.txt</b>（依赖未变则跳过），不需要把它写进命令里。入口不限于 main.py——uvicorn、gunicorn、自定义脚本都可以。端口：容器已注入 <b>PORT</b> / <b>INNER_APP_PORT</b> 环境变量（默认 8000），命令里写 <code>--port $PORT</code> 即可；应用写死其它端口也能通（平台会自动建端口桥转发），但建议按约定端口监听。'
-  $('noteInput').value = inst.note || ''
   $('depsPython').style.display = (isPhp || isNode || isGo) ? 'none' : 'block'
   $('depsPhp').style.display = isPhp ? 'block' : 'none'
   $('depsNode').style.display = isNode ? 'block' : 'none'
@@ -2102,8 +2096,7 @@ async function saveCmd () {
   const v = $('cmdArea').value.trim()
   const body = {
     // 与平台默认命令相同视为「恢复默认」，提交空串（空=默认），避免默认值落库
-    start_cmd: v === dftStartCmd ? '' : v,
-    note: $('noteInput').value
+    start_cmd: v === dftStartCmd ? '' : v
   }
   const wasRunning = inst.status === 'running' || inst.status === 'restarting'
   const log = $('jobLog')
@@ -4191,10 +4184,14 @@ async function adminEnterPanel (id) {
   }
   $('loginView').style.display = 'flex'
 })()
+let usageTick = 0
 setInterval(() => {
   if (!inst) return
-  if ($('v-overview').classList.contains('active')) loadStats()
-  if ($('v-usage').classList.contains('active')) loadUsage(usageHours)
+  if ($('v-overview').classList.contains('active')) {
+    loadStats()
+    // 历史负载已并入概览：采样粒度按分钟，60s 刷新一次足够
+    if (++usageTick % 12 === 0) loadUsage(usageHours)
+  }
 }, 5000)
 
 /* ================= 自绘下拉（渐进增强，替换全部原生 select） ================= */
