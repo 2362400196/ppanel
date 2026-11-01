@@ -2099,17 +2099,46 @@ async function loadStats () {
   } catch (e) { /* 静默 */ }
 }
 async function saveCmd () {
+  const v = $('cmdArea').value.trim()
+  const body = {
+    // 与平台默认命令相同视为「恢复默认」，提交空串（空=默认），避免默认值落库
+    start_cmd: v === dftStartCmd ? '' : v,
+    note: $('noteInput').value
+  }
+  const wasRunning = inst.status === 'running' || inst.status === 'restarting'
+  const log = $('jobLog')
+  $('jobStatus').textContent = '执行中，请勿关闭弹窗…'
+  $('jobStatus').style.color = ''
+  log.textContent = ''
+  $('jobMask').classList.add('open')
+  const say = t => { log.textContent += t + '\n'; log.scrollTop = log.scrollHeight }
   try {
-    const v = $('cmdArea').value.trim()
-    const data = await api('PATCH', '/panel/instance', {
-      // 与平台默认命令相同视为「恢复默认」，提交空串（空=默认），避免默认值落库
-      start_cmd: v === dftStartCmd ? '' : v,
-      note: $('noteInput').value
-    })
+    if (wasRunning) {
+      say('[面板] 正在停止容器 …')
+      const s = await api('POST', '/panel/instance/stop')
+      say('[面板] 已停止（当前状态：' + statusText(s.status) + '）')
+    }
+    say('[面板] 正在重建容器，应用新启动命令 …')
+    const data = await api('PATCH', '/panel/instance', body)
     inst = data
+    say('[面板] 新命令已生效：' + (inst.start_cmd || '（平台默认）'))
+    if (wasRunning) {
+      say('[面板] 正在启动 …（依赖安装等启动输出请到「日志」页查看）')
+      const s2 = await api('POST', '/panel/instance/start')
+      inst.status = s2.status
+      say('[面板] 实例状态：' + statusText(s2.status))
+    }
     renderTop()
+    say('[面板] ✓ 应用完成')
+    $('jobStatus').textContent = '✓ 应用完成'
+    $('jobStatus').style.color = '#10b981'
     toast('已保存并应用', true)
-  } catch (e) { toast(e.message, false) }
+  } catch (e) {
+    say('[面板] ✗ 失败：' + e.message)
+    if (wasRunning) say('[面板] 实例当前处于停止状态，可修复后在概览页手动启动')
+    $('jobStatus').textContent = '✗ 保存失败'
+    $('jobStatus').style.color = '#dc2626'
+  }
 }
 
 // 启动命令模板：点击填入（再点保存生效）
