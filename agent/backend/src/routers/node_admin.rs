@@ -316,6 +316,11 @@ async fn delete_instance(
 ) -> AppResult<Json<Value>> {
     let inst = instance::fetch_instance(&state.db, id).await?;
     let host_dir = inst.host_dir.clone();
+    let purge = q.purge != 0 && !host_dir.is_empty();
+    if purge {
+        // 安全网：删除前先快照数据目录，失败则整体中止（什么都不删，可重试）
+        instance::snapshot_host_dir(&inst).await?;
+    }
     // 联动回收实例数据库（与面板删除路径一致，失败不阻塞）
     let _ = mysql::drop_instance_db(&state.db, id).await;
     instance::remove_container(&state, &inst).await?;
@@ -323,7 +328,7 @@ async fn delete_instance(
         .bind(id)
         .execute(&state.db)
         .await?;
-    let purged = q.purge != 0 && !host_dir.is_empty();
+    let purged = purge;
     if purged {
         let _ = std::fs::remove_dir_all(&host_dir);
     }

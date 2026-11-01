@@ -134,8 +134,12 @@ pub async fn rollback(state: &AppState, inst: &Instance) {
     }
 }
 
-/// 回收：删容器 → 联动删实例库 → 删登记 →（可选）删目录。
+/// 回收：快照（purge 时，失败即中止）→ 删容器 → 联动删实例库 → 删登记 →（可选）删目录。
 pub async fn delete_instance_full(state: &AppState, inst: &Instance, purge: bool) -> AppResult<serde_json::Value> {
+    if purge && !inst.host_dir.is_empty() {
+        // 安全网：删除前先快照数据目录，失败则整体中止（什么都不删，可重试）
+        instance::snapshot_host_dir(inst).await?;
+    }
     if let Err(e) = crate::services::mysql::drop_instance_db(&state.db, inst.id).await {
         println!("[agent] 回收实例数据库失败（忽略）：{}", e.detail);
     }

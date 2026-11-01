@@ -99,7 +99,9 @@ async function buy(plan, coupon = '') {
   provisioning.value = plan.name
   try {
     const { data: st } = await api.get('/pay/status')
-    if (!st.enabled) { await directOpen(plan); return }  // 未启用支付：免费直接开通
+    // 免费直开仅限：支付未启用 且 钱包没有余额（赠送/测试模式）。
+    // 只要有余额就一律走钱包扣款，否则会出现"买了商品余额不减"。
+    if (!st.enabled && !(st.balance_cents > 0)) { await directOpen(plan); return }
     // 钱包扣款购买（等级折扣/券抵扣在后端完成）
     const { data } = await api.post('/shop/buy', { plan_id: plan.id, coupon_code: coupon })
     const saved = data.coupon_cut_cents ? `，券已抵 ¥${(data.coupon_cut_cents / 100).toFixed(2)}` : ''

@@ -75,8 +75,11 @@ def save_pay_config(body: PayConfigIn, db: Session = Depends(get_db)):
 
 @router.get("/pay/status")
 def pay_status(p: Principal = Depends(get_principal), db: Session = Depends(get_db)):
-    """商城据此判断：启用 → 余额扣款；未启用 → 免费直接开通。"""
-    return {"enabled": wxpay_service.is_enabled(db)}
+    """商城据此判断扣款模式：微信启用或钱包有余额 → 走余额扣款；
+    未启用且无余额 → 免费直接开通（赠送/测试模式）。"""
+    user = db.get(User, p.user_id)
+    return {"enabled": wxpay_service.is_enabled(db),
+            "balance_cents": user.balance_cents if user else 0}
 
 
 # ---------- 用户：钱包 ----------

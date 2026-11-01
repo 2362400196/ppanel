@@ -4,6 +4,7 @@ pub mod caddy;
 pub mod cert_job;
 pub mod cos;
 pub mod cron;
+pub mod db_backup;
 pub mod file;
 pub mod host_info;
 pub mod host_ops;

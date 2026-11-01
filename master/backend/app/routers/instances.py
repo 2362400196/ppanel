@@ -108,6 +108,10 @@ def my_instances(all: int = 0, page: int = 0, page_size: int = 20, keyword: str 
 @router.post("/instances")
 async def create_instance(body: InstanceCreate, p: Principal = Depends(get_principal),
                           db: Session = Depends(get_db), request: Request = None):
+    # 权限收紧：直接开通是管理员/开放 API 的能力。普通用户一律走商城
+    # /shop/buy（钱包扣款），否则会出现绕过扣款免费开实例的漏洞。
+    if not (p.is_admin or p.via_api_key):
+        raise HTTPException(status_code=403, detail="请从商城购买开通实例")
     tid = (request.headers.get("x-task-id") if request else "") or ""
     if tid:
         tasks.start(tid, f"开通实例 {body.name}（{body.image}）", owner=p.user_id)

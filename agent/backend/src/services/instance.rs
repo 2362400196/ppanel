@@ -713,10 +713,29 @@ pub fn ensure_entry_file(host_dir: &str, image: &str) -> AppResult<()> {
     file::write_text(host_dir, &format!("/{name}"), content)
 }
 
+/// 破坏性操作（重置/删除实例）前的安全网：把数据目录 tar.gz 到备份区。
+/// 目录不存在（新实例）返回空串直接放行；快照失败返回 Err，调用方必须中止操作。
+pub async fn snapshot_host_dir(inst: &Instance) -> AppResult<String> {
+    let dir = std::path::PathBuf::from(&inst.host_dir);
+    if !dir.is_dir() {
+        return Ok(String::new());
+    }
+    let label = format!("inst{}_{}", inst.id, container_name(inst.id));
+    let fname = crate::error::blocking(move || {
+        crate::services::backup::snapshot_dir_blocking(&dir, &label)
+    })
+    .await?;
+    println!("[agent] 实例 {} 数据目录已快照：{}", inst.id, fname);
+    Ok(fname)
+}
+
 /// 一键重置：实例恢复到刚创建的样子。
-/// 停容器 → 清空数据目录（保留目录本身与规格/端口/令牌）→ 重写默认入口文件
-/// → 重建容器 → 原来在运行则拉起并诊断。规格、启动命令、面板令牌不受影响。
+/// 快照数据目录（失败即中止，数据一字不动）→ 停容器 → 清空数据目录
+/// （保留目录本身与规格/端口/令牌）→ 重写默认入口文件 → 重建容器
+/// → 原来在运行则拉起并诊断。规格、启动命令、面板令牌不受影响。
 pub async fn reset_instance(state: &AppState, inst: &mut Instance) -> AppResult<serde_json::Value> {
+    // 安全网：动任何数据前先快照整个数据目录，失败则中止重置
+    snapshot_host_dir(inst).await?;
     let was_running = inst.status == "running";
     if was_running {
         let _ = stop_instance(state, inst).await;

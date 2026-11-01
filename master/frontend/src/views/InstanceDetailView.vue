@@ -7,6 +7,8 @@ import { toastErr, toastOk } from '../components/ui/toast'
 import UIButton from '../components/ui/UIButton.vue'
 import StatusDot from '../components/ui/StatusDot.vue'
 import ConfirmDialog from '../components/ui/ConfirmDialog.vue'
+import UIModal from '../components/ui/UIModal.vue'
+import UIInput from '../components/ui/UIInput.vue'
 import OverviewTab from './instance/OverviewTab.vue'
 
 const route = useRoute()
@@ -70,6 +72,32 @@ async function doDelete() {
 
 function switchInst(id) {
   if (id !== instanceId.value) router.push(`/instances/${id}`)
+}
+
+// ---------- 改名 ----------
+const renameOpen = ref(false)
+const renameVal = ref('')
+const renameBusy = ref(false)
+function openRename() {
+  renameVal.value = inst.value?.name || ''
+  renameOpen.value = true
+}
+async function doRename() {
+  const name = renameVal.value.trim()
+  if (!name) { toastErr('名称不能为空'); return }
+  if (name.length > 64) { toastErr('名称最长 64 字符'); return }
+  renameBusy.value = true
+  try {
+    await api.patch(`/instances/${instanceId.value}`, { name })
+    toastOk('已改名')
+    renameOpen.value = false
+    await load()
+    await loadList()
+  } catch (e) {
+    toastErr(errText(e))
+  } finally {
+    renameBusy.value = false
+  }
 }
 
 let timer
@@ -204,6 +232,7 @@ async function doUpg() {
             <span class="port-chip mono">:{{ inst.ext_port }}</span>
           </div>
           <div class="head-actions">
+            <UIButton type="ghost" @click="openRename">改名</UIButton>
             <UIButton type="ghost" @click="openUpg">升级</UIButton>
             <UIButton type="ghost" :loading="resetBusy" @click="resetOpen = true">重置</UIButton>
             <UIButton type="ghost" class="danger" @click="delOpen = true">删除</UIButton>
@@ -242,6 +271,24 @@ async function doUpg() {
           danger
           @confirm="doReset"
         />
+
+        <!-- 改名弹窗 -->
+        <div v-if="renameOpen" class="qmodal-mask" @click.self="renameOpen = false">
+          <div class="qmodal-card" style="max-width: 380px;">
+            <div class="qmodal-head">
+              <span>修改实例名称</span>
+              <button class="qmodal-x" @click="renameOpen = false">✕</button>
+            </div>
+            <div class="qmodal-body">
+              <UIInput v-model="renameVal" placeholder="实例名称（1-64 字符）"
+                       maxlength="64" @enter="doRename" />
+            </div>
+            <div class="qmodal-foot">
+              <UIButton type="ghost" @click="renameOpen = false">取消</UIButton>
+              <UIButton :loading="renameBusy" @click="doRename">保存</UIButton>
+            </div>
+          </div>
+        </div>
 
         <!-- 续费弹窗 -->
         <div v-if="renewOpen" class="qmodal-mask" @click.self="renewOpen = false">

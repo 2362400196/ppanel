@@ -279,6 +279,7 @@ async fn rm_in_container(docker: &Docker, cname: &str, paths: &[String]) {
 
 /// 把 docker get_archive 的 tar 流写到临时文件，再解出内层第一个普通文件到 dest。
 /// （Python 用 tarfile 流式读；这里先落临时 tar 再解析，内存占用恒定。）
+/// 有任务上下文的路径走本函数（带进度日志），否则直接用 [`pull_archive_docker`]。
 async fn pull_archive(
     state: &AppState,
     cname: &str,
@@ -287,6 +288,20 @@ async fn pull_archive(
     tid: &str,
 ) -> AppResult<()> {
     let docker = state.docker.get().await?;
+    pull_archive_docker(&docker, cname, container_path, dest, Some(&|mb| {
+        state.tasks.log(tid, &format!("拉取中… 已写 {} MB", mb));
+    }))
+    .await
+}
+
+/// 取回实现的公共主体（不依赖任务系统）：删库前快照等无任务上下文的路径复用。
+pub(crate) async fn pull_archive_docker(
+    docker: &Docker,
+    cname: &str,
+    container_path: &str,
+    dest: &Path,
+    progress: Option<&(dyn Fn(u64) + Send + Sync)>,
+) -> AppResult<()> {
     let tmp = std::env::temp_dir().join(format!(
         "ppanel_grab_{}.tar",
         uuid::Uuid::new_v4().simple()
@@ -309,7 +324,9 @@ async fn pull_archive(
                     .map_err(|e| AppError::bad_gateway(format!("取回备份失败：{e}")))?;
                 total += bytes.len() as u64;
                 if total >= mark {
-                    state.tasks.log(tid, &format!("拉取中… 已写 {} MB", total / 1048576));
+                    if let Some(cb) = progress {
+                        cb(total / 1048576);
+                    }
                     mark += 256 * 1024 * 1024;
                 }
             }
@@ -1462,4 +1479,99 @@ pub async fn jobs_meta(state: &AppState) -> AppResult<Value> {
 /// 供 cron 调度复用：实例容器名（默认前缀 ppanel-，可被 CONTAINER_PREFIX 覆盖）。
 pub fn instance_container(instance_id: i64) -> String {
     instance::container_name(instance_id)
+}
+
+// ---------- 破坏性操作前的自动快照（安全网） ----------
+//
+// 数据不能丢：重置实例、删除实例、删除数据库这类不可逆操作，执行前一律先
+// 自动快照到备份目录。快照失败则中止操作（数据保持原样，可重试）。
+
+/// 自动快照保留份数（按 tag+后缀各自计数）。
+pub const SNAPSHOT_KEEP: usize = 10;
+
+fn snap_label(label: &str) -> String {
+    let s: String = label
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if s.is_empty() {
+        "item".to_string()
+    } else {
+        s
+    }
+}
+
+/// 同步把目录打成 tar.gz 落到备份根目录：`{label}_{ts}_predestroy.tar.gz`。
+/// 阻塞操作，异步上下文请经 `crate::error::blocking` 调用。
+/// 失败返回 Err，调用方应中止后续的破坏性操作。
+pub fn snapshot_dir_blocking(dir: &Path, label: &str) -> AppResult<String> {
+    if !dir.is_dir() {
+        return Err(AppError::bad_gateway("数据目录不存在，无法生成快照"));
+    }
+    let root = backup_root();
+    std::fs::create_dir_all(&root)
+        .map_err(|e| AppError::bad_gateway(format!("备份目录创建失败：{e}")))?;
+    let fname = format!("{}_{}_predestroy.tar.gz", snap_label(label), ts());
+    let dest = Path::new(&root).join(&fname);
+    let f = std::fs::File::create(&dest)
+        .map_err(|e| AppError::bad_gateway(format!("快照文件创建失败：{e}")))?;
+    let enc = flate2::write::GzEncoder::new(f, flate2::Compression::fast());
+    let mut tb = tar::Builder::new(enc);
+    tb.follow_symlinks(false);
+    if let Err(e) = tb.append_dir_all(".", dir) {
+        drop(tb);
+        let _ = std::fs::remove_file(&dest);
+        return Err(AppError::bad_gateway(format!("目录快照失败：{e}")));
+    }
+    let enc = match tb.into_inner() {
+        Ok(e) => e,
+        Err(e) => {
+            let _ = std::fs::remove_file(&dest);
+            return Err(AppError::bad_gateway(format!("目录快照失败：{e}")));
+        }
+    };
+    enc.finish()
+        .map_err(|e| AppError::bad_gateway(format!("目录快照失败：{e}")))?;
+    cleanup_snapshots("predestroy", ".tar.gz", SNAPSHOT_KEEP);
+    Ok(fname)
+}
+
+/// 按标记清理旧快照：文件名含 `tag` 且以 `ext` 结尾的，按修改时间保留最近 keep 份。
+/// 返回删除数量。自动快照与自备份共用（手动备份的文件名不含标记，不受影响）。
+pub fn cleanup_snapshots(tag: &str, ext: &str, keep: usize) -> usize {
+    let root = backup_root();
+    let mut files: Vec<(String, u64)> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(&root) {
+        for ent in rd.flatten() {
+            let name = ent.file_name().to_string_lossy().to_string();
+            if !name.contains(tag) || !name.ends_with(ext) {
+                continue;
+            }
+            let Ok(md) = ent.metadata() else { continue };
+            if !md.is_file() {
+                continue;
+            }
+            let mtime = md
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            files.push((name, mtime));
+        }
+    }
+    files.sort_by(|a, b| b.1.cmp(&a.1));
+    let mut removed = 0;
+    for (name, _) in files.into_iter().skip(keep) {
+        if std::fs::remove_file(Path::new(&root).join(&name)).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
 }

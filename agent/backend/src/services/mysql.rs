@@ -988,6 +988,9 @@ pub async fn drop_instance_db(pool: &SqlitePool, instance_id: i64) -> AppResult<
     let Some(row) = db_row(pool, instance_id).await? else {
         return Ok(());
     };
+    // 安全网：删库前先整库导出一份到备份目录。MySQL 服务可用但导出失败时中止
+    // （库与账号保持原样，可重试）；服务不可用时无从导出，按原逻辑继续。
+    pre_drop_snapshot(pool, &row).await?;
     if let Ok(docker) = docker_handle().get().await {
         if let Ok(svc) = get_svc_row(pool, &row.version).await {
             let _ = sql_raw(
@@ -1003,6 +1006,64 @@ pub async fn drop_instance_db(pool: &SqlitePool, instance_id: i64) -> AppResult<
         .bind(instance_id)
         .execute(pool)
         .await?;
+    Ok(())
+}
+
+/// 删库前快照：mysqldump --single-transaction 整库导出到备份目录（保留最近 10 份）。
+/// MySQL 容器不可用时直接放行（无从导出）；导出失败返回 Err，调用方应中止删库。
+async fn pre_drop_snapshot(pool: &SqlitePool, row: &InstanceDb) -> AppResult<()> {
+    let Ok(docker) = docker_handle().get().await else {
+        return Ok(());
+    };
+    let Ok(svc) = get_svc_row(pool, &row.version).await else {
+        return Ok(());
+    };
+    let cname = svc_name(&row.version);
+    let Ok(Some(c)) = crate::services::backup::inspect_opt(&docker, &cname).await else {
+        return Ok(());
+    };
+    if !crate::services::backup::is_running(&c) {
+        return Ok(());
+    }
+    let pw = &svc.root_password;
+    let dbname = &row.db_name;
+    let stamp = format!("{}_{}", crate::services::backup::ts(), token_urlsafe(4));
+    let tmp_sql = format!("/tmp/ppanel_predrop_{stamp}.sql");
+    let tmp_gz = format!("{tmp_sql}.gz");
+    let (code, out) = exec_raw(
+        &docker,
+        &cname,
+        vec![
+            "sh".into(),
+            "-c".into(),
+            format!(
+                "mysqldump -uroot --password='{pw}' --single-transaction --routines --triggers \
+                 {dbname} --result-file={tmp_sql} && gzip -f {tmp_sql}"
+            ),
+        ],
+    )
+    .await?;
+    if code != 0 {
+        let msg = out.lines().filter(|l| !l.contains("Using a password")).collect::<Vec<_>>().join(" ");
+        return Err(AppError::bad_gateway(format!(
+            "删库前自动备份失败（{}），为保护数据已中止删除，可重试或先手动备份",
+            msg.chars().take(200).collect::<String>()
+        )));
+    }
+    let root = crate::services::backup::backup_root();
+    let _ = std::fs::create_dir_all(&root);
+    let fname = format!("{dbname}_predrop_{stamp}.sql.gz");
+    let dest = std::path::Path::new(&root).join(&fname);
+    let pulled = crate::services::backup::pull_archive_docker(&docker, &cname, &tmp_gz, &dest, None).await;
+    let _ = exec_raw(
+        &docker,
+        &cname,
+        vec!["sh".into(), "-c".into(), format!("rm -f {tmp_sql} {tmp_gz}")],
+    )
+    .await;
+    pulled?;
+    crate::services::backup::cleanup_snapshots("predrop", ".sql.gz", crate::services::backup::SNAPSHOT_KEEP);
+    println!("[agent] 删库前快照完成：{fname}");
     Ok(())
 }
 

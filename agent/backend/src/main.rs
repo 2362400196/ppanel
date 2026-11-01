@@ -129,6 +129,7 @@ async fn main() {
 
     tokio::spawn(metrics_loop(state.clone()));
     tokio::spawn(cron::run_loop(state.clone()));
+    tokio::spawn(services::db_backup::run_loop(state.clone()));
 
     let app = build_router(state.clone());
 

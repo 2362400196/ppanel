@@ -3159,8 +3159,8 @@ function resetDbPwd () {
   })
 }
 function dropDb () {
-  confirmBox('删除数据库', '删除后该库及全部数据不可恢复，确定删除？', async () => {
-    try { await api('DELETE', '/panel/instance/database'); toast('数据库已删除', true); loadDatabase() } catch (e) { toast(e.message, false) }
+  confirmBox('删除数据库', '删除前系统会自动导出一份完整快照到节点备份目录（可在主控备份页找回），随后该库及账号将被删除。确定删除？', async () => {
+    try { await api('DELETE', '/panel/instance/database'); toast('数据库已删除（已留快照）', true); loadDatabase() } catch (e) { toast(e.message, false) }
   })
 }
 function switchDb (ver) {
