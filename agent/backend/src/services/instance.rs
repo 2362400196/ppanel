@@ -250,10 +250,129 @@ python /tmp/.ppanel_bridge.py &
 "#
 }
 
+/// Node 端口桥：node 镜像天然有 node 解释器，用纯 JS 实现同语义的桥
+/// （/proc/net/tcp 探测 + 3 次复核 + net 双向转发 + 让位复查）。
+fn node_port_bridge() -> &'static str {
+    r#"cat > /tmp/.ppanel_bridge.js <<'NDEOF'
+const fs = require("fs");
+const net = require("net");
+
+const APP = parseInt(process.env.INNER_APP_PORT || "8000", 10);
+const SKIP = new Set([APP, 22, 5678, 9229]);  // 约定端口 + ssh + debugpy + node inspector
+const DEADLINE = 600000;
+
+function ownInodes() {
+  const s = new Set();
+  try {
+    for (const fd of fs.readdirSync("/proc/self/fd")) {
+      try {
+        const t = fs.readlinkSync("/proc/self/fd/" + fd);
+        const m = /^socket:\[(\d+)\]$/.exec(t);
+        if (m) s.add(m[1]);
+      } catch (e) {}
+    }
+  } catch (e) {}
+  return s;
+}
+
+function hexToIp(h) {
+  let b;
+  if (h.length === 8) b = Buffer.from(h, "hex").reverse();
+  else if (h.length === 32) b = Buffer.from(h.slice(-8), "hex").reverse();
+  else return null;
+  return Array.from(b).join(".");
+}
+
+function foreignPorts() {
+  const own = ownInodes();
+  const ports = new Set();
+  for (const f of ["/proc/net/tcp", "/proc/net/tcp6"]) {
+    let lines;
+    try { lines = fs.readFileSync(f, "utf8").split("\n").slice(1); } catch (e) { continue; }
+    for (const line of lines) {
+      const p = line.trim().split(/\s+/);
+      if (p.length > 9 && p[3] === "0A" && !own.has(p[9])) {
+        const ip = hexToIp(p[1].split(":")[0]);
+        if (ip && ip.startsWith("127.")) continue;  // docker 内嵌 DNS 127.0.0.11 排除
+        const port = parseInt(p[1].split(":")[1], 16);
+        if (port) ports.add(port);
+      }
+    }
+  }
+  return ports;
+}
+
+function pipe(a, b) {
+  a.on("data", (d) => { try { b.write(d); } catch (e) {} });
+  a.on("error", () => { try { b.destroy(); } catch (e) {} });
+  a.on("close", () => { try { b.end(); } catch (e) {} });
+  b.on("error", () => { try { a.destroy(); } catch (e) {} });
+}
+
+let target = null;
+let started = false;   // 互斥：poll 每 1s 都会触发一轮复核，防止 startBridge 被调两次
+const t0 = Date.now();
+
+const poll = setInterval(() => {
+  const ports = foreignPorts();
+  if (ports.has(APP)) {                          // 应用按约定监听，桥不需要
+    console.log("[端口桥] 应用已监听约定端口，桥退出");
+    process.exit(0);
+  }
+  if (Date.now() - t0 > DEADLINE) {
+    console.log("[端口桥] 未探测到应用监听端口，桥退出");
+    process.exit(0);
+  }
+  const cand = [...ports].filter((p) => !SKIP.has(p) && p > 1024).sort((a, b) => a - b);
+  if (!cand.length) return;
+  const stable = cand[0];
+  // 3 次复核（间隔 1s），过滤瞬时 ephemeral 端口
+  let confirmed = ports.has(stable);
+  let round = 0;
+  const check = setInterval(() => {
+    round++;
+    if (!foreignPorts().has(stable)) confirmed = false;
+    if (round >= 2) {
+      clearInterval(check);
+      if (!confirmed || started) return;
+      started = true;
+      target = stable;
+      clearInterval(poll);
+      startBridge();
+    }
+  }, 1000);
+}, 1000);
+
+function startBridge() {
+  const server = net.createServer((client) => {
+    const up = net.connect(target, "127.0.0.1");
+    pipe(client, up);
+    pipe(up, client);
+  });
+  server.on("error", (e) => {
+    console.log("[端口桥] 绑定失败：" + e.message);
+    process.exit(0);
+  });
+  server.listen(APP, "0.0.0.0", () => {
+    console.log("[端口桥] 应用监听在 " + target + "（非约定端口 " + APP + "），已自动转发 " + APP + "->" + target +
+      "，外部访问可正常使用；建议启动命令改用 --port $" + "INNER_APP_PORT 省去桥接层");
+  });
+  setInterval(() => {
+    if (foreignPorts().has(APP)) {
+      console.log("[端口桥] 应用已自行监听约定端口，桥退出让位");
+      server.close(() => process.exit(0));
+      process.exit(0);
+    }
+  }, 2000);
+}
+NDEOF
+node /tmp/.ppanel_bridge.js >/tmp/.ppanel_bridge.log 2>&1 &
+"#
+}
+
 /// PHP 端口桥：php 镜像没有 python3，用纯 PHP 实现同语义的桥
 /// （/proc/net/tcp 探测 + 3 次复核 + stream_select 双向转发 + 让位复查）。
-fn php_port_bridge() -> &'static str {
-    r#"cat > /tmp/.ppanel_bridge.php <<'PPEOF'
+fn php_port_bridge() -> &'static str {    r#"cat > /tmp/.ppanel_bridge.php <<'PPEOF'
 <?php
 error_reporting(0);
 $APP = (int)(getenv("INNER_APP_PORT") ?: "8000");
@@ -381,6 +500,8 @@ php /tmp/.ppanel_bridge.php >/tmp/.ppanel_bridge.log 2>&1 &
 pub fn entry_cmd_str(image: &str, start_cmd: &str, php_flags: &str) -> String {
     match runtime_kind(image) {
         "python" => format!("{}{}exec {}", python_bootstrap(), python_port_bridge(), start_cmd),
+        // node 与 python/php 同语义：应用没监听约定端口时自动桥接转发
+        "node" => format!("{}exec {}", node_port_bridge(), start_cmd),
         "php" => format!("{}exec {}", php_port_bridge(), inject_php_flags(start_cmd, php_flags)),
         _ => format!("exec {}", start_cmd),
     }
@@ -1421,13 +1542,40 @@ pub async fn start_exec_job(
 }
 
 pub async fn start_install(state: &AppState, inst: &Instance, file_name: &str) -> AppResult<Arc<ExecJob>> {
-    start_exec_job(
-        state,
-        inst,
-        vec!["pip".into(), "install".into(), "-r".into(), file_name.to_string()],
-        "",
-    )
-    .await
+    // 按运行时分派：node=package.json → npm install；go=go.mod → go mod tidy；
+    // php 无 composer 走不了文件安装；其余（python）维持 pip install -r。
+    match runtime_kind(&inst.image) {
+        "node" => {
+            start_exec_job(
+                state,
+                inst,
+                vec!["npm".into(), "install".into()],
+                "",
+            )
+            .await
+        }
+        "go" => {
+            start_exec_job(
+                state,
+                inst,
+                vec!["go".into(), "mod".into(), "tidy".into()],
+                "",
+            )
+            .await
+        }
+        "php" => Err(AppError::bad_request(
+            "PHP 环境暂不支持依赖文件安装（无 composer），请使用面板扩展管理或控制台执行",
+        )),
+        _ => {
+            start_exec_job(
+                state,
+                inst,
+                vec!["pip".into(), "install".into(), "-r".into(), file_name.to_string()],
+                "",
+            )
+            .await
+        }
+    }
 }
 
 pub async fn start_pip(state: &AppState, inst: &Instance, args: &[String]) -> AppResult<Arc<ExecJob>> {

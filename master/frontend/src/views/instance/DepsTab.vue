@@ -1,5 +1,5 @@
 <script setup>
-import { onUnmounted, ref } from 'vue'
+import { computed, onUnmounted, ref } from 'vue'
 import { api, errText, wsUrl } from '../../api/client'
 import { toastErr } from '../../components/ui/toast'
 import UIButton from '../../components/ui/UIButton.vue'
@@ -8,15 +8,26 @@ import Terminal from '../../components/Terminal.vue'
 
 const props = defineProps({ instance: { type: Object, required: true } })
 
-const file = ref('requirements.txt')
+const img = computed(() => props.instance.image || '')
+const isNode = computed(() => img.value.startsWith('node:'))
+const isPhp = computed(() => img.value.startsWith('php:') || img.value.startsWith('ppanel-php:'))
+
+const file = ref(isNode.value ? 'package.json' : 'requirements.txt')
 const running = ref(false)   // 安装任务进行中
 const terminal = ref(null)
 let ws = null
 
-const canInstall = () => props.instance.status === 'running' && !running.value
+const placeholder = computed(() => (isNode.value ? 'package.json' : 'requirements.txt'))
+const hint = computed(() => {
+  if (props.instance.status !== 'running') return '容器未运行，请先在概览页启动实例后再安装依赖'
+  if (isNode.value) return '执行 npm install（读取 package.json），输出实时回显'
+  if (isPhp.value) return 'PHP 环境暂不支持依赖文件安装（无 composer），请使用扩展管理'
+  return '执行 pip install -r <文件>，输出实时回显'
+})
+const isDisabled = computed(() => props.instance.status !== 'running' || running.value || isPhp.value)
 
 async function install() {
-  if (!canInstall()) return
+  if (isDisabled.value) return
   terminal.value?.clear()
   try {
     const { data } = await api.post(`/instances/${props.instance.id}/deps/install`, { file: file.value || 'requirements.txt' })
@@ -41,13 +52,11 @@ onUnmounted(() => ws?.close())
   <div class="deps">
     <div class="bar">
       <div class="bar-left">
-        <UIInput v-model="file" placeholder="requirements.txt" class="file-input" />
-        <UIButton :disabled="!canInstall()" :loading="running" @click="install">安装依赖</UIButton>
+        <UIInput v-model="file" :placeholder="placeholder" class="file-input" />
+        <UIButton :disabled="isDisabled" :loading="running" @click="install">安装依赖</UIButton>
         <UIButton v-if="running" type="ghost" @click="stop">断开</UIButton>
       </div>
-      <span class="hint" :class="{ warn: instance.status !== 'running' }">
-        {{ instance.status === 'running' ? '执行 pip install -r <文件>，输出实时回显' : '容器未运行，请先在概览页启动实例后再安装依赖' }}
-      </span>
+      <span class="hint" :class="{ warn: instance.status !== 'running' }">{{ hint }}</span>
     </div>
     <div class="term-box">
       <Terminal ref="terminal" placeholder="点击「安装依赖」后，安装输出会在这里实时显示" />
