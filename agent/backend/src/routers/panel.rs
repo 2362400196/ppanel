@@ -926,6 +926,27 @@ async fn panel_php_disabled_reset(
     })))
 }
 
+/// 扩展持久化归档：容器可写层会随重建丢弃，所以每次安装/启用后——
+/// 1) 把 conf.d 所有 ini 引用的 .so 复制到持久的 /app/.phpext（名字缺 .so 后缀时自动补全）；
+/// 2) ini 中的相对名/层内绝对路径统一改写为 /app/.phpext 绝对路径（conf.d 已挂持久目录，ini 本身也不丢）。
+/// 重建后 PHP 仍按 ini 从 /app/.phpext 加载，扩展不丢。
+const PHP_EXT_ARCHIVE_STEP: &str = r#"D=$(php-config --extension-dir) && mkdir -p /app/.phpext && \
+for ini in /usr/local/etc/php/conf.d/*.ini; do \
+  [ -f "$ini" ] || continue; \
+  out="$ini.tmp"; : > "$out"; \
+  while IFS= read -r line || [ -n "$line" ]; do \
+    case "$line" in \
+      extension=*|zend_extension=*) \
+        k=${line%%=*}; v=${line#*=}; b=${v##*/}; \
+        case $b in *.so|*.lin) ;; *) b="$b.so";; esac; \
+        [ -f "$D/$b" ] && cp -f "$D/$b" /app/.phpext/ 2>/dev/null; \
+        echo "$k=/app/.phpext/$b" >> "$out" ;; \
+      *) echo "$line" >> "$out" ;; \
+    esac; \
+  done < "$ini"; \
+  mv "$out" "$ini"; \
+done; true"#;
+
 /// 扩展安装命令（core = docker-php-ext-install，pecl = pecl install + 启用）。
 fn ext_install_cmd(
     pecl: &str,
@@ -944,6 +965,7 @@ fn ext_install_cmd(
             parts.push(format!("docker-php-ext-configure {pecl} {configure}"));
         }
         parts.push(format!("docker-php-ext-install -j$(nproc) {pecl}"));
+        parts.push(PHP_EXT_ARCHIVE_STEP.to_string());
         return vec!["sh".into(), "-c".into(), parts.join(" && ")];
     }
     if !pre.is_empty() {
@@ -962,6 +984,7 @@ fn ext_install_cmd(
     }
     parts.push(pecl_cmd);
     parts.push(format!("docker-php-ext-enable {pecl} 2>/dev/null || true"));
+    parts.push(PHP_EXT_ARCHIVE_STEP.to_string());
     vec!["sh".into(), "-c".into(), parts.join(" && ")]
 }
 
@@ -990,7 +1013,9 @@ fn loader_install_cmd(kind: &str) -> AppResult<Vec<String>> {
         ),
         other => return Err(AppError::internal(format!("未知 loader: {other}"))),
     };
-    Ok(vec!["sh".into(), "-c".into(), script.to_string()])
+    // 追加持久化归档步骤（concat! 不支持非常量拼接）
+    let script = format!("{} && {}", script, PHP_EXT_ARCHIVE_STEP);
+    Ok(vec!["sh".into(), "-c".into(), script])
 }
 
 fn sfield(v: &Value, k: &str) -> String {

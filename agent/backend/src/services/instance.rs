@@ -792,8 +792,17 @@ pub async fn create_container(state: &AppState, inst: &Instance) -> AppResult<St
         }]),
     );
 
+    // PHP 扩展持久化：conf.d 挂到宿主持久目录，扩展安装后的 ini 重建不丢
+    // （.so 本体由安装流程归档到 /app/.phpext，ini 内写绝对路径，见 panel.rs ext 归档步骤）
+    let mut binds = vec![format!("{}:/app:rw", volume_src_for(inst))];
+    if runtime_kind(&inst.image) == "php" {
+        let confd = format!("{}/.phpconf", volume_src_for(inst));
+        let _ = std::fs::create_dir_all(&confd);
+        binds.push(format!("{}:/usr/local/etc/php/conf.d:rw", confd));
+    }
+
     let mut host_config = HostConfig {
-        binds: Some(vec![format!("{}:/app:rw", volume_src_for(inst))]),
+        binds: Some(binds),
         port_bindings: Some(port_bindings),
         nano_cpus: Some((inst.cpu_limit * 1e9) as i64),
         memory: Some(inst.mem_limit * 1024 * 1024),
