@@ -1589,6 +1589,12 @@ function fmtTime (ts) {
   const d = new Date(ts < 1e12 ? ts * 1000 : ts)
   return isNaN(d) ? '-' : d.toLocaleString('zh-CN', { hour12: false })
 }
+// 后端时间均为无时区标记的 UTC（dt_iso / SQLite CURRENT_TIMESTAMP），
+// JS new Date() 会把它当本地时间解析导致差 8 小时，这里统一补 Z
+function parseTs (s) {
+  if (typeof s !== 'string') return new Date(s)
+  return new Date(/[zZ]$|[+-]\d{2}:?\d{2}$/.test(s.trim()) ? s : s.trim() + 'Z')
+}
 function statusText (s) {
   return { running: '运行中', exited: '已停止', created: '已创建', creating: '创建中' }[s] || s
 }
@@ -2157,9 +2163,9 @@ function drawUsage (pts) {
   $('usageEmpty').style.display = pts.length ? 'none' : 'block'
   svg.innerHTML = ''
   if (!pts.length) return
-  const t0 = new Date(pts[0].ts).getTime(), t1 = Math.max(new Date(pts[pts.length - 1].ts).getTime(), t0 + 1)
+  const t0 = parseTs(pts[0].ts).getTime(), t1 = Math.max(parseTs(pts[pts.length - 1].ts).getTime(), t0 + 1)
   const memMax = Math.max(...pts.map(p => p.mem), inst?.mem_limit || 512) * 1.15 || 1
-  const x = ts => padL + (new Date(ts).getTime() - t0) / (t1 - t0) * (W - padL - padR)
+  const x = ts => padL + (parseTs(ts).getTime() - t0) / (t1 - t0) * (W - padL - padR)
   const yCpu = v => padT + (1 - Math.min(v, 100) / 100) * (H - padT - padB)
   const yMem = v => padT + (1 - v / memMax) * (H - padT - padB)
   const mk = (tag, attrs) => {
@@ -2175,7 +2181,7 @@ function drawUsage (pts) {
   }
   const n = pts.length, span = 6
   for (let i = 0; i < n; i += Math.max(1, Math.floor(n / span))) {
-    const d = new Date(pts[i].ts)
+    const d = parseTs(pts[i].ts)
     const label = usageHours <= 1 ? d.toLocaleTimeString('zh-CN', { minute: '2-digit' })
       : d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
     svg.appendChild(mk('text', { x: x(pts[i].ts), y: H - 6, 'text-anchor': 'middle', 'font-size': 10, fill: '#8a9994' })).textContent = label
@@ -3903,7 +3909,7 @@ function renderOps () {
   if (opsPage < 1) opsPage = 1
   const slice = opsData.slice((opsPage - 1) * OPS_PAGE_SIZE, opsPage * OPS_PAGE_SIZE)
   box.innerHTML = slice.map(o => {
-    const t = o.created_at ? new Date(o.created_at).toLocaleString('zh-CN', { hour12: false }) : '-'
+    const t = o.created_at ? parseTs(o.created_at).toLocaleString('zh-CN', { hour12: false }) : '-'
     return `<div class="op-row"><span class="t">${t}</span><span class="a">${names[o.action] || esc(o.action)}</span><span class="d">${esc(o.detail || '')}</span></div>`
   }).join('')
   $('opsEmpty').style.display = total ? 'none' : 'block'
