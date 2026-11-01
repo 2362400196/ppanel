@@ -2101,7 +2101,7 @@ async function loadStats () {
 async function saveCmd () {
   try {
     const v = $('cmdArea').value.trim()
-    await api('PATCH', '/panel/instance', {
+    const data = await api('PATCH', '/panel/instance', {
       // 与平台默认命令相同视为「恢复默认」，提交空串（空=默认），避免默认值落库
       start_cmd: v === dftStartCmd ? '' : v,
       note: $('noteInput').value
