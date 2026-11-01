@@ -68,6 +68,62 @@ pub async fn ensure_agent_user(pool: &SqlitePool) -> AppResult<()> {
     Ok(())
 }
 
+/// 独立面板本地管理员引导：
+/// - 配置了 AGENT_ADMIN_PASSWORD → 用它（已存在则更新哈希，支持改口令）；
+/// - 未配置且不存在 → 生成随机口令存库（bcrypt），并把原文打印到日志一次（journald 可查）。
+/// 登录入口见 routers/panel_admin.rs 的 POST /panel-admin/login。
+pub async fn ensure_local_admin(pool: &SqlitePool) -> AppResult<()> {
+    let configured = settings().local_admin_password.trim().to_string();
+    let existing: Option<(i64,)> =
+        sqlx::query_as("SELECT id FROM users WHERE username = '__local_admin__'")
+            .fetch_optional(pool)
+            .await?;
+    match (configured.is_empty(), existing) {
+        // 未配置且已有 → 保持不变
+        (true, Some(_)) => {}
+        // 未配置且没有 → 自动生成
+        (true, None) => {
+            let raw = random_hex(24);
+            let hash = crate::auth::hash_password(&raw);
+            sqlx::query(
+                "INSERT INTO users (username, password_hash, role, created_at) VALUES (?,?,?,?)",
+            )
+            .bind("__local_admin__")
+            .bind(hash)
+            .bind("admin")
+            .bind(utcnow())
+            .execute(pool)
+            .await?;
+            eprintln!(
+                "[独立面板] 本地管理员口令（首次自动生成，请立即保存；也可用环境变量 AGENT_ADMIN_PASSWORD 固定）：{raw}"
+            );
+        }
+        // 已配置 → 写入/更新
+        (false, _) => {
+            let hash = crate::auth::hash_password(&configured);
+            if let Some((id,)) = existing {
+                sqlx::query("UPDATE users SET password_hash = ?, role = 'admin' WHERE id = ?")
+                    .bind(hash)
+                    .bind(id)
+                    .execute(pool)
+                    .await?;
+            } else {
+                sqlx::query(
+                    "INSERT INTO users (username, password_hash, role, created_at) VALUES (?,?,?,?)",
+                )
+                .bind("__local_admin__")
+                .bind(hash)
+                .bind("admin")
+                .bind(utcnow())
+                .execute(pool)
+                .await?;
+            }
+            eprintln!("[独立面板] 本地管理员口令已按 AGENT_ADMIN_PASSWORD 设置生效");
+        }
+    }
+    Ok(())
+}
+
 pub fn random_hex(n: usize) -> String {
     use rand::Rng;
     let mut rng = rand::thread_rng();
@@ -216,5 +272,7 @@ const ALTERS: &[&str] = &[
     "ALTER TABLE instances ADD COLUMN traffic_used_mb REAL DEFAULT 0",
     "ALTER TABLE instances ADD COLUMN traffic_last_mb REAL DEFAULT 0",
     "ALTER TABLE instances ADD COLUMN traffic_month VARCHAR(7) DEFAULT ''",
+    // 实例来源：master=主控商城开通（默认），local=独立面板本地创建
+    "ALTER TABLE instances ADD COLUMN source VARCHAR(16) DEFAULT 'master'",
     "ALTER TABLE host_backup_jobs ADD COLUMN dest VARCHAR(8) DEFAULT 'local'",
 ];

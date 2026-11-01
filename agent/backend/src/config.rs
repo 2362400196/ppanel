@@ -19,6 +19,8 @@ pub struct Settings {
     // 首次启动管理员
     pub admin_username: String,
     pub admin_password: String,
+    /// 独立面板本地管理员口令（AGENT_ADMIN_PASSWORD）；空 = 首次启动自动生成
+    pub local_admin_password: String,
 
     // 存储
     pub data_root: String,
@@ -138,6 +140,7 @@ impl Settings {
             node_token: env("NODE_TOKEN", ""),
             admin_username: env("ADMIN_USERNAME", "admin"),
             admin_password: env("ADMIN_PASSWORD", "admin123"),
+            local_admin_password: env("AGENT_ADMIN_PASSWORD", ""),
             data_root: env("DATA_ROOT", "/data/inst"),
             db_url: env("DB_URL", "sqlite:///./data/ppanel.db"),
             docker_volume_root: env("DOCKER_VOLUME_ROOT", ""),

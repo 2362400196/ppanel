@@ -409,6 +409,21 @@ tr[data-kind='file'] .f-svg { color: var(--text2); }
 .del-text { font-size: 15px; word-break: break-all; }
 .del-text b { color: var(--bad); }
 .del-sub { margin-top: 8px; font-size: 12px; color: var(--text2); }
+
+/* 管理员视图 */
+.login-tabs { display: flex; gap: 6px; margin: 12px 0 4px; }
+.login-tabs button { flex: 1; height: 34px; border-radius: 9px; border: 1px solid var(--line); background: transparent; color: var(--text2); font-size: 13px; cursor: pointer; }
+.login-tabs button.on { background: rgba(47,181,159,.1); border-color: rgba(47,181,159,.5); color: #0d9488; font-weight: 600; }
+.afield { margin-bottom: 12px; }
+.afield label { display: block; font-size: 12px; color: var(--text2); margin-bottom: 5px; }
+.afield input, .afield select { width: 100%; box-sizing: border-box; height: 36px; border: 1px solid var(--line); border-radius: 9px; padding: 0 10px; font-size: 13px; background: #fff; }
+.arow3 { display: flex; gap: 10px; }
+.arow3 .afield { flex: 1; }
+.acheck { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--text); margin: 4px 0 8px; cursor: pointer; }
+.adot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; vertical-align: middle; }
+.adot.running { background: #10b981; }
+.adot.exited, .adot.created { background: #9ca3af; }
+.adot.creating { background: #f59e0b; }
 </style>
 </head>
 <body>
@@ -417,14 +432,24 @@ tr[data-kind='file'] .f-svg { color: var(--text2); }
 <div id="loginView" class="login-wrap">
   <div class="login-card">
     <div class="logo-row"><span class="logo">P</span><span class="brand">PPanel 容器面板</span></div>
-    <p class="sub">输入面板令牌，管理你的专属容器</p>
-    <div class="field">
+    <div class="login-tabs">
+      <button id="ltToken" class="on" onclick="loginMode('token')">面板令牌</button>
+      <button id="ltAdmin" onclick="loginMode('admin')">管理员</button>
+    </div>
+    <p class="sub" id="loginSub">输入面板令牌，管理你的专属容器</p>
+    <div class="field" id="tokenField">
       <label>面板令牌</label>
       <input id="tokenInput" type="password" placeholder="panel token" onkeydown="if(event.key==='Enter')doLogin()">
     </div>
+    <div class="field" id="adminField" style="display:none">
+      <label>管理员口令</label>
+      <input id="adminPass" type="password" placeholder="admin password" onkeydown="if(event.key==='Enter')doAdminLogin()">
+    </div>
     <button id="loginBtn" class="btn block" onclick="doLogin()">进入面板</button>
+    <button id="adminBtn" class="btn block" style="display:none" onclick="doAdminLogin()">进入实例管理</button>
     <div id="loginErr" class="login-err"></div>
-    <p class="hint">令牌由服务提供方（主控 / 商城）下发，每个令牌只绑定一个容器。丢失请联系提供方重置。</p>
+    <p class="hint" id="tokenHint">令牌由服务提供方（主控 / 商城）下发，每个令牌只绑定一个容器。丢失请联系提供方重置。</p>
+    <p class="hint" id="adminHint" style="display:none">管理员模式可创建 / 删除 / 管理本机全部实例。口令见被控首次启动日志或 <b>AGENT_ADMIN_PASSWORD</b>。</p>
     <p class="hint" style="text-align:center;margin-top:2px"><a href="javascript:void(0)" onclick="showApidoc()" style="color:var(--prim,#0d9488);text-decoration:none;font-weight:600">Open API 对接文档 →</a></p>
   </div>
 </div>
@@ -447,6 +472,78 @@ function showApidoc() {
   o.scrollTop = 0
 }
 </script>
+
+<!-- 管理员视图（独立面板本地管理：脱离主控创建/管理本机全部实例） -->
+<div id="adminView" style="display:none">
+  <div class="topbar">
+    <span class="logo">P</span>
+    <span class="name">实例管理 · 本机</span>
+    <span class="spacer"></span>
+    <button class="btn ghost" onclick="loadAdminInstances()">刷新</button>
+    <button class="btn" onclick="adminCreateOpen()">新建实例</button>
+    <button class="btn danger-text" onclick="adminLogout()">退出管理</button>
+  </div>
+  <div style="max-width:1080px;margin:0 auto;padding:20px 18px">
+    <div class="card">
+      <div class="sec-head">
+        <span style="font-weight:700;font-size:15px">本机实例</span>
+        <span class="hint" id="adminCount"></span>
+      </div>
+      <div style="overflow-x:auto">
+        <table class="ftable" id="adminTbl">
+          <thead><tr>
+            <th>名称</th><th>镜像</th><th>状态</th><th>端口</th><th>规格</th><th>来源</th><th>到期</th>
+            <th style="text-align:right">操作</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div id="adminEmpty" class="empty" style="display:none">还没有实例，点右上角「新建实例」创建一个</div>
+    </div>
+  </div>
+</div>
+
+<!-- 新建实例弹窗 -->
+<div id="adminCreateMask" class="qmodal-mask">
+  <div class="qmodal">
+    <div class="qmodal-head"><span class="title">新建实例</span>
+      <span class="icon-close" onclick="closeModal('adminCreateMask')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></span>
+    </div>
+    <div class="qmodal-body">
+      <div class="afield"><label>名称</label><input id="aiName" placeholder="my-app"></div>
+      <div class="afield"><label>镜像（Python / PHP / Node / Go）</label><select id="aiImage"></select></div>
+      <div class="arow3">
+        <div class="afield"><label>CPU（核）</label><input id="aiCpu" type="number" value="1" step="0.1" min="0.1" max="16"></div>
+        <div class="afield"><label>内存（MB）</label><input id="aiMem" type="number" value="512" step="64" min="64" max="32768"></div>
+        <div class="afield"><label>磁盘（MB）</label><input id="aiDisk" type="number" value="2048" step="256" min="256"></div>
+      </div>
+      <div class="afield"><label>到期时间（留空 = 永久）</label><input id="aiExpire" type="date"></div>
+      <label class="acheck"><input id="aiToken" type="checkbox" checked> 创建后签发面板令牌</label>
+      <div id="adminCreateErr" class="login-err"></div>
+    </div>
+    <div class="qmodal-foot">
+      <button class="qbtn" onclick="closeModal('adminCreateMask')">取消</button>
+      <button id="aiBtn" class="qbtn primary" onclick="adminCreate()">创建</button>
+    </div>
+  </div>
+</div>
+
+<!-- 面板令牌弹窗 -->
+<div id="adminTokenMask" class="qmodal-mask">
+  <div class="qmodal">
+    <div class="qmodal-head"><span class="title">面板令牌 · <span id="adminTokenName"></span></span>
+      <span class="icon-close" onclick="closeModal('adminTokenMask')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></span>
+    </div>
+    <div class="qmodal-body">
+      <p class="hint">令牌与容器一一对应，凭令牌登录 <span class="mono">/panel</span> 即可进入该实例的面板。</p>
+      <div class="mono" id="adminTokenVal" style="background:rgba(47,181,159,.06);padding:12px 14px;border-radius:10px;word-break:break-all;font-size:13px"></div>
+    </div>
+    <div class="qmodal-foot">
+      <button class="qbtn" onclick="adminTokenAction(true)">重置令牌</button>
+      <button class="qbtn primary" onclick="adminCopyToken()">复制</button>
+    </div>
+  </div>
+</div>
 
 <!-- 主界面 -->
 <div id="app" class="app">
@@ -1536,7 +1633,13 @@ function logout (silent) {
   logStop()
   termStop()
   $('app').style.display = 'none'
-  $('loginView').style.display = 'flex'
+  if (ATOKEN) {
+    // 从实例面板退回管理员视图（管理员跳转进来时保留管理能力）
+    $('adminView').style.display = 'block'
+    loadAdminInstances()
+  } else {
+    $('loginView').style.display = 'flex'
+  }
   if (!silent) toast('已退出')
 }
 function enterApp (data) {
@@ -3807,6 +3910,235 @@ async function refreshAll () {
 }
 
 // 启动：?t= 自动登录
+/* ================= 管理员视图（独立面板本地管理 API） ================= */
+let ATOKEN = localStorage.getItem('ppanel_atoken') || ''
+let loginTab = 'token'
+
+function loginMode (m) {
+  loginTab = m
+  $('ltToken').classList.toggle('on', m === 'token')
+  $('ltAdmin').classList.toggle('on', m === 'admin')
+  $('tokenField').style.display = m === 'token' ? '' : 'none'
+  $('adminField').style.display = m === 'admin' ? '' : 'none'
+  $('loginBtn').style.display = m === 'token' ? '' : 'none'
+  $('adminBtn').style.display = m === 'admin' ? '' : 'none'
+  $('tokenHint').style.display = m === 'token' ? '' : 'none'
+  $('adminHint').style.display = m === 'admin' ? '' : 'none'
+  $('loginSub').textContent = m === 'token' ? '输入面板令牌，管理你的专属容器' : '管理员模式：创建 / 管理本机全部实例'
+  $('loginErr').textContent = ''
+}
+
+async function doAdminLogin () {
+  const pw = $('adminPass').value
+  if (!pw) return
+  $('adminBtn').disabled = true
+  $('loginErr').textContent = ''
+  try {
+    const r = await fetch(API + '/panel-admin/login', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: pw })
+    })
+    const data = await r.json()
+    if (!r.ok) throw new Error(data.detail || '登录失败')
+    ATOKEN = data.token
+    localStorage.setItem('ppanel_atoken', ATOKEN)
+    $('adminPass').value = ''
+    enterAdminView()
+  } catch (e) {
+    $('loginErr').textContent = e.message
+  } finally {
+    $('adminBtn').disabled = false
+  }
+}
+
+async function adminApi (method, path, body) {
+  const opt = { method, headers: { Authorization: 'Bearer ' + ATOKEN } }
+  if (body !== undefined) {
+    opt.headers['Content-Type'] = 'application/json'
+    opt.body = JSON.stringify(body)
+  }
+  const r = await fetch(API + path, opt)
+  if (r.status === 401) { adminLogout(true); throw new Error('管理员会话已失效，请重新登录') }
+  const data = await r.json().catch(() => ({}))
+  if (!r.ok) throw new Error(data.detail || ('请求失败 ' + r.status))
+  return data
+}
+
+function enterAdminView () {
+  $('loginView').style.display = 'none'
+  $('app').style.display = 'none'
+  $('adminView').style.display = 'block'
+  loadAdminInstances()
+}
+
+function adminLogout (silent) {
+  localStorage.removeItem('ppanel_atoken')
+  ATOKEN = ''
+  $('adminView').style.display = 'none'
+  $('loginView').style.display = 'flex'
+  loginMode('admin')
+  if (!silent) toast('已退出管理员模式')
+}
+
+let adminRows = []
+
+async function loadAdminInstances () {
+  try {
+    adminRows = await adminApi('GET', '/panel-admin/instances')
+    renderAdminRows()
+  } catch (e) { toast(e.message, false) }
+}
+
+function renderAdminRows () {
+  const tb = $('adminTbl').querySelector('tbody')
+  tb.innerHTML = ''
+  $('adminEmpty').style.display = adminRows.length ? 'none' : ''
+  $('adminTbl').style.display = adminRows.length ? '' : 'none'
+  $('adminCount').textContent = `共 ${adminRows.length} 个实例（本地创建的实例仅存在于本机）`
+  adminRows.forEach(it => {
+    const tr = document.createElement('tr')
+    const spec = `${it.cpu_limit}核 / ${it.mem_limit}MB / ${it.disk_quota}MB`
+    const expire = it.expire_at ? new Date(it.expire_at).toLocaleDateString('zh-CN') : '永久'
+    const running = it.status === 'running'
+    tr.innerHTML = `
+      <td><b>${esc(it.name)}</b></td>
+      <td class="mono">${esc(it.image)}</td>
+      <td><span class="adot ${esc(it.status)}"></span>${statusText(it.status)}</td>
+      <td class="mono">${it.ext_port}</td>
+      <td class="mono text-sub">${spec}</td>
+      <td class="text-sub">${it.source === 'local' ? '本地' : '主控'}</td>
+      <td class="text-sub">${expire}</td>
+      <td style="text-align:right;white-space:nowrap">
+        <button class="qbtn sm" onclick="adminEnterPanel(${it.id})">进入面板</button>
+        <button class="qbtn sm" onclick="adminAction(${it.id}, '${running ? 'stop' : 'start'}')">${running ? '停止' : '启动'}</button>
+        ${running ? `<button class="qbtn sm" onclick="adminAction(${it.id}, 'restart')">重启</button>` : ''}
+        <button class="qbtn sm" onclick="adminAction(${it.id}, 'reset')">重置</button>
+        <button class="qbtn sm" onclick="adminShowToken(${it.id})">令牌</button>
+        <button class="qbtn sm text-btn danger" onclick="adminDel(${it.id}, '${esc(it.name).replace(/'/g, "\\'")}')">删除</button>
+      </td>`
+    tb.appendChild(tr)
+  })
+}
+
+async function adminAction (id, action) {
+  const it = adminRows.find(x => x.id === id) || {}
+  const doIt = async () => {
+    try {
+      toast(action === 'reset' ? '正在重置…' : (action === 'stop' ? '正在停止…' : '正在启动…'))
+      await adminApi('POST', `/panel-admin/instances/${id}/action`, { action })
+      toast(action === 'reset' ? '已重置' : action === 'stop' ? '已停止' : '已启动', true)
+      await loadAdminInstances()
+    } catch (e) { toast(e.message, false) }
+  }
+  if (action === 'reset') confirmBox('重置确认', `确定把「${it.name}」重置成刚创建的样子？数据目录会被清空（规格、端口、令牌不变）。`, doIt)
+  else doIt()
+}
+
+function adminDel (id, name) {
+  confirmBox('删除确认', `确定删除实例「${name}」？容器与数据目录会一并移除，此操作不可恢复。`, async () => {
+    try {
+      await adminApi('DELETE', `/panel-admin/instances/${id}?purge=1`)
+      toast('已删除', true)
+      await loadAdminInstances()
+    } catch (e) { toast(e.message, false) }
+  })
+}
+
+async function adminCreateOpen () {
+  $('adminCreateErr').textContent = ''
+  $('aiName').value = ''
+  $('aiExpire').value = ''
+  try {
+    const { images } = await adminApi('GET', '/panel-admin/images')
+    const sel = $('aiImage')
+    sel.innerHTML = ''
+    ;(images || []).forEach(img => {
+      const o = document.createElement('option')
+      o.value = img; o.textContent = img
+      sel.appendChild(o)
+    })
+  } catch (e) { toast(e.message, false); return }
+  $('adminCreateMask').classList.add('open')
+  ppsEnhance($('adminCreateMask'))
+}
+
+async function adminCreate () {
+  const name = $('aiName').value.trim()
+  if (!name) { $('adminCreateErr').textContent = '请填写实例名称'; return }
+  const body = {
+    name,
+    image: $('aiImage').value,
+    cpu_limit: parseFloat($('aiCpu').value) || 1,
+    mem_limit: parseInt($('aiMem').value) || 512,
+    disk_quota: parseInt($('aiDisk').value) || 2048,
+    expire_at: $('aiExpire').value || null,
+    issue_token: $('aiToken').checked
+  }
+  $('aiBtn').disabled = true
+  $('adminCreateErr').textContent = ''
+  try {
+    const data = await adminApi('POST', '/panel-admin/instances', body)
+    closeModal('adminCreateMask')
+    await loadAdminInstances()
+    if (data.panel_token) {
+      $('adminTokenName').textContent = name
+      $('adminTokenVal').textContent = data.panel_token
+      $('adminTokenMask').classList.add('open')
+    }
+    toast(`实例「${name}」已创建（端口 ${data.ext_port}）`, true)
+  } catch (e) {
+    $('adminCreateErr').textContent = e.message
+  } finally {
+    $('aiBtn').disabled = false
+  }
+}
+
+async function adminShowToken (id) {
+  try {
+    const it = adminRows.find(x => x.id === id) || {}
+    const data = await adminApi('GET', `/panel-admin/instances/${id}/token`)
+    $('adminTokenName').textContent = it.name || ('#' + id)
+    $('adminTokenVal').textContent = data.panel_token
+    $('adminTokenMask').classList.add('open')
+  } catch (e) { toast(e.message, false) }
+}
+
+async function adminTokenAction (reset) {
+  if (reset) {
+    confirmBox('重置令牌', '重置后旧令牌立即失效（已登录的会话也会被踢出）。确定重置？', async () => {
+      try {
+        const id = adminRows.find(x => x.name === $('adminTokenName').textContent)?.id
+        if (!id) return
+        const data = await adminApi('POST', `/panel-admin/instances/${id}/token?reset=1`)
+        $('adminTokenVal').textContent = data.panel_token
+        toast('令牌已重置', true)
+      } catch (e) { toast(e.message, false) }
+    })
+  }
+}
+
+function adminCopyToken () {
+  const v = $('adminTokenVal').textContent
+  if (!v) return
+  navigator.clipboard?.writeText(v).then(() => toast('已复制', true), () => toast('复制失败', false))
+}
+
+// 管理员拿到令牌后直接跳进该实例的面板视图
+async function adminEnterPanel (id) {
+  try {
+    const { panel_token } = await adminApi('GET', `/panel-admin/instances/${id}/token`)
+    const r = await fetch(API + '/panel/login', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: panel_token })
+    })
+    const data = await r.json()
+    if (!r.ok) throw new Error(data.detail || '进入面板失败')
+    JWT = data.token
+    localStorage.setItem('ppanel_ptoken', JWT)
+    enterApp(data.instance)
+  } catch (e) { toast(e.message, false) }
+}
+
 (async function init () {
   const t = new URLSearchParams(location.search).get('t')
   if (t) {
@@ -3820,6 +4152,13 @@ async function refreshAll () {
       enterApp(data)
       return
     } catch (e) { /* token 失效走登录 */ }
+  }
+  if (ATOKEN) {
+    try {
+      await adminApi('GET', '/panel-admin/instances')
+      enterAdminView()
+      return
+    } catch (e) { /* 管理员会话失效走登录 */ }
   }
   $('loginView').style.display = 'flex'
 })()

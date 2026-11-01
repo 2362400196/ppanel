@@ -62,6 +62,9 @@ async fn main() {
     if let Err(e) = db::ensure_agent_user(&pool).await {
         eprintln!("[agent] 占位账号初始化失败：{}", e.detail);
     }
+    if let Err(e) = db::ensure_local_admin(&pool).await {
+        eprintln!("[agent] 独立面板管理员初始化失败：{}", e.detail);
+    }
 
     let state = AppState::new(pool);
 
@@ -163,6 +166,8 @@ fn build_router(state: AppState) -> Router {
 
     let mut app = Router::new()
         .nest("/agent", agent)
+        // 本地管理 API 挂顶层（/panel-admin/*），与 /panel/* 平级、不进 /agent 前缀
+        .merge(routers::panel_admin::routes())
         .merge(routers::node_ops::open_routes())
         .merge(panel)
         .merge(routers::ws::panel_ws_routes())

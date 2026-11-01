@@ -61,6 +61,23 @@ pub fn create_panel_token(iid: i64, panel_token: &str) -> String {
     encode(&Header::new(Algorithm::HS256), &payload, &jwt_keys().0).unwrap_or_default()
 }
 
+/// 独立面板本地管理员会话（/panel-admin/*）。
+pub fn create_admin_token() -> String {
+    let payload = Claims {
+        sub: "local-admin".to_string(),
+        // 管理员会话比面板会话更长效（口令登录不频繁）
+        exp: (Utc::now() + Duration::minutes(settings().jwt_expire_minutes * 7)).timestamp(),
+        pt: None,
+    };
+    encode(&Header::new(Algorithm::HS256), &payload, &jwt_keys().0).unwrap_or_default()
+}
+
+pub fn decode_admin_session(token: &str) -> bool {
+    decode_claims(token)
+        .map(|c| c.sub == "local-admin")
+        .unwrap_or(false)
+}
+
 fn decode_claims(token: &str) -> Option<Claims> {
     let mut val = Validation::new(Algorithm::HS256);
     val.validate_exp = true;
@@ -226,6 +243,21 @@ impl FromRequestParts<AppState> for AdminPrincipal {
             Ok(AdminPrincipal)
         } else {
             Err(AppError::forbidden("需要管理员权限"))
+        }
+    }
+}
+
+/// 独立面板本地管理员提取器：Bearer 会话（sub=local-admin）。
+pub struct LocalAdmin;
+
+impl FromRequestParts<AppState> for LocalAdmin {
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut Parts, _s: &AppState) -> Result<Self, Self::Rejection> {
+        if decode_admin_session(header(parts, "authorization").strip_prefix("Bearer ").unwrap_or("")) {
+            Ok(LocalAdmin)
+        } else {
+            Err(AppError::unauthorized("本地管理员会话无效"))
         }
     }
 }

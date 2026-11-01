@@ -46,6 +46,8 @@ pub struct Instance {
     pub traffic_used_mb: f64,
     pub traffic_last_mb: f64,
     pub traffic_month: String,
+    /// 实例来源：master=主控商城开通（默认），local=独立面板本地创建
+    pub source: Option<String>,
     pub created_at: Option<NaiveDateTime>,
 }
 
@@ -68,6 +70,7 @@ impl Instance {
             "expire_at": opt_dt_iso(&self.expire_at),
             "traffic_gb": self.traffic_gb,
             "traffic_used_mb": round1(self.traffic_used_mb),
+            "source": self.source.clone().unwrap_or_else(|| "master".to_string()),
         })
     }
 
