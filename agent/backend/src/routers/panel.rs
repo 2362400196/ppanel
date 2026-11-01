@@ -179,17 +179,32 @@ async fn panel_update(
             return Err(AppError::bad_request("启动命令不超过 512 字符"));
         }
         if sc.trim() != inst.start_cmd {
-            if inst.status == "running" {
-                return Err(AppError::conflict("实例运行中，请先停止后再修改启动命令"));
+            // 命令烧进容器 entry，需重建容器；运行中也直接应用：停止 → 重建 → 拉起
+            // （restarting = 应用崩溃循环，同样视为运行中）
+            let was_running = matches!(inst.status.as_str(), "running" | "restarting");
+            if was_running {
+                instance::stop_instance(&state, &mut inst).await?;
             }
             inst.start_cmd = sc.trim().to_string();
-            // 命令烧进容器，需重建
-            instance::recreate_container(&state, &inst).await?;
+            let cid = instance::recreate_container(&state, &inst).await?;
+            inst.container_id = Some(cid);
+            if was_running {
+                instance::start_instance(&state, &mut inst).await?;
+            }
             changed.push("start_cmd");
         }
     }
     if !changed.is_empty() {
         instance::log_op(&state.db, inst.id, "update", &changed.join(",")).await?;
+        // persist_status 只写 status/container_id，start_cmd 变更需单独落库，
+        // 否则刷新/重启后从 DB 重读又回到旧命令
+        if changed.iter().any(|c| *c == "start_cmd") {
+            sqlx::query("UPDATE instances SET start_cmd = ? WHERE id = ?")
+                .bind(&inst.start_cmd)
+                .bind(inst.id)
+                .execute(&state.db)
+                .await?;
+        }
         instance::persist_status(&state.db, &inst).await?;
     }
     Ok(Json(panel_out(&inst)))

@@ -879,8 +879,12 @@ pub async fn recreate_container(state: &AppState, inst: &Instance) -> AppResult<
             .as_ref()
             .and_then(|st| st.running)
             .unwrap_or(false);
+        // 所有调用方（升级/重置/改启动命令/装扩展）都要求容器处于停止态再重建；
+        // 运行中（含 crash 后的 restarting）自动温和停止，而不是报错打断流程
         if running {
-            return Err(AppError::conflict("实例运行中，请先停止再修改启动命令"));
+            let _ = docker
+                .stop_container(&name, Some(StopContainerOptions { t: 3 }))
+                .await;
         }
         let _ = docker
             .remove_container(&name, Some(RemoveContainerOptions { force: true, ..Default::default() }))
