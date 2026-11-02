@@ -9,6 +9,8 @@ import UITag from '../components/ui/UITag.vue'
 import StatusDot from '../components/ui/StatusDot.vue'
 import EmptyState from '../components/ui/EmptyState.vue'
 import ConfirmDialog from '../components/ui/ConfirmDialog.vue'
+import UIModal from '../components/ui/UIModal.vue'
+import UIInput from '../components/ui/UIInput.vue'
 
 const auth = useAuthStore()
 const instances = ref([])
@@ -59,6 +61,34 @@ async function togglePower(inst) {
 }
 
 const openingId = ref('')
+
+// ---------- 改名（卡片标题旁铅笔图标） ----------
+const renameOpen = ref(false)
+const renameVal = ref('')
+const renameBusy = ref(false)
+const renameTarget = ref(null)
+function openRename(inst) {
+  renameTarget.value = inst
+  renameVal.value = inst.name
+  renameOpen.value = true
+}
+async function doRename() {
+  const inst = renameTarget.value
+  const name = renameVal.value.trim()
+  if (!inst || !name) { toastErr('名称不能为空'); return }
+  if (name.length > 64) { toastErr('名称最长 64 字符'); return }
+  renameBusy.value = true
+  try {
+    await api.patch(`/instances/${inst.id}`, { name })
+    toastOk('已改名')
+    renameOpen.value = false
+    load()
+  } catch (e) {
+    toastErr(errText(e))
+  } finally {
+    renameBusy.value = false
+  }
+}
 
 // 点击卡片直接进入独立面板（新标签页，一键登录）
 async function openPanel(inst) {
@@ -284,6 +314,9 @@ onUnmounted(() => clearInterval(timer))
       <div v-for="inst in instances" :key="inst.id" class="inst-card card" @click="openPanel(inst)">
         <div class="head">
           <span class="name">{{ inst.name }}</span>
+          <button class="rename-btn" title="改名" @click.stop="openRename(inst)">
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>
+          </button>
           <StatusDot :status="inst.status" />
         </div>
         <div class="tags">
@@ -320,6 +353,15 @@ onUnmounted(() => clearInterval(timer))
         </div>
       </div>
     </TransitionGroup>
+
+    <!-- 改名弹窗 -->
+    <UIModal :open="renameOpen" title="修改实例名称" width="380px" @update:open="renameOpen = $event">
+      <UIInput v-model="renameVal" placeholder="实例名称（1-64 字符）" maxlength="64" @enter="doRename" />
+      <div style="display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px;">
+        <UIButton type="ghost" @click="renameOpen = false">取消</UIButton>
+        <UIButton :loading="renameBusy" @click="doRename">保存</UIButton>
+      </div>
+    </UIModal>
 
     <ConfirmDialog
       v-model:open="delOpen"
@@ -400,6 +442,16 @@ onUnmounted(() => clearInterval(timer))
 }
 .head { display: flex; align-items: center; justify-content: space-between; }
 .name { font-size: 15px; font-weight: 700; }
+/* 名字 + 铅笔成一组靠左，状态点保持靠右 */
+.head .name { margin-right: auto; }
+.rename-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; margin-left: 6px; padding: 0;
+  border: none; border-radius: 5px; background: transparent;
+  color: var(--text-dim, #9aa3ad); cursor: pointer; opacity: 0; transition: opacity .15s;
+}
+.inst-card:hover .rename-btn { opacity: 1; }
+.rename-btn:hover { background: rgba(0, 0, 0, .06); color: var(--primary-strong, #0e9f8a); }
 .tags { display: flex; gap: 6px; flex-wrap: wrap; }
 .info { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
 .info-row { display: flex; justify-content: space-between; }
