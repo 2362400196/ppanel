@@ -645,16 +645,29 @@ pub async fn ensure_image(state: &AppState, image: &str) -> AppResult<()> {
     }
 }
 
-const DEFAULT_MAIN_PY: &str = r#"from http.server import BaseHTTPRequestHandler, HTTPServer
+/// 欢迎页模板（%%RUNTIME%% / %%ENTRY%% 由各运行时服务端填充）。
+const WELCOME_HTML: &str = include_str!("welcome.html");
+
+const DEFAULT_MAIN_PY: &str = r#"# PPanel 实例默认入口：开箱即跑的欢迎页，改成你自己的应用后重启生效
+import platform
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+TEMPLATE = """%%TEMPLATE%%"""
 
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        body = "PPanel instance is running. Edit /app/main.py and restart.\n"
+        html = (
+            TEMPLATE
+            .replace("%%RUNTIME%%", "Python " + platform.python_version())
+            .replace("%%ENTRY%%", "/app/main.py")
+        )
+        body = html.encode("utf-8")
         self.send_response(200)
-        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body.encode("utf-8"))
+        self.wfile.write(body)
 
     def log_message(self, *args):
         pass
@@ -665,21 +678,37 @@ HTTPServer(("0.0.0.0", 8000), Handler).serve_forever()
 "#;
 
 const DEFAULT_INDEX_PHP: &str = r#"<?php
-header("Content-Type: text/plain; charset=utf-8");
-echo "PPanel PHP instance is running. Edit /app/index.php and restart.\n";
-echo "PHP version: " . PHP_VERSION . "\n";
+// PPanel 实例默认入口：开箱即跑的欢迎页，改成你自己的应用后重启生效
+$template = <<<'PPTEMPLATE'
+%%TEMPLATE%%
+PPTEMPLATE;
+
+$html = str_replace(
+    ['%%RUNTIME%%', '%%ENTRY%%'],
+    ['PHP ' . PHP_VERSION, '/app/index.php'],
+    $template
+);
+
+header("Content-Type: text/html; charset=utf-8");
+echo $html;
 "#;
 
-const DEFAULT_INDEX_JS: &str = r#"// PPanel Node 实例示例入口：开箱即跑，改完代码点重启生效
+const DEFAULT_INDEX_JS: &str = r#"// PPanel Node 实例默认入口：开箱即跑的欢迎页，改成你自己的应用后重启生效
 const http = require("http");
 
+const TEMPLATE = `%%TEMPLATE%%`;
+
+const html = TEMPLATE
+  .replace(/%%RUNTIME%%/g, "Node.js " + process.version)
+  .replace(/%%ENTRY%%/g, "/app/index.js");
+
 http.createServer((req, res) => {
-  res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
-  res.end(`PPanel Node instance is running. Edit /app/index.js and restart.\nNode version: ${process.version}\n`);
+  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+  res.end(html);
 }).listen(8000, "0.0.0.0", () => console.log("PPanel instance starting on 0.0.0.0:8000 ..."));
 "#;
 
-const DEFAULT_MAIN_GO: &str = r#"// PPanel Go 实例示例入口：零第三方依赖，开箱即跑。
+const DEFAULT_MAIN_GO: &str = r#"// PPanel Go 实例默认入口：零第三方依赖，开箱即跑的欢迎页。
 // 默认命令 go build -o app . && ./app——首次启动编译约 1-3 分钟（受 CPU 限额影响），之后重启秒级。
 package main
 
@@ -687,16 +716,39 @@ import (
 	"fmt"
 	"net/http"
 	"runtime"
+	"strings"
 )
 
+const pageTmpl = `%%TEMPLATE%%`
+
+func renderPage() string {
+	return strings.NewReplacer(
+		"%%RUNTIME%%", "Go "+runtime.Version(),
+		"%%ENTRY%%", "/app/main.go",
+	).Replace(pageTmpl)
+}
+
 func main() {
+	page := renderPage()
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, "PPanel Go instance is running. Edit /app/main.go and restart.\nGo version: %s\n", runtime.Version())
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprint(w, page)
 	})
 	fmt.Println("PPanel instance starting on 0.0.0.0:8000 ...")
 	http.ListenAndServe("0.0.0.0:8000", nil)
 }
 "#;
+
+/// 按运行时生成默认入口文件内容：把欢迎页 HTML 注入各语言模板。
+pub fn default_entry_content(image: &str) -> String {
+    let tpl = match runtime_kind(image) {
+        "php" => DEFAULT_INDEX_PHP,
+        "node" => DEFAULT_INDEX_JS,
+        "go" => DEFAULT_MAIN_GO,
+        _ => DEFAULT_MAIN_PY,
+    };
+    tpl.replace("%%TEMPLATE%%", WELCOME_HTML)
+}
 
 pub fn ensure_entry_file(host_dir: &str, image: &str) -> AppResult<()> {
     let name = entry_filename(image);
@@ -704,13 +756,8 @@ pub fn ensure_entry_file(host_dir: &str, image: &str) -> AppResult<()> {
     if target.exists() {
         return Ok(());
     }
-    let content = match runtime_kind(image) {
-        "php" => DEFAULT_INDEX_PHP,
-        "node" => DEFAULT_INDEX_JS,
-        "go" => DEFAULT_MAIN_GO,
-        _ => DEFAULT_MAIN_PY,
-    };
-    file::write_text(host_dir, &format!("/{name}"), content)
+    let content = default_entry_content(image);
+    file::write_text(host_dir, &format!("/{name}"), &content)
 }
 
 /// 破坏性操作（重置/删除实例）前的安全网：把数据目录 tar.gz 到备份区。

@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>实例运行中 · PPanel</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 55%, #312e81 100%);
+    color: #e2e8f0;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    overflow-x: hidden;
+  }
+  .glow { position: fixed; border-radius: 50%; filter: blur(90px); pointer-events: none; }
+  .glow.a { width: 420px; height: 420px; background: #6366f1; top: -140px; right: -100px; opacity: .35; }
+  .glow.b { width: 380px; height: 380px; background: #06b6d4; bottom: -140px; left: -100px; opacity: .22; }
+  .card {
+    position: relative;
+    width: 100%;
+    max-width: 540px;
+    background: rgba(15, 23, 42, .62);
+    border: 1px solid rgba(148, 163, 184, .18);
+    border-radius: 20px;
+    padding: 40px 36px 28px;
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    box-shadow: 0 24px 60px rgba(2, 6, 23, .55);
+  }
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 14px;
+    border-radius: 999px;
+    background: rgba(34, 197, 94, .12);
+    border: 1px solid rgba(34, 197, 94, .35);
+    color: #4ade80;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: .5px;
+  }
+  .dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: #22c55e;
+    animation: pulse 1.8s infinite;
+  }
+  @keyframes pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(34, 197, 94, .55); }
+    70%  { box-shadow: 0 0 0 9px rgba(34, 197, 94, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0); }
+  }
+  h1 { font-size: 26px; margin: 20px 0 8px; color: #f8fafc; letter-spacing: .5px; }
+  .sub { color: #94a3b8; font-size: 14px; line-height: 1.7; }
+  .rows { margin: 26px 0 22px; border: 1px solid rgba(148, 163, 184, .14); border-radius: 14px; overflow: hidden; }
+  .row { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 16px; font-size: 14px; background: rgba(30, 41, 59, .4); }
+  .row + .row { border-top: 1px solid rgba(148, 163, 184, .12); }
+  .k { color: #94a3b8; flex-shrink: 0; }
+  .v { color: #e2e8f0; font-weight: 600; font-family: ui-monospace, SFMono-Regular, Consolas, Menlo, monospace; text-align: right; word-break: break-all; }
+  .v.ok { color: #4ade80; }
+  .tip {
+    font-size: 13px;
+    color: #94a3b8;
+    line-height: 1.9;
+    background: rgba(99, 102, 241, .08);
+    border: 1px dashed rgba(99, 102, 241, .35);
+    border-radius: 12px;
+    padding: 12px 16px;
+  }
+  .tip code {
+    color: #a5b4fc;
+    font-family: ui-monospace, Consolas, monospace;
+    background: rgba(99, 102, 241, .15);
+    padding: 1px 6px;
+    border-radius: 6px;
+  }
+  .foot { margin-top: 22px; display: flex; justify-content: space-between; align-items: center; font-size: 12px; color: #64748b; }
+  .logo {
+    font-weight: 700;
+    letter-spacing: 2px;
+    background: linear-gradient(90deg, #818cf8, #22d3ee);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  @media (max-width: 480px) {
+    .card { padding: 30px 22px 22px; }
+    h1 { font-size: 22px; }
+  }
+</style>
+</head>
+<body>
+<div class="glow a"></div><div class="glow b"></div>
+<main class="card">
+  <span class="badge"><span class="dot"></span>运行正常 · ALL SYSTEMS GO</span>
+  <h1>您的实例已成功启动</h1>
+  <p class="sub">主机服务运行正常，Web 服务已就绪并正在监听端口，现在可以开始部署您的应用了。</p>
+  <div class="rows">
+    <div class="row"><span class="k">运行环境</span><span class="v ok">%%RUNTIME%%</span></div>
+    <div class="row"><span class="k">入口文件</span><span class="v">%%ENTRY%%</span></div>
+    <div class="row"><span class="k">监听地址</span><span class="v">0.0.0.0:8000</span></div>
+    <div class="row"><span class="k">服务状态</span><span class="v ok">Healthy</span></div>
+  </div>
+  <div class="tip">编辑入口文件 <code>%%ENTRY%%</code> 替换为您自己的应用，保存后点击面板中的「重启」即可生效。您也可以在面板中管理文件、安装依赖和使用数据库。</div>
+  <div class="foot"><span class="logo">PPANEL</span><span id="clock"></span></div>
+</main>
+<script>
+  function tick () {
+    var el = document.getElementById("clock");
+    if (el) el.textContent = new Date().toLocaleString("zh-CN", { hour12: false });
+  }
+  tick();
+  setInterval(tick, 1000);
+</script>
+</body>
+</html>
