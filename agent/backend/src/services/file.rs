@@ -86,11 +86,21 @@ pub fn list_dir(root: &str, rel_path: &str) -> AppResult<Vec<serde_json::Value>>
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_secs_f64())
             .unwrap_or(0.0);
+        #[cfg(unix)]
+        let (mode, mode_str) = {
+            use std::os::unix::fs::PermissionsExt;
+            let m = md.permissions().mode() & 0o7777;
+            (format!("{m:04o}"), mode_ls_style(is_dir, m))
+        };
+        #[cfg(not(unix))]
+        let (mode, mode_str) = (String::new(), String::new());
         entries.push(serde_json::json!({
             "name": name,
             "is_dir": is_dir,
             "size": if is_dir { 0 } else { md.len() },
             "mtime": mtime,
+            "mode": mode,
+            "mode_str": mode_str,
         }));
     }
     entries.sort_by(|a, b| {
@@ -101,6 +111,54 @@ pub fn list_dir(root: &str, rel_path: &str) -> AppResult<Vec<serde_json::Value>>
         bd.cmp(&ad).then(an.cmp(&bn))
     });
     Ok(entries)
+}
+
+/// 八进制权限转 ls 风格字符串：0644 → `-rw-r--r--`，目录 0755 → `drwxr-xr-x`。
+#[cfg(unix)]
+fn mode_ls_style(is_dir: bool, mode: u32) -> String {
+    const TRI: [&str; 8] = ["---", "--x", "-w-", "-wx", "r--", "r-x", "rw-", "rwx"];
+    let mut s = String::with_capacity(10);
+    s.push(if is_dir { 'd' } else { '-' });
+    for shift in [6u32, 3, 0] {
+        let bits = ((mode >> shift) & 0o7) as usize;
+        s.push_str(TRI[bits]);
+    }
+    s
+}
+
+/// 修改文件/目录权限（八进制，如 755 / 0644）。支持递归。
+#[cfg(unix)]
+pub fn chmod_path(root: &str, rel_path: &str, mode: u32, recursive: bool) -> AppResult<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let target = resolve_path(root, rel_path)?;
+    if !target.exists() {
+        return Err(AppError::not_found("文件或目录不存在"));
+    }
+    fs::set_permissions(&target, fs::Permissions::from_mode(mode))?;
+    if recursive && target.is_dir() {
+        chmod_recursive(&target, mode)?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn chmod_path(_root: &str, _rel_path: &str, _mode: u32, _recursive: bool) -> AppResult<()> {
+    Err(AppError::bad_request("当前平台不支持修改权限"))
+}
+
+#[cfg(unix)]
+fn chmod_recursive(dir: &Path, mode: u32) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    for ent in fs::read_dir(dir)? {
+        let ent = ent?;
+        let p = ent.path();
+        let md = ent.metadata()?;
+        fs::set_permissions(&p, fs::Permissions::from_mode(mode))?;
+        if md.is_dir() {
+            chmod_recursive(&p, mode)?;
+        }
+    }
+    Ok(())
 }
 
 pub fn read_text(root: &str, rel_path: &str) -> AppResult<serde_json::Value> {

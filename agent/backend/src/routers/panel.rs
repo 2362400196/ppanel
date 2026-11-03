@@ -1272,6 +1272,32 @@ async fn panel_mkdir(PanelInst(inst): PanelInst, Json(body): Json<Value>) -> App
     Ok(Json(json!({"detail": "已创建"})))
 }
 
+/// 修改权限：body { path, mode: "755"|"0755"|493, recursive?: bool }
+async fn panel_chmod(PanelInst(inst): PanelInst, State(state): State<AppState>,
+                     Json(body): Json<Value>) -> AppResult<Json<Value>> {
+    let path = body
+        .get("path")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| AppError::bad_request("参数缺失"))?
+        .to_string();
+    let mode = match body.get("mode") {
+        Some(Value::String(s)) => {
+            let s = s.trim().trim_start_matches("0o");
+            u32::from_str_radix(s, 8).ok().filter(|m| *m <= 0o7777)
+        }
+        Some(Value::Number(n)) => n.as_u64().map(|m| m as u32).filter(|m| *m <= 0o7777),
+        _ => None,
+    }
+    .ok_or_else(|| AppError::bad_request("mode 需为 0-7777 的八进制权限，如 755 / 644"))?;
+    let recursive = body.get("recursive").and_then(|v| v.as_bool()).unwrap_or(false);
+    let log_detail = format!("path={path} mode={mode:04o} recursive={recursive}");
+    let root = inst_root(&inst);
+    crate::error::blocking(move || file::chmod_path(&root, &path, mode, recursive)).await?;
+    instance::log_op(&state.db, inst.id, "files_chmod", &log_detail).await?;
+    Ok(Json(json!({"detail": format!("权限已改为 {:04o}", mode)})))
+}
+
 async fn panel_rename(PanelInst(inst): PanelInst, Json(body): Json<Value>) -> AppResult<Json<Value>> {
     let src = sfield(&body, "src");
     let dst = sfield(&body, "dst");
@@ -1569,6 +1595,7 @@ pub fn routes() -> Router<AppState> {
         .route("/panel/instance/files/upload", put(panel_upload))
         .route("/panel/instance/files/save", post(panel_save))
         .route("/panel/instance/files/mkdir", post(panel_mkdir))
+        .route("/panel/instance/files/chmod", post(panel_chmod))
         .route("/panel/instance/files/rename", post(panel_rename))
         .route("/panel/instance/files/download", get(panel_download))
         .route("/panel/instance/files/backup", get(panel_backup))
