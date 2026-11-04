@@ -349,18 +349,95 @@ async fn backup_dir(
     })))
 }
 
-/// 备份/恢复后台任务的日志增量拉取（按实例前缀校验，防越权读他人日志）。
+/// 备份/镜像后台任务的日志增量拉取（按实例前缀校验，防越权读他人日志）。
 async fn backup_task_lines(
     PanelInst(inst): PanelInst,
     State(state): State<AppState>,
     Query(q): Query<HashMap<String, String>>,
 ) -> AppResult<Json<Value>> {
     let tid = qp(&q, "task_id", "");
-    if !tid.starts_with(&format!("panelbk_{}_", inst.id)) {
+    let ok = tid.starts_with(&format!("panelbk_{}_", inst.id))
+        || tid.starts_with(&format!("panelimg_{}_", inst.id));
+    if !ok {
         return Err(AppError::bad_request("任务 ID 无效"));
     }
     let since = qp(&q, "since", "0").parse::<usize>().unwrap_or(0);
     Ok(Json(state.tasks.lines(&tid, since)))
+}
+
+// =====================================================================
+// 镜像快照：把当前容器环境 docker commit 成本地镜像（后台任务 + 日志）
+// =====================================================================
+
+async fn image_list(PanelInst(inst): PanelInst, State(state): State<AppState>) -> AppResult<Json<Value>> {
+    let items = instance::list_snapshot_images(&state, inst.id).await?;
+    Ok(Json(json!({ "images": items })))
+}
+
+/// 生成镜像快照：后台 commit，立即返回 task_id（日志走 panelimg_ 前缀）。
+async fn image_create(
+    PanelInst(inst): PanelInst,
+    State(state): State<AppState>,
+    Json(body): Json<Value>,
+) -> AppResult<Json<Value>> {
+    let comment = sfield(&body, "comment");
+    let tid = format!("panelimg_{}_{}", inst.id, backup::ts());
+    state
+        .tasks
+        .start(&tid, &format!("生成镜像快照 · 实例 #{}", inst.id));
+    let st = state.clone();
+    let tid2 = tid.clone();
+    tokio::spawn(async move {
+        let r = instance::commit_snapshot_image(&st, &inst, &comment, &tid2).await;
+        if let Err(e) = r {
+            st.tasks.finish(&tid2, false, &format!("✘ 生成镜像失败：{}", e.detail));
+        } else {
+            st.tasks.finish(&tid2, true, "");
+        }
+    });
+    Ok(Json(json!({
+        "task_id": tid,
+        "detail": "镜像快照任务已提交，正在后台执行，可在下方日志区查看进度",
+    })))
+}
+
+/// 应用镜像快照：换镜像并重建容器（后台任务，失败自动回滚原镜像）。
+async fn image_apply(
+    PanelInst(inst): PanelInst,
+    State(state): State<AppState>,
+    Json(body): Json<Value>,
+) -> AppResult<Json<Value>> {
+    let tag = sfield(&body, "tag");
+    let mut full = instance::fetch_instance(&state.db, inst.id).await?;
+    let tid = format!("panelimg_{}_{}", inst.id, backup::ts());
+    state
+        .tasks
+        .start(&tid, &format!("应用镜像快照 · 实例 #{}", inst.id));
+    let st = state.clone();
+    let tid2 = tid.clone();
+    tokio::spawn(async move {
+        let r = instance::apply_snapshot_image(&st, &mut full, &tag, &tid2).await;
+        if let Err(e) = r {
+            st.tasks.finish(&tid2, false, &format!("✘ 应用镜像失败：{}", e.detail));
+        } else {
+            st.tasks.finish(&tid2, true, "");
+        }
+    });
+    Ok(Json(json!({
+        "task_id": tid,
+        "detail": "应用镜像任务已提交，实例将短暂重建，可在下方日志区查看进度",
+    })))
+}
+
+/// 删除本实例的镜像快照（同步操作，删除很快）。
+async fn image_delete(
+    PanelInst(inst): PanelInst,
+    State(state): State<AppState>,
+    Query(q): Query<HashMap<String, String>>,
+) -> AppResult<Json<Value>> {
+    let tag = qp(&q, "tag", "");
+    instance::delete_snapshot_image(&state, inst.id, &tag).await?;
+    Ok(Json(json!({"detail": format!("已删除 {tag}")})))
 }
 
 async fn restore_dir(
@@ -1315,6 +1392,8 @@ pub fn routes() -> Router<AppState> {
         .route("/panel/instance/backup/restore/dir", post(restore_dir))
         .route("/panel/instance/backup/restore/db", post(restore_db))
         .route("/panel/instance/backup/task-lines", get(backup_task_lines))
+        .route("/panel/instance/images", get(image_list).post(image_create).delete(image_delete))
+        .route("/panel/instance/images/apply", post(image_apply))
         .route("/panel/instance/snapshots", get(snapshot_list))
         .route("/panel/instance/snapshots/restore", post(snapshot_restore))
         // 定时任务

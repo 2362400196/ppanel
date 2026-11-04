@@ -615,7 +615,7 @@ function showApidoc() {
       <button data-view="logs" onclick="switchView('logs')">日志</button>
       <button data-view="ops" onclick="switchView('ops')">操作记录</button>
       <button data-view="apidoc" onclick="switchView('apidoc')">API 文档</button>
-      <div id="uiVer" style="margin-top:auto;padding:10px 13px;font-size:10.5px;color:var(--text2);opacity:.55;user-select:none">UI v20261104.9</div>
+      <div id="uiVer" style="margin-top:auto;padding:10px 13px;font-size:10.5px;color:var(--text2);opacity:.55;user-select:none">UI v20261104.10</div>
     </nav>
 
     <div class="content">
@@ -950,6 +950,26 @@ function showApidoc() {
                 <th style="padding:6px 8px;border-bottom:1px solid var(--line)">操作</th>
               </tr></thead>
               <tbody id="snapList"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="card">
+          <div class="page-title">镜像快照</div>
+          <p class="hint">把当前容器整体环境（系统 + 运行时 + 已安装依赖 + 配置）固化成镜像快照。之后可随时用快照重建容器：环境立即恢复原样，/app 数据目录不受影响。生成期间容器会短暂暂停几秒；镜像只存在本节点，仅本实例可用。</p>
+          <div class="domain-row">
+            <input id="imgComment" placeholder="备注（可选，如：装好了 ffmpeg 和 redis-cli）">
+            <button class="btn" onclick="doCreateImage()">生成镜像快照</button>
+          </div>
+          <div id="imgListWrap" style="overflow-x:auto;margin-top:10px">
+            <table style="width:100%;border-collapse:collapse;font-size:12.5px">
+              <thead><tr style="color:var(--text2);text-align:left">
+                <th style="padding:6px 8px;border-bottom:1px solid var(--line)">镜像</th>
+                <th style="padding:6px 8px;border-bottom:1px solid var(--line)">类型</th>
+                <th style="padding:6px 8px;border-bottom:1px solid var(--line)">大小</th>
+                <th style="padding:6px 8px;border-bottom:1px solid var(--line)">生成时间</th>
+                <th style="padding:6px 8px;border-bottom:1px solid var(--line)">操作</th>
+              </tr></thead>
+              <tbody id="imgList"></tbody>
             </table>
           </div>
         </div>
@@ -1851,7 +1871,7 @@ function switchView (v) {
   if (v === 'overview') { loadStats(); loadUsage(usageHours) }
   if (v === 'domain') loadDomain()
   if (v === 'database') loadDatabase()
-  if (v === 'backup') { loadBackup(); loadSnapshots() }
+  if (v === 'backup') { loadBackup(); loadSnapshots(); loadImages() }
   if (v === 'crons') { cronFillOptions(); cronKindChange(); cronFreqChange(); loadCrons() }
   if (v === 'site') loadSite()
   if (v === 'deps') { if (isPhp) loadPhpExt(); else if (isNode) loadNodePkgs(); else if (isGo) loadGoMod(); else loadPyPkgs() }
@@ -2001,6 +2021,48 @@ async function doRestoreDir () {
     const d = await api('POST', '/panel/instance/backup/restore/dir', { file: bkRestoreTarget.file, path: $('bkRestorePath').value.trim() })
     if (d.task_id) { toast('恢复任务已提交，后台执行中…'); watchBkTask(d.task_id) }
     else toast(d.detail, true)
+  } catch (e) { toast(e.message, false) }
+}
+
+// ---------- 镜像快照 ----------
+const IMG_KIND_LABEL = { php: 'PHP', python: 'Python', node: 'Node.js', go: 'Go' }
+async function loadImages () {
+  try {
+    const d = await api('GET', '/panel/instance/images')
+    const list = d.images || []
+    const tb = $('imgList')
+    tb.innerHTML = list.length ? '' : '<tr><td colspan="5" style="padding:10px 8px;color:var(--text2)">暂无镜像快照（点上方「生成镜像快照」创建）</td></tr>'
+    list.forEach(m => {
+      const tr = document.createElement('tr')
+      const using = inst.image === m.tag
+      tr.innerHTML = `
+        <td class="mono" style="padding:7px 8px;border-bottom:1px solid var(--line)">${m.tag}${using ? ' <span style="color:#3aa981;font-size:11px">使用中</span>' : ''}</td>
+        <td style="padding:7px 8px;border-bottom:1px solid var(--line)">${IMG_KIND_LABEL[m.kind] || m.kind}</td>
+        <td class="mono" style="padding:7px 8px;border-bottom:1px solid var(--line)">${m.size_text}</td>
+        <td class="mono" style="padding:7px 8px;border-bottom:1px solid var(--line)">${m.created_at}</td>
+        <td style="padding:7px 8px;border-bottom:1px solid var(--line);white-space:nowrap"></td>`
+      const td = tr.lastElementChild
+      td.appendChild(btn('应用此镜像', 'ghost sm', () => {
+        confirmBox('应用镜像快照', `将用镜像 ${m.tag} 重建容器：运行环境与已装依赖立即恢复到生成快照时的状态；/app 数据目录不受影响，但快照之后通过终端安装的依赖会被回退。实例会短暂重启，确定继续？`, async () => {
+          try {
+            const r = await api('POST', '/panel/instance/images/apply', { tag: m.tag })
+            toast('已提交，后台执行中…'); watchBkTask(r.task_id)
+          } catch (e) { toast(e.message, false) }
+        })
+      }))
+      td.appendChild(btn('删除', 'ghost sm danger-text', async () => {
+        if (!confirm('确认删除镜像 ' + m.tag + '？删除后无法恢复。')) return
+        try { const r = await api('DELETE', '/panel/instance/images?tag=' + encodeURIComponent(m.tag)); toast(r.detail, true); loadImages() } catch (e) { toast(e.message, false) }
+      }))
+      tb.appendChild(tr)
+    })
+  } catch (e) { /* 镜像接口异常不打断备份页 */ }
+}
+async function doCreateImage () {
+  try {
+    const d = await api('POST', '/panel/instance/images', { comment: $('imgComment').value.trim() })
+    toast('镜像快照任务已提交，后台执行中…')
+    watchBkTask(d.task_id)
   } catch (e) { toast(e.message, false) }
 }
 

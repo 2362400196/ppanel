@@ -8,7 +8,8 @@ use bollard::container::{
     StopContainerOptions,
 };
 use bollard::exec::{CreateExecOptions, StartExecOptions, StartExecResults};
-use bollard::image::CreateImageOptions;
+use bollard::image::{CreateImageOptions, ListImagesOptions, RemoveImageOptions};
+use bollard::image::CommitContainerOptions;
 use bollard::models::{HostConfig, PortBinding, PortMap, RestartPolicy, RestartPolicyNameEnum};
 use bollard::network::CreateNetworkOptions;
 use futures_util::StreamExt;
@@ -44,10 +45,16 @@ pub fn volume_src_for(inst: &Instance) -> String {
 }
 
 pub fn is_php(image: &str) -> bool {
+    if image.starts_with("ppanel-img-") {
+        return snap_kind(image) == "php";
+    }
     image.starts_with("php:") || image.starts_with("ppanel-php:")
 }
 
 pub fn runtime_kind(image: &str) -> &'static str {
+    if image.starts_with("ppanel-img-") {
+        return snap_kind(image);
+    }
     if image.starts_with("node:") {
         "node"
     } else if image.starts_with("golang:") {
@@ -57,6 +64,31 @@ pub fn runtime_kind(image: &str) -> &'static str {
     } else {
         "python"
     }
+}
+
+/// 实例镜像快照（ppanel-img-inst{IID}:{kind}-{ts}）的运行时类型：
+/// kind 内嵌在 tag 头部，commit 时由源镜像类型决定。
+fn snap_kind(image: &str) -> &'static str {
+    let tag = image.split(':').nth(1).unwrap_or("");
+    if tag.starts_with("php-") {
+        "php"
+    } else if tag.starts_with("node-") {
+        "node"
+    } else if tag.starts_with("go-") {
+        "go"
+    } else {
+        "python"
+    }
+}
+
+/// 实例镜像快照 repo（归属隔离：repo 含实例号，tag 形如 `{kind}-{ts}`）。
+pub fn snapshot_repo(iid: i64) -> String {
+    format!("ppanel-img-inst{iid}")
+}
+
+/// 本实例镜像快照的完整 tag 前缀（校验归属用）。
+pub fn snapshot_prefix(iid: i64) -> String {
+    format!("ppanel-img-inst{iid}:")
 }
 
 pub fn default_start_cmd(image: &str, _mem_limit_mb: Option<i64>) -> String {
@@ -1607,6 +1639,228 @@ async fn runtime_worker(state: AppState, job: Arc<ExecJob>, iid: i64, img: Strin
     let _ = log_op(&state.db, inst.id, "runtime", &format!("运行环境切换为 {img}")).await;
     job.emit("[提示] 容器已重建，容器内依赖被重置；Python 实例下次启动会自动重装 requirements.txt（日志可见）");
     job.finish(0);
+}
+
+// =====================================================================
+// 镜像快照：docker commit 当前容器环境（系统+依赖+配置）为本地镜像
+// repo = ppanel-img-inst{IID}（归属隔离），tag = {kind}-{ts}（kind 内嵌，
+// runtime_kind/is_php 据此识别，入口文件与 conf.d 挂载等逻辑自动兼容）。
+// =====================================================================
+
+/// docker commit 当前容器为镜像快照（后台任务：全程写 TaskLog）。
+/// 容器运行中时 commit 期间会短暂 pause（保证文件系统一致性，通常几秒）。
+pub async fn commit_snapshot_image(
+    state: &AppState,
+    inst: &Instance,
+    comment: &str,
+    tid: &str,
+) -> AppResult<()> {
+    let docker = state.docker.get().await?;
+    let cname = container_name(inst.id);
+    let repo = snapshot_repo(inst.id);
+    let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
+    let kind = runtime_kind(&inst.image);
+    let tag = format!("{kind}-{ts}");
+    let full = format!("{repo}:{tag}");
+
+    state
+        .tasks
+        .log(tid, &format!("源镜像：{}（{}）", inst.image, kind));
+    state.tasks.log(
+        tid,
+        "正在固化容器环境为镜像（运行中容器会短暂暂停，文件越多耗时越久）…",
+    );
+    let running = docker
+        .inspect_container(&cname, None)
+        .await
+        .ok()
+        .and_then(|info| info.state.and_then(|s| s.running))
+        .unwrap_or(false);
+    if !running {
+        state.tasks.log(tid, "容器未在运行，直接 commit（无需暂停）");
+    }
+    let opts = CommitContainerOptions {
+        container: cname.clone(),
+        repo: repo.clone(),
+        tag: tag.clone(),
+        comment: comment.trim().to_string(),
+        author: "ppanel-agent".to_string(),
+        pause: true,
+        changes: None,
+    };
+    let cfg = bollard::container::Config::<String>::default();
+    let t0 = std::time::Instant::now();
+    docker
+        .commit_container(opts, cfg)
+        .await
+        .map_err(|e| AppError::bad_gateway(format!("生成镜像失败：{e}")))?;
+    let size = docker
+        .inspect_image(&full)
+        .await
+        .ok()
+        .and_then(|v| v.size)
+        .unwrap_or(0);
+    state.tasks.log(
+        tid,
+        &format!(
+            "✔ 镜像已生成：{full}（{}，耗时 {:.1}s）",
+            fmt_size(size as i64),
+            t0.elapsed().as_secs_f64()
+        ),
+    );
+    state.tasks.log(
+        tid,
+        "可在「备份」页的镜像快照列表中「应用」此镜像：环境立即恢复，/app 数据目录不受影响",
+    );
+    let _ = log_op(&state.db, inst.id, "image", &format!("生成镜像快照 {full}")).await;
+    Ok(())
+}
+
+/// 列出本实例的镜像快照（按生成时间倒序）。
+pub async fn list_snapshot_images(state: &AppState, iid: i64) -> AppResult<Vec<Value>> {
+    let docker = state.docker.get().await?;
+    let prefix = snapshot_prefix(iid);
+    let mut out: Vec<Value> = Vec::new();
+    let opts = ListImagesOptions::<String> {
+        all: false,
+        ..Default::default()
+    };
+    let list = docker
+        .list_images(Some(opts))
+        .await
+        .map_err(|e| AppError::bad_gateway(format!("读取镜像列表失败：{e}")))?;
+    for img in list {
+        for tag in img.repo_tags {
+            if !tag.starts_with(&prefix) {
+                continue;
+            }
+            let ts = tag.trim_start_matches(&prefix);
+            let kind = snap_kind(&tag);
+            let created = chrono::DateTime::from_timestamp(img.created, 0)
+                .map(|d| {
+                    use chrono::Local;
+                    d.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string()
+                })
+                .unwrap_or_default();
+            out.push(serde_json::json!({
+                "tag": tag,
+                "kind": kind,
+                "size": img.size,
+                "size_text": fmt_size(img.size),
+                "created_at": created,
+                "comment": ts,
+            }));
+        }
+    }
+    out.sort_by(|a, b| {
+        b["created_at"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(a["created_at"].as_str().unwrap_or(""))
+    });
+    Ok(out)
+}
+
+/// 删除本实例的镜像快照（tag 归属校验）。
+pub async fn delete_snapshot_image(state: &AppState, iid: i64, tag: &str) -> AppResult<()> {
+    let prefix = snapshot_prefix(iid);
+    if !tag.starts_with(&prefix) {
+        return Err(AppError::bad_request("镜像不存在或不属于本实例"));
+    }
+    let docker = state.docker.get().await?;
+    docker
+        .remove_image(
+            tag,
+            Some(RemoveImageOptions {
+                force: true,
+                noprune: false,
+            }),
+            None,
+        )
+        .await
+        .map(|_| ())
+        .map_err(|e| AppError::bad_gateway(format!("删除镜像失败：{e}")))
+}
+
+/// 应用镜像快照：换镜像并重建容器（后台任务）。失败自动回滚到原镜像。
+/// /app 数据目录是挂载卷，应用快照不会动数据；容器内依赖以快照为准。
+pub async fn apply_snapshot_image(
+    state: &AppState,
+    inst: &mut Instance,
+    tag: &str,
+    tid: &str,
+) -> AppResult<()> {
+    let prefix = snapshot_prefix(inst.id);
+    if !tag.starts_with(&prefix) {
+        return Err(AppError::bad_request("镜像不存在或不属于本实例"));
+    }
+    let docker = state.docker.get().await?;
+    match docker.inspect_image(tag).await {
+        Ok(_) => {}
+        Err(bollard::errors::Error::DockerResponseServerError {
+            status_code: 404, ..
+        }) => return Err(AppError::not_found("镜像快照不存在（可能已被删除）")),
+        Err(e) => return Err(AppError::bad_gateway(format!("Docker 调用失败：{e}"))),
+    }
+    if tag == inst.image {
+        state.tasks.log(tid, "当前实例已在用该镜像，无需切换");
+        return Ok(());
+    }
+
+    state
+        .tasks
+        .log(tid, &format!("目标镜像：{tag}（{}）", runtime_kind(tag)));
+    let was_running = inst.status == "running";
+    if was_running {
+        state.tasks.log(tid, "[1/4] 停止当前容器…");
+        let _ = stop_instance(state, inst).await;
+    } else {
+        state.tasks.log(tid, "[1/4] 实例未在运行，跳过停止");
+    }
+    let old = inst.image.clone();
+    inst.image = tag.to_string();
+    let _ = persist_image(&state.db, inst).await;
+    state
+        .tasks
+        .log(tid, "[2/4] 重建容器（数据目录 /app 与访问端口不变）…");
+    if let Err(e) = recreate_container(state, inst).await {
+        state.tasks.log(tid, &format!("[回滚] 重建失败：{}，恢复原镜像 {old}", e.detail));
+        inst.image = old;
+        let _ = recreate_container(state, inst).await;
+        let _ = persist_image(&state.db, inst).await;
+        return Err(AppError::bad_gateway("重建容器失败，已恢复原镜像"));
+    }
+    if was_running {
+        state.tasks.log(tid, "[3/4] 启动实例…");
+        let _ = start_instance(state, inst).await;
+        let _ = persist_status(&state.db, inst).await;
+        state.tasks.log(tid, "[4/4] 诊断应用启动状态…");
+        match diagnose_startup(state, inst).await {
+            Ok(_) => state
+                .tasks
+                .log(tid, &format!("✔ 完成！服务已恢复运行（{tag}）")),
+            Err(e) => state
+                .tasks
+                .log(tid, &format!("容器已切换，但应用启动异常：{}（请到「日志」页查看）", e.detail)),
+        }
+    } else {
+        state
+            .tasks
+            .log(tid, &format!("✔ 完成！下次启动将使用 {tag}"));
+    }
+    let _ = log_op(&state.db, inst.id, "image", &format!("应用镜像快照 {tag}")).await;
+    Ok(())
+}
+
+fn fmt_size(bytes: i64) -> String {
+    let b = bytes.max(0) as f64;
+    if b >= 1024.0 * 1024.0 * 1024.0 {
+        format!("{:.1} GB", b / 1024.0 / 1024.0 / 1024.0)
+    } else if b >= 1024.0 * 1024.0 {
+        format!("{:.1} MB", b / 1024.0 / 1024.0)
+    } else {
+        format!("{:.0} KB", b / 1024.0)
+    }
 }
 
 pub async fn fetch_instance(pool: &SqlitePool, id: i64) -> AppResult<Instance> {
