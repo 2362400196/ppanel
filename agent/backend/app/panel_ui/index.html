@@ -71,7 +71,7 @@ input, textarea, select { font-family: inherit; font-size: 13px; }
 .acard-acts { display: flex; flex-wrap: wrap; gap: 8px; border-top: 1px dashed var(--line); padding-top: 15px; }
 
 /* 面板模态框模式：进入面板以弹窗覆盖，管理员列表保留在底层 */
-#app.pmode { position: fixed; inset: 2.5vh 3vw; z-index: 80; overflow-y: auto; background: var(--bg); border-radius: 16px; border: 1px solid var(--line); box-shadow: 0 30px 80px rgba(15, 40, 34, .35); }
+#app.pmode { position: fixed; inset: 0; z-index: 80; overflow-y: auto; background: var(--bg); }
 .expire-banner { margin: 10px 22px 0; padding: 9px 14px; border-radius: 10px; font-size: 12.5px; font-weight: 600; }
 .expire-banner.warn { background: rgba(245, 158, 11, .12); color: #b45309; border: 1px solid rgba(245, 158, 11, .35); }
 .expire-banner.danger { background: rgba(239, 68, 68, .10); color: #b91c1c; border: 1px solid rgba(239, 68, 68, .35); }
@@ -269,11 +269,11 @@ select {
 select:hover { border-color: #c3cdc8; }
 select:focus { border-color: var(--primary); }
 /* 定时任务表单（宝塔式分组字段） */
-.cron-grid { display: flex; flex-wrap: wrap; gap: 10px 12px; margin-top: 12px; }
-.cron-field { display: flex; flex-direction: column; gap: 5px; flex: 1 1 130px; min-width: 130px; }
-.cron-field.cron-grow { flex: 3 1 240px; }
+.cron-grid { display: flex; flex-wrap: wrap; gap: 10px 12px; margin-top: 12px; max-width: 980px; }
+.cron-field { display: flex; flex-direction: column; gap: 5px; flex: 1 1 150px; min-width: 140px; max-width: 260px; }
+.cron-field.cron-grow { flex: 1 1 260px; max-width: 460px; }
 .cron-field > label { font-size: 12px; color: var(--text2); }
-.cron-field.slim { flex: 0 1 120px; min-width: 108px; }
+.cron-field.slim { flex: 0 1 110px; min-width: 100px; max-width: 130px; }
 .cron-field input, .cron-field select {
   width: 100%; box-sizing: border-box; height: 38px; border: 1px solid var(--line);
   border-radius: 10px; padding: 0 10px; background: #fff; outline: none; font-size: 13px; transition: border .15s;

@@ -6,7 +6,8 @@ const props = defineProps({
   title: String,
   width: { type: [String, Number], default: '440px' },
   persistent: Boolean, // 点击遮罩/Esc 不关闭
-  bare: Boolean // 无边框模式：不渲染头部、无内边距，内容完全填充（Esc/点遮罩关闭）
+  bare: Boolean, // 无边框模式：不渲染头部、无内边距，内容完全填充（Esc/点遮罩关闭）
+  fullscreen: Boolean // 全屏模式：铺满整个视口，无圆角无边距
 })
 const emit = defineEmits(['update:open', 'close'])
 
@@ -36,7 +37,7 @@ watch(() => props.open, v => {
   <Teleport to="body">
     <Transition name="modal">
       <div v-if="open" class="modal-mask" @mousedown.self="close">
-        <div class="modal-panel" :class="{ bare }" :style="{ width: typeof width === 'number' ? width + 'px' : width }">
+        <div class="modal-panel" :class="{ bare, fullscreen }" :style="{ width: typeof width === 'number' ? width + 'px' : width }">
           <div v-if="!bare" class="modal-head">
             <span v-if="title" class="modal-title">{{ title }}</span>
             <button class="modal-x" aria-label="关闭" @click="closeForced">
@@ -86,6 +87,12 @@ watch(() => props.open, v => {
 .modal-x svg { width: 16px; height: 16px; }
 .modal-body { padding: 16px 20px; overflow-y: auto; }
 .modal-panel.bare .modal-body { padding: 0; overflow: hidden; }
+.modal-panel.fullscreen {
+  width: 100vw !important; height: 100vh;
+  max-width: 100vw; max-height: 100vh;
+  border-radius: 0; border: none; box-shadow: none;
+  background: var(--bg, #f6f8f7);
+}
 .modal-foot {
   display: flex; justify-content: flex-end; gap: 10px;
   padding: 0 20px 16px;

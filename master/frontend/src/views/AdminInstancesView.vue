@@ -224,7 +224,7 @@ onUnmounted(() => clearInterval(timer))
     </UITable>
 
     <!-- 实例独立面板弹窗：一键登录，iframe 直接嵌入被控面板 -->
-    <UIModal v-model:open="panelOpen" bare width="94vw" @close="closePanel">
+    <UIModal v-model:open="panelOpen" bare fullscreen width="100vw" @close="closePanel">
       <iframe v-if="panelSrc" :src="panelSrc" class="panel-frame" />
     </UIModal>
 
@@ -239,7 +239,7 @@ onUnmounted(() => clearInterval(timer))
 .sec-right { display: flex; align-items: center; gap: 10px; }
 .node-name { font-size: 13px; }
 .panel-frame {
-  display: block; width: 100%; height: calc(100vh - 64px);  /* 撑满弹窗（max-height 同值），不留白边 */
+  display: block; width: 100%; height: 100vh;  /* 全屏弹窗：铺满视口 */
   border: 0; background: var(--bg);
 }
 .up-time { color: var(--ok, #30a46c); font-variant-numeric: tabular-nums; }
