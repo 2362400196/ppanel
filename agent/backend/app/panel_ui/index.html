@@ -280,6 +280,16 @@ select:focus { border-color: var(--primary); }
 }
 .cron-field select { padding-right: 30px; }
 .cron-field input:focus, .cron-field select:focus { border-color: var(--primary); }
+/* 宝塔式横向表单（标签在左、控件在右） */
+.bf-row { display: flex; align-items: center; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+.bf-label { width: 76px; flex-shrink: 0; font-size: 13.5px; color: var(--text); font-weight: 600; }
+.bf-row input, .bf-row select {
+  height: 36px; border: 1px solid var(--line); border-radius: 9px; padding: 0 10px;
+  background: #fff; outline: none; font-size: 13px; font-family: inherit; color: var(--text); transition: border .15s; box-sizing: border-box;
+}
+.bf-row input:focus, .bf-row select:focus { border-color: var(--primary); }
+.bf-inline { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text2); }
+.bf-prev { font-size: 12.5px; color: var(--primary-deep); background: var(--primary-soft); border-radius: 8px; padding: 5px 10px; }
 
 /* 自绘下拉（pps-enhance 生成的按钮与列表） */
 .pps-btn { position: relative; display: inline-flex; align-items: center; text-align: left; padding-right: 28px !important;
@@ -605,6 +615,7 @@ function showApidoc() {
       <button data-view="logs" onclick="switchView('logs')">日志</button>
       <button data-view="ops" onclick="switchView('ops')">操作记录</button>
       <button data-view="apidoc" onclick="switchView('apidoc')">API 文档</button>
+      <div id="uiVer" style="margin-top:auto;padding:10px 13px;font-size:10.5px;color:var(--text2);opacity:.55;user-select:none">UI v20261104.4</div>
     </nav>
 
     <div class="content">
@@ -957,84 +968,73 @@ function showApidoc() {
       <div id="v-crons" class="view">
         <div class="card">
           <div class="page-title">新建定时任务</div>
-          <div class="cron-grid">
-            <div class="cron-field"><label>任务类型</label>
-              <select id="cronKind" onchange="cronKindChange()">
-                <option value="command">执行命令</option>
-                <option value="dir">备份目录</option>
-                <option value="db">备份数据库</option>
-                <option value="both">备份目录 + 数据库</option>
-              </select>
-            </div>
-            <div class="cron-field" id="cronDestField" style="display:none"><label>备份到哪里</label>
-              <select id="cronDest" onchange="cronHint()">
-                <option value="local">本地磁盘</option>
-                <option value="cos">COS 云存储</option>
-                <option value="both">本地 + COS</option>
-              </select>
-            </div>
-            <div class="cron-field cron-grow" id="cronCmdField"><label>执行命令</label>
-              <input id="cronCommand" placeholder="在实例容器内执行的命令（如 php /app/bin/console cache:clear）">
-            </div>
-            <div class="cron-field cron-grow" id="cronPathField" style="display:none"><label>备份目录</label>
-              <input id="cronPath" placeholder="容器内目录（如 /app/uploads）">
-            </div>
+          <div class="bf-row"><label class="bf-label">任务类型</label>
+            <select id="cronKind" onchange="cronKindChange()" style="width:220px">
+              <option value="command">执行命令</option>
+              <option value="dir">备份目录</option>
+              <option value="db">备份数据库</option>
+              <option value="both">备份目录 + 数据库</option>
+            </select>
           </div>
-          <div class="cron-grid">
-            <div class="cron-field"><label>执行周期</label>
-              <select id="cronFreq" onchange="cronFreqChange()">
-                <option value="nmin">每 N 分钟</option>
-                <option value="hourly">每小时</option>
-                <option value="daily" selected>每天</option>
-                <option value="weekly">每周</option>
-                <option value="monthly">每月</option>
-                <option value="yearly">每年</option>
-                <option value="once">仅一次（指定日期）</option>
-                <option value="custom">自定义 cron 表达式</option>
-              </select>
-            </div>
-            <div class="cron-field slim" id="cronNminField" style="display:none"><label>间隔</label>
-              <select id="cronNmin" onchange="cronHint()">
-                <option value="1">每 1 分钟</option>
-                <option value="5" selected>每 5 分钟</option>
-                <option value="10">每 10 分钟</option>
-                <option value="15">每 15 分钟</option>
-                <option value="30">每 30 分钟</option>
-              </select>
-            </div>
-            <div class="cron-field slim" id="cronHourField" style="display:none"><label>时</label>
-              <select id="cronHour" onchange="cronHint()"></select>
-            </div>
-            <div class="cron-field slim" id="cronMinField" style="display:none"><label>分</label>
-              <select id="cronMin" onchange="cronHint()"></select>
-            </div>
-            <div class="cron-field slim" id="cronDowField" style="display:none"><label>星期</label>
-              <select id="cronDow" onchange="cronHint()">
-                <option value="1">周一</option>
-                <option value="2">周二</option>
-                <option value="3">周三</option>
-                <option value="4">周四</option>
-                <option value="5">周五</option>
-                <option value="6">周六</option>
+          <div class="bf-row"><label class="bf-label">执行周期</label>
+            <select id="cronFreq" onchange="cronFreqChange()" style="width:170px">
+              <option value="nmin">每 N 分钟</option>
+              <option value="hourly">每小时</option>
+              <option value="daily" selected>每天</option>
+              <option value="weekly">每周</option>
+              <option value="monthly">每月</option>
+              <option value="yearly">每年</option>
+              <option value="once">仅一次（指定日期）</option>
+              <option value="custom">自定义 cron 表达式</option>
+            </select>
+            <span id="cronNminField" class="bf-inline" style="display:none">每
+              <select id="cronNmin" onchange="cronHint()" style="width:80px">
+                <option value="1">1</option><option value="5" selected>5</option>
+                <option value="10">10</option><option value="15">15</option><option value="30">30</option>
+              </select> 分钟</span>
+            <span id="cronOnceYearField" class="bf-inline" style="display:none">
+              <select id="cronOnceYear" onchange="cronUpdateDays()" style="width:110px"></select> 年
+            </span>
+            <span id="cronMonthField" class="bf-inline" style="display:none">
+              <select id="cronMonth" onchange="cronUpdateDays()" style="width:96px"></select> 月
+            </span>
+            <span id="cronDayField" class="bf-inline" style="display:none">
+              <select id="cronDay" onchange="cronHint()" style="width:96px"></select> 号
+            </span>
+            <span id="cronDowField" class="bf-inline" style="display:none">
+              <select id="cronDow" onchange="cronHint()" style="width:96px">
+                <option value="1">周一</option><option value="2">周二</option><option value="3">周三</option>
+                <option value="4">周四</option><option value="5">周五</option><option value="6">周六</option>
                 <option value="0">周日</option>
               </select>
-            </div>
-            <div class="cron-field slim" id="cronDayField" style="display:none"><label>日</label>
-              <select id="cronDay" onchange="cronHint()"></select>
-            </div>
-            <div class="cron-field slim" id="cronMonthField" style="display:none"><label>月</label>
-              <select id="cronMonth" onchange="cronUpdateDays()"></select>
-            </div>
-            <div class="cron-field slim" id="cronOnceYearField" style="display:none"><label>年份</label>
-              <select id="cronOnceYear" onchange="cronUpdateDays()"></select>
-            </div>
-            <div class="cron-field cron-grow" id="cronCustomField" style="display:none"><label>cron 表达式</label>
-              <input id="cronCustom" placeholder="分 时 日 月 周（如 0 3 * * *），可加第 6 段年份">
-            </div>
+            </span>
+            <select id="cronHour" onchange="cronHint()" style="display:none;width:92px"></select>
+            <span id="cronHourlyPre" class="bf-inline" style="display:none">每小时的第</span>
+            <select id="cronMin" onchange="cronHint()" style="display:none;width:92px"></select>
+            <span id="cronHourlyPost" class="bf-inline" style="display:none">分</span>
+            <input id="cronCustom" style="display:none;width:340px" placeholder="分 时 日 月 周（如 0 3 * * *），可加第 6 段年份">
           </div>
-          <div style="display:flex;align-items:center;gap:14px;margin-top:16px">
+          <div class="bf-row"><label class="bf-label"></label>
+            <span class="bf-prev" id="cronPreview"></span>
+          </div>
+          <div class="bf-row" id="cronDestField" style="display:none"><label class="bf-label">备份到哪里</label>
+            <select id="cronDest" onchange="cronHint()" style="width:220px">
+              <option value="local">本地磁盘</option>
+              <option value="cos">COS 云存储</option>
+              <option value="both">本地 + COS</option>
+            </select>
+          </div>
+          <div class="bf-row" id="cronPathField" style="display:none"><label class="bf-label">备份目录</label>
+            <input id="cronPath" style="width:340px" placeholder="容器内绝对路径（如 /app/uploads）">
+          </div>
+          <div class="bf-row" id="cronCmdField"><label class="bf-label">执行内容</label>
+            <input id="cronCommand" style="width:520px" placeholder="在实例容器内执行的命令（如 php /app/bin/console cache:clear）">
+          </div>
+          <div class="bf-row"><label class="bf-label">温馨提示</label>
+            <span class="hint" style="margin:0">备份产物可在「备份」页随时下载 / 恢复；任务支持手动「立即执行」；仅一次任务执行成功后自动停用。</span>
+          </div>
+          <div class="bf-row"><label class="bf-label"></label>
             <button class="btn" onclick="saveCron()">添加任务</button>
-            <span class="hint" id="cronHint" style="margin:0"></span>
           </div>
         </div>
         <div class="card">
@@ -1990,13 +1990,15 @@ function cronFreqChange () {
   const f = $('cronFreq').value
   const hm = ['daily', 'weekly', 'monthly', 'yearly', 'once'].includes(f)
   $('cronNminField').style.display = f === 'nmin' ? '' : 'none'
-  $('cronHourField').style.display = hm ? '' : 'none'
-  $('cronMinField').style.display = (hm || f === 'hourly') ? '' : 'none'
+  $('cronHour').style.display = hm ? '' : 'none'
+  $('cronMin').style.display = (hm || f === 'hourly') ? '' : 'none'
+  $('cronHourlyPre').style.display = f === 'hourly' ? '' : 'none'
+  $('cronHourlyPost').style.display = f === 'hourly' ? '' : 'none'
   $('cronDowField').style.display = f === 'weekly' ? '' : 'none'
   $('cronDayField').style.display = (f === 'monthly' || f === 'yearly' || f === 'once') ? '' : 'none'
   $('cronMonthField').style.display = (f === 'yearly' || f === 'once') ? '' : 'none'
   $('cronOnceYearField').style.display = f === 'once' ? '' : 'none'
-  $('cronCustomField').style.display = f === 'custom' ? '' : 'none'
+  $('cronCustom').style.display = f === 'custom' ? '' : 'none'
   cronUpdateDays()
   cronHint()
 }
@@ -2024,9 +2026,22 @@ function cronHint () {
   const k = $('cronKind').value
   const f = $('cronFreq').value
   const s = buildCronSchedule()
-  const kindText = k === 'command' ? '命令在实例容器内执行（docker exec）'
+  const pad = n => String(parseInt(n, 10) || 0).padStart(2, '0')
+  const hm = pad($('cronHour').value) + ':' + pad($('cronMin').value)
+  const dowTxt = { 1: '一', 2: '二', 3: '三', 4: '四', 5: '五', 6: '六', 0: '日' }[$('cronDow').value] || '一'
+  let freqText
+  if (f === 'custom') freqText = '按自定义 cron 表达式执行'
+  else if (f === 'nmin') freqText = '每 ' + ($('cronNmin').value || 5) + ' 分钟执行一次'
+  else if (f === 'hourly') freqText = '每小时的第 ' + pad($('cronMin').value) + ' 分执行'
+  else if (f === 'daily') freqText = '每天的 ' + hm + ' 执行一次'
+  else if (f === 'weekly') freqText = '每周' + dowTxt + '的 ' + hm + ' 执行一次'
+  else if (f === 'monthly') freqText = '每月 ' + ($('cronDay').value || 1) + ' 号的 ' + hm + ' 执行一次'
+  else if (f === 'yearly') freqText = '每年 ' + ($('cronMonth').value || 1) + ' 月 ' + ($('cronDay').value || 1) + ' 号的 ' + hm + ' 执行一次'
+  else if (f === 'once') freqText = ($('cronOnceYear').value || '----') + ' 年 ' + ($('cronMonth').value || 1) + ' 月 ' + ($('cronDay').value || 1) + ' 号的 ' + hm + ' 执行一次，仅此一次（执行后自动停用）'
+  else freqText = ''
+  const kindText = k === 'command' ? '命令在实例容器内执行'
     : k === 'db' ? '备份实例已开通数据库的全部表'
-    : k === 'dir' ? '把容器内指定目录打包为 .tar.gz'
+    : k === 'dir' ? '打包容器内指定目录为 .tar.gz'
     : '先备份目录，再备份数据库'
   let destText = ''
   if (k !== 'command') {
@@ -2035,9 +2050,7 @@ function cronHint () {
       : d === 'both' ? '，保存本地并上传腾讯云 COS'
       : '，保存到节点本地备份目录'
   }
-  const freqText = f === 'custom' ? '自定义 cron 表达式' : '对应表达式 ' + (s || '-')
-  const onceTip = (f === 'once' && s) ? '（执行一次后自动停用）' : ''
-  $('cronHint').textContent = kindText + destText + '；' + freqText + onceTip
+  $('cronPreview').textContent = (freqText || '请选择执行周期') + '；' + kindText + destText + (f === 'custom' && s ? '（' + s + '）' : '')
 }
 async function loadCrons () {
   try {
@@ -4534,14 +4547,14 @@ setInterval(() => {
 function ppsEnhance(root) {
   (root || document).querySelectorAll('select:not([data-pps])').forEach(sel => {
     sel.dataset.pps = '1'
-    sel.style.display = 'none'
-    // 外观类名与内联样式继承原 select，保持各场景一致
+    // 先复制原 select 的行内样式，再隐藏它——顺序反了会把 display:none 一起复制过去（下拉全隐形的根因）
     const btn = document.createElement('button')
     btn.type = 'button'
     btn.className = (sel.className || '') + ' pps-btn'
     btn.style.cssText = sel.style.cssText
     const cs = getComputedStyle(sel)
     btn.style.flexGrow = cs.flexGrow; btn.style.flexShrink = cs.flexShrink; btn.style.flexBasis = cs.flexBasis
+    sel.style.display = 'none'
     const txt = document.createElement('span'); txt.className = 'pps-txt'
     const ar = document.createElement('span'); ar.className = 'pps-arrow'
     btn.append(txt, ar)
