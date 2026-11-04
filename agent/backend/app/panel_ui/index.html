@@ -935,6 +935,21 @@ function showApidoc() {
           <p class="hint">把实例容器内的某个目录打包为 tar.gz（比整容器备份体积小得多）。恢复时解压覆盖到目标目录的同名文件，不会删除其他文件。</p>
         </div>
         <div class="card">
+          <div class="page-title">安全快照</div>
+          <p class="hint">你在「重置实例」「删除」等危险操作前，系统会自动把整个数据目录打包存档（保留最近 10 份）。如果误操作了，可以从这里的快照一键找回全部数据（含网站文件）。恢复前系统还会自动留档当前状态。</p>
+          <div id="snapListWrap" style="overflow-x:auto">
+            <table style="width:100%;border-collapse:collapse;font-size:12.5px">
+              <thead><tr style="color:var(--text2);text-align:left">
+                <th style="padding:6px 8px;border-bottom:1px solid var(--line)">快照文件</th>
+                <th style="padding:6px 8px;border-bottom:1px solid var(--line)">大小</th>
+                <th style="padding:6px 8px;border-bottom:1px solid var(--line)">生成时间</th>
+                <th style="padding:6px 8px;border-bottom:1px solid var(--line)">操作</th>
+              </tr></thead>
+              <tbody id="snapList"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="card">
           <div class="page-title">备份文件</div>
           <div id="bkListWrap" style="overflow-x:auto">
             <table style="width:100%;border-collapse:collapse;font-size:12.5px">
@@ -1810,7 +1825,7 @@ function switchView (v) {
   if (v === 'overview') { loadStats(); loadUsage(usageHours) }
   if (v === 'domain') loadDomain()
   if (v === 'database') loadDatabase()
-  if (v === 'backup') loadBackup()
+  if (v === 'backup') { loadBackup(); loadSnapshots() }
   if (v === 'crons') { cronFillOptions(); cronKindChange(); cronFreqChange(); loadCrons() }
   if (v === 'site') loadSite()
   if (v === 'deps') { if (isPhp) loadPhpExt(); else if (isNode) loadNodePkgs(); else if (isGo) loadGoMod(); else loadPyPkgs() }
@@ -1929,6 +1944,33 @@ async function doRestoreDb () {
 async function doRestoreDir () {
   toast('正在恢复…')
   try { const d = await api('POST', '/panel/instance/backup/restore/dir', { file: bkRestoreTarget.file, path: $('bkRestorePath').value.trim() }); toast(d.detail, true) } catch (e) { toast(e.message, false) }
+}
+
+// ---------- 安全快照 ----------
+async function loadSnapshots () {
+  try {
+    const d = await api('GET', '/panel/instance/snapshots')
+    const list = d.snapshots || []
+    const tb = $('snapList')
+    tb.innerHTML = list.length ? '' : '<tr><td colspan="4" style="padding:10px 8px;color:var(--text2)">暂无安全快照（重置 / 删除等危险操作前会自动生成）</td></tr>'
+    list.forEach(s => {
+      const tr = document.createElement('tr')
+      tr.innerHTML = `
+        <td class="mono" style="padding:7px 8px;border-bottom:1px solid var(--line)">${s.file}</td>
+        <td class="mono" style="padding:7px 8px;border-bottom:1px solid var(--line)">${fmtSize(s.size)}</td>
+        <td class="mono" style="padding:7px 8px;border-bottom:1px solid var(--line)">${s.created_at}</td>
+        <td style="padding:7px 8px;border-bottom:1px solid var(--line);white-space:nowrap"></td>`
+      const td = tr.lastElementChild
+      td.appendChild(btn('下载', 'ghost sm', () => window.open(API + '/panel/instance/backup/download?file=' + encodeURIComponent(s.file) + '&t=' + JWT)))
+      td.appendChild(btn('恢复此快照', 'ghost sm danger-text', () => {
+        confirmBox('恢复安全快照', `将用快照 ${s.file} 覆盖当前整个数据目录（网站文件全部回退到快照时点）。恢复前系统会自动留档当前状态；恢复期间实例会短暂重启。确定继续？`, async () => {
+          toast('正在恢复，实例将重启…')
+          try { const r = await api('POST', '/panel/instance/snapshots/restore', { file: s.file }); toast(r.detail, true) } catch (e) { toast(e.message, false) }
+        })
+      }))
+      tb.appendChild(tr)
+    })
+  } catch (e) { /* 快照接口异常不打断备份页 */ }
 }
 
 // ---------- 定时任务 ----------

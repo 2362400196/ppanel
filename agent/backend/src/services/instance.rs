@@ -809,6 +809,52 @@ pub async fn reset_instance(state: &AppState, inst: &mut Instance) -> AppResult<
     Ok(serde_json::json!({ "status": inst.status, "reset": true }))
 }
 
+/// 从 predestroy 安全快照恢复数据目录：
+/// 先给当前数据目录再打一份快照（二次安全网，目录为空则跳过）
+/// → 停容器 → 清空数据目录 → 解包快照覆盖 → 重建容器 → 原来在运行则拉起并诊断。
+/// 文件名归属与格式校验在路由层完成（own_file + predestroy 后缀）。
+pub async fn restore_snapshot(
+    state: &AppState,
+    inst: &mut Instance,
+    fname: &str,
+) -> AppResult<serde_json::Value> {
+    let archive = std::path::Path::new(&crate::services::backup::backup_root()).join(fname);
+    if !archive.is_file() {
+        return Err(AppError::not_found("快照文件不存在"));
+    }
+    // 二次安全网：恢复会覆盖现有数据，先把当前状态留档（当前目录为空则无需留档）
+    snapshot_host_dir(inst).await?;
+    let was_running = inst.status == "running";
+    if was_running {
+        let _ = stop_instance(state, inst).await;
+    }
+    let dir = std::path::Path::new(&inst.host_dir);
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                let _ = std::fs::remove_dir_all(&p);
+            } else {
+                let _ = std::fs::remove_file(&p);
+            }
+        }
+    }
+    let dest = dir.to_path_buf();
+    let arc = archive.clone();
+    crate::error::blocking(move || {
+        crate::services::backup::restore_snapshot_blocking(&arc, &dest)
+    })
+    .await?;
+    println!("[agent] 实例 {} 已从快照恢复：{}", inst.id, fname);
+    recreate_container(state, inst).await?;
+    if was_running {
+        start_instance(state, inst).await?;
+        diagnose_startup(state, inst).await?;
+    }
+    persist_status(&state.db, inst).await?;
+    Ok(serde_json::json!({ "status": inst.status, "restored_from": fname }))
+}
+
 fn entry_cmd(inst: &Instance) -> Vec<String> {
     // 用户自定义了启动命令就执行它：入口可以是任何东西
     // （python main.py / python -m uvicorn app.main:app --port 8000 / gunicorn …）。

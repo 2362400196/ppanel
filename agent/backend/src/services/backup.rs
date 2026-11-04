@@ -1542,6 +1542,26 @@ pub fn snapshot_dir_blocking(dir: &Path, label: &str) -> AppResult<String> {
     Ok(fname)
 }
 
+/// 把 tar.gz 快照解包覆盖到宿主目录（快照恢复用）。
+/// tar crate 的 unpack 默认拒绝路径穿越条目（../ 等），异常归档会直接报错。
+/// 阻塞操作，异步上下文请经 `crate::error::blocking` 调用。
+pub fn restore_snapshot_blocking(archive: &Path, dest: &Path) -> AppResult<()> {
+    if !archive.is_file() {
+        return Err(AppError::not_found("快照文件不存在"));
+    }
+    std::fs::create_dir_all(dest)
+        .map_err(|e| AppError::bad_gateway(format!("数据目录创建失败：{e}")))?;
+    let f = std::fs::File::open(archive)
+        .map_err(|e| AppError::bad_gateway(format!("快照文件打开失败：{e}")))?;
+    let gz = flate2::read::GzDecoder::new(f);
+    let mut tb = tar::Archive::new(gz);
+    tb.set_preserve_permissions(true);
+    tb.set_overwrite(true);
+    tb.unpack(dest)
+        .map_err(|e| AppError::bad_gateway(format!("快照解包失败：{e}")))?;
+    Ok(())
+}
+
 /// 按标记清理旧快照：文件名含 `tag` 且以 `ext` 结尾的，按修改时间保留最近 keep 份。
 /// 返回删除数量。自动快照与自备份共用（手动备份的文件名不含标记，不受影响）。
 pub fn cleanup_snapshots(tag: &str, ext: &str, keep: usize) -> usize {

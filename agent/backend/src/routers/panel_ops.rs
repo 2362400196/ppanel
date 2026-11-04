@@ -375,6 +375,74 @@ async fn restore_db(
 }
 
 // =====================================================================
+// 安全快照：破坏性操作（重置/删除/删库）前自动生成的整目录快照
+// 文件名：inst{id}_{cname}_{ts}_predestroy.tar.gz，仅本实例可见
+// =====================================================================
+
+/// 快照文件归属与格式校验（safe_path 已拦路径穿越）。
+fn own_snapshot(iid: i64, file: &str) -> AppResult<PathBuf> {
+    let path = backup::safe_path(file)?;
+    let ok = file.starts_with(&format!("inst{iid}_"))
+        && file.ends_with("_predestroy.tar.gz")
+        && path.is_file();
+    if !ok {
+        return Err(AppError::not_found("快照不存在"));
+    }
+    Ok(path)
+}
+
+async fn snapshot_list(PanelInst(inst): PanelInst) -> AppResult<Json<Value>> {
+    let iid = inst.id;
+    let root = backup::backup_root();
+    let mut items: Vec<Value> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(std::path::Path::new(&root)) {
+        for ent in rd.flatten() {
+            let name = ent.file_name().to_string_lossy().to_string();
+            if !name.starts_with(&format!("inst{iid}_")) || !name.ends_with("_predestroy.tar.gz") {
+                continue;
+            }
+            let Ok(md) = ent.metadata() else { continue };
+            if !md.is_file() {
+                continue;
+            }
+            let created = md
+                .modified()
+                .ok()
+                .map(|t| {
+                    let dt: chrono::DateTime<chrono::Local> = t.into();
+                    dt.format("%Y-%m-%d %H:%M").to_string()
+                })
+                .unwrap_or_default();
+            items.push(json!({
+                "file": name,
+                "size": md.len(),
+                "created_at": created,
+            }));
+        }
+    }
+    items.sort_by(|a, b| {
+        b["created_at"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(a["created_at"].as_str().unwrap_or(""))
+    });
+    Ok(Json(json!({ "snapshots": items })))
+}
+
+async fn snapshot_restore(
+    PanelInst(mut inst): PanelInst,
+    State(state): State<AppState>,
+    Json(body): Json<Value>,
+) -> AppResult<Json<Value>> {
+    let file = sfield(&body, "file");
+    own_snapshot(inst.id, &file)?;
+    let out = instance::restore_snapshot(&state, &mut inst, &file).await?;
+    Ok(Json(json!({
+        "detail": format!("已从快照恢复数据目录，实例状态：{}", out["status"].as_str().unwrap_or("unknown"))
+    })))
+}
+
+// =====================================================================
 // 定时任务
 // =====================================================================
 
@@ -1192,6 +1260,8 @@ pub fn routes() -> Router<AppState> {
         .route("/panel/instance/backup/dir", post(backup_dir))
         .route("/panel/instance/backup/restore/dir", post(restore_dir))
         .route("/panel/instance/backup/restore/db", post(restore_db))
+        .route("/panel/instance/snapshots", get(snapshot_list))
+        .route("/panel/instance/snapshots/restore", post(snapshot_restore))
         // 定时任务
         .route(
             "/panel/instance/crons",
