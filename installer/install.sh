@@ -42,7 +42,7 @@ AGENT_PORT="${PORT:-9100}"
 # 被控实现：rust（预编译二进制）/ python（源码 + venv）。空 = 自动（有发布包用 rust，否则 python）
 AGENT_IMPL="${PPANEL_AGENT_IMPL:-auto}"
 AGENT_RS_DIR="${AGENT_RS_DIR:-/opt/ppanel-agent}"   # Rust 版安装目录，与源码树解耦
-AGENT_RS_TAG="${AGENT_RS_TAG:-v1.0}"                # Release 标签（二进制附件所在版本）
+AGENT_RS_TAG="${AGENT_RS_TAG:-v1.1}"                # Release 标签（二进制附件所在版本）
 AGENT_RS_TARBALL="${AGENT_RS_TARBALL:-}"            # 本地离线包路径，设置后跳过下载
 
 # 颜色用 $'...' 定义为真实 ESC 字节：read -rp 的提示符不解析 \033 转义，字面定义会在确认提示里打出乱码
