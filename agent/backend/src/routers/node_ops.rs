@@ -1156,6 +1156,58 @@ async fn open_provision(
     Ok(Json(issued(&inst, &headers)))
 }
 
+/// 开放面文件上传：POST /open/instances/{iid}/files/upload?path=/目标目录
+/// multipart 表单：一个或多个文件字段（字段名任意，取 filename）；`path` 字段指定目标目录。
+async fn open_upload(
+    State(state): State<AppState>,
+    _auth: OpenApiAuth,
+    AxPath(iid): AxPath<i64>,
+    Query(q): Query<HashMap<String, String>>,
+    mut multipart: Multipart,
+) -> AppResult<Json<Value>> {
+    let inst = instance::fetch_instance(&state.db, iid).await?;
+    file::ensure_root(&inst.host_dir);
+    let root = inst.host_dir.clone();
+    let dir = q.get("path").cloned().unwrap_or_else(|| "/".to_string());
+    let limit = (settings().upload_limit_mb * 1024 * 1024) as u64;
+    let mut saved: Vec<Value> = Vec::new();
+    while let Some(mut field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| AppError::bad_request(format!("上传数据解析失败：{e}")))?
+    {
+        let file_name = field.file_name().map(|s| s.to_string()).unwrap_or_default();
+        if file_name.is_empty() {
+            let _ = field.bytes().await; // path 等非文件字段跳过
+            continue;
+        }
+        let mut data: Vec<u8> = Vec::new();
+        while let Some(chunk) = field
+            .chunk()
+            .await
+            .map_err(|e| AppError::bad_request(format!("上传数据解析失败：{e}")))?
+        {
+            data.extend_from_slice(&chunk);
+            if data.len() as u64 > limit {
+                return Err(AppError::too_large(format!(
+                    "文件超过上限 {}MB",
+                    settings().upload_limit_mb
+                )));
+            }
+        }
+        let r = root.clone();
+        let d = dir.clone();
+        let v = crate::error::blocking(move || file::save_upload(&r, &d, &file_name, &data, limit))
+            .await?;
+        saved.push(v);
+    }
+    if saved.is_empty() {
+        return Err(AppError::bad_request("未收到文件（multipart 中需含文件字段）"));
+    }
+    op_log(&state, iid, "open_upload", &format!("dir={dir} n={}", saved.len())).await;
+    Ok(Json(json!({"detail": "上传成功", "files": saved})))
+}
+
 async fn open_query(
     State(state): State<AppState>,
     _auth: OpenApiAuth,
@@ -1309,4 +1361,5 @@ pub fn open_routes() -> Router<AppState> {
         .route("/open/instances/{iid}", get(open_query).delete(open_reclaim))
         .route("/open/instances/{iid}/renew", post(open_renew))
         .route("/open/instances/{iid}/token-reset", post(open_token_reset))
+        .route("/open/instances/{iid}/files/upload", post(open_upload))
 }

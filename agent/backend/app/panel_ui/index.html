@@ -53,21 +53,22 @@ input, textarea, select { font-family: inherit; font-size: 13px; }
 .topbar .name { font-weight: 800; font-size: 15px; }
 
 /* 管理实例卡片 */
-.agrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; }
-.acard { border: 1px solid var(--line); border-radius: 14px; background: var(--card); padding: 16px; transition: border-color .15s, box-shadow .15s; }
+.agrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 22px; }
+.acard { border: 1px solid var(--line); border-radius: 16px; background: var(--card); padding: 22px 22px 18px; transition: border-color .15s, box-shadow .15s; }
 .acard:hover { border-color: rgba(47, 181, 159, .45); box-shadow: 0 6px 18px rgba(47, 181, 159, .10); }
-.acard-head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+.acard-head { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; }
 .acard-name { font-weight: 800; font-size: 15px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .acard-edit { display: inline-flex; color: var(--text2); cursor: pointer; flex-shrink: 0; opacity: .5; }
 .acard-edit svg { width: 14px; height: 14px; }
 .acard-edit:hover { color: var(--primary); opacity: 1; }
 .acard-status { font-size: 12px; color: var(--text2); }
 .acard-status.running { color: var(--ok); }
-.acard-meta { display: grid; grid-template-columns: 1fr 1fr; gap: 7px 16px; margin-bottom: 14px; }
+.acard-meta { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 28px; margin-bottom: 18px; }
 .acard-meta div { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 12.5px; min-width: 0; }
+.acard-meta div.full { grid-column: 1 / -1; }
 .acard-meta span { color: var(--text2); flex-shrink: 0; }
 .acard-meta b { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.acard-acts { display: flex; flex-wrap: wrap; gap: 6px; border-top: 1px dashed var(--line); padding-top: 12px; }
+.acard-acts { display: flex; flex-wrap: wrap; gap: 8px; border-top: 1px dashed var(--line); padding-top: 15px; }
 
 /* 面板模态框模式：进入面板以弹窗覆盖，管理员列表保留在底层 */
 #app.pmode { position: fixed; inset: 2.5vh 3vw; z-index: 80; overflow-y: auto; background: var(--bg); border-radius: 16px; border: 1px solid var(--line); box-shadow: 0 30px 80px rgba(15, 40, 34, .35); }
@@ -503,7 +504,7 @@ function showApidoc() {
     <button class="btn" onclick="adminCreateOpen()">新建实例</button>
     <button class="btn danger-text" onclick="adminLogout()">退出管理</button>
   </div>
-  <div style="max-width:1080px;margin:0 auto;padding:20px 18px">
+  <div style="max-width:1240px;margin:0 auto;padding:20px 18px">
     <div class="card">
       <div class="sec-head">
         <span style="font-weight:700;font-size:15px">本机实例</span>
@@ -692,6 +693,22 @@ function showApidoc() {
             <div class="api-sec">示例</div>
             <div class="api-pre">curl -X DELETE "<span class="api-origin"></span>/open/instances/12?purge=1" -H "X-API-Key: &lt;your-api-key&gt;"
 # =&gt; {"ok": true, "iid": 12, "purged": true}</div>
+          </div>
+
+          <div class="api-item">
+            <div class="api-head"><span class="api-method m-post">POST</span><span class="api-path">/open/instances/{iid}/files/upload?path=/</span><span class="api-desc">上传文件到实例数据目录（multipart/form-data，支持多文件）</span></div>
+            <div class="api-sec">参数</div>
+            <table class="api-tbl">
+              <tr><th>参数</th><th>位置</th><th>说明</th></tr>
+              <tr><td class="mono">path</td><td>query</td><td>目标目录（实例内绝对路径，默认 <span class="mono">/</span> 即 /app）</td></tr>
+              <tr><td class="mono">file</td><td>form-data</td><td>文件字段（字段名任意，取 filename；可多个，全部保存）</td></tr>
+            </table>
+            <div class="api-sec">示例</div>
+            <div class="api-pre">curl -X POST "<span class="api-origin"></span>/open/instances/12/files/upload?path=/" \
+  -H "X-API-Key: &lt;your-api-key&gt;" \
+  -F "file=@./main.py" -F "file=@./requirements.txt"
+# =&gt; {"detail": "上传成功", "files": [{"name": "main.py", "size": 1234}, ...]}
+# 单文件上限 = UPLOAD_LIMIT_MB；重名覆盖</div>
           </div>
         </div>
         <script>document.querySelectorAll('.api-origin').forEach(el => el.textContent = location.origin)</script>
@@ -4089,7 +4106,7 @@ function renderAdminRows () {
       <div class="acard-meta">
         <div><span>镜像</span><b class="mono" title="${esc(it.image)}">${esc(it.image)}</b></div>
         <div><span>端口</span><b class="mono">${it.ext_port}</b></div>
-        <div><span>规格</span><b>${spec}</b></div>
+        <div class="full"><span>规格</span><b>${spec}</b></div>
         <div><span>来源</span><b>${it.source === 'local' ? '本地' : '主控'}</b></div>
         <div><span>到期</span><b>${expire}</b></div>
       </div>
