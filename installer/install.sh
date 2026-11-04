@@ -9,6 +9,7 @@
 #    bash install.sh agent-reinstall   -> 被控全新重装（清数据）
 #    bash install.sh agent-uninstall   -> 被控卸载
 #    bash install.sh agent-reset-admin -> 被控重置管理员
+#    bash install.sh agent-domain      -> 面板域名管理（交互；或 add <域名> / remove / show）
 #    bash install.sh master            -> 主控面板（服务器直装，systemd）
 #    bash install.sh master-docker     -> 主控面板（Docker）
 #    bash install.sh status            -> 运行状态
@@ -18,6 +19,8 @@
 #            AGENT_RS_DIR=/opt/ppanel-agent       Rust 版安装目录
 #            AGENT_RS_TARBALL=/path/x.tar.gz      本地离线包（跳过网络下载）
 #            AGENT_RS_TAG=v1.1                    Release 标签
+#            AGENT_DOMAIN=panel.example.com       安装时直接配置面板域名（HTTPS）；
+#                                                 =skip 跳过；留空则安装时交互询问
 # ============================================================
 set -euo pipefail
 
@@ -42,6 +45,7 @@ AGENT_PORT="${PORT:-9100}"
 AGENT_RS_DIR="${AGENT_RS_DIR:-/opt/ppanel-agent}"   # Rust 版安装目录，与源码树解耦
 AGENT_RS_TAG="${AGENT_RS_TAG:-v1.1}"                # Release 标签（二进制附件所在版本）
 AGENT_RS_TARBALL="${AGENT_RS_TARBALL:-}"            # 本地离线包路径，设置后跳过下载
+AGENT_DOMAIN="${AGENT_DOMAIN:-}"                    # 面板域名：设置则安装时直接配置 HTTPS；=skip 跳过；留空交互询问
 
 # 颜色用 $'...' 定义为真实 ESC 字节：read -rp 的提示符不解析 \033 转义，字面定义会在确认提示里打出乱码
 c_g=$'\033[0;32m'; c_c=$'\033[0;36m'; c_y=$'\033[0;33m'; c_r=$'\033[0;31m'; c_dim=$'\033[2m'; c_b=$'\033[1m'; c_off=$'\033[0m'
@@ -1030,6 +1034,140 @@ agent_open_port() {  # 放行被控端口（有防火墙才操作）
   fi
 }
 
+# ============================================================
+#  面板域名（HTTPS）：安装时可交互配置，后期用 agent-domain 增删
+#  站点文件 ppanel-panel.caddy 区别于实例站点 ppanel-<id>.caddy；
+#  原 IP:端口访问始终保留，两路并存。
+# ============================================================
+PANEL_DOMAIN_FILE="/etc/caddy/sites/ppanel-panel.caddy"
+panel_domain_state() { cat "$AGENT_RS_DIR/PANEL_DOMAIN" 2>/dev/null || true; }
+
+agent_domain_valid() {  # 域名格式粗校验（点分段，段内字母数字连字符）
+  echo "$1" | grep -qE '^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+$'
+}
+
+agent_domain_apply() {  # $1=域名：装 Caddy → DNS 预检 → 写站点 → 签证书 → 验证
+  local D="${1:-}" resolved pub i okcert=0
+  [ -n "$D" ] || fail "未指定域名"
+  agent_domain_valid "$D" || fail "域名格式无效：$D"
+  install_caddy
+  if ! command -v caddy >/dev/null 2>&1; then
+    warn "Caddy 不可用，跳过域名配置（面板仍可用 http://IP:$AGENT_PORT）"
+    return 1
+  fi
+
+  # DNS 预检：未解析 / 解析到别的机器都会导致证书签发失败，提前告知
+  resolved=$(getent hosts "$D" 2>/dev/null | awk '{print $1}' | head -1)
+  pub=$(curl -fsS --max-time 6 https://api.ipify.org 2>/dev/null || curl -fsS --max-time 6 https://ifconfig.me 2>/dev/null || echo "")
+  if [ -z "$resolved" ]; then
+    warn "域名 $D 当前未解析（DNS 尚未生效或无 A 记录），证书将暂时无法签发"
+    confirm "仍要写入配置（解析生效后证书自动补签）？" || { warn "已跳过域名配置"; return 1; }
+  elif [ -n "$pub" ] && [ "$resolved" != "$pub" ]; then
+    warn "域名 $D 解析到 $resolved，本机公网 IP 是 $pub（若经 CDN/代理，证书将签发失败）"
+    confirm "仍要继续？" || { warn "已跳过域名配置"; return 1; }
+  else
+    ok "DNS 预检通过：$D -> ${resolved:-本机}"
+  fi
+
+  step "配置面板域名 $D（自动 HTTPS / Let's Encrypt）"
+  cat > "$PANEL_DOMAIN_FILE" <<EOF
+# PPanel 面板站点（install.sh agent-domain 自动生成）
+$D {
+    reverse_proxy 127.0.0.1:$AGENT_PORT
+}
+EOF
+  caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1 \
+    || fail "Caddy 配置校验失败（请检查 /etc/caddy/ 下站点文件）"
+  systemctl enable --now caddy >/dev/null 2>&1 || true
+  systemctl reload caddy 2>/dev/null || systemctl restart caddy
+  mkdir -p "$AGENT_RS_DIR"
+  printf '%s\n' "$D" > "$AGENT_RS_DIR/PANEL_DOMAIN"
+  # 80/443 放行（install_caddy 已放行一次，此处兜底）
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+    ufw allow 80/tcp >/dev/null 2>&1; ufw allow 443/tcp >/dev/null 2>&1
+  elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+    firewall-cmd --permanent --add-service=http >/dev/null 2>&1
+    firewall-cmd --permanent --add-service=https >/dev/null 2>&1
+    firewall-cmd --reload >/dev/null 2>&1
+  fi
+
+  info "等待 Let's Encrypt 证书签发（通常 5~30 秒）..."
+  for i in $(seq 1 12); do
+    if curl -fsS --max-time 5 "https://$D/health" >/dev/null 2>&1; then okcert=1; break; fi
+    sleep 3
+  done
+  if [ "$okcert" = 1 ]; then
+    ok "HTTPS 就绪：https://$D/panel"
+  else
+    warn "证书尚未就绪（DNS 刚生效或签发排队中，稍后自动完成）"
+    warn "排查：journalctl -u caddy -n 30；面板当前仍可用 http://IP:$AGENT_PORT"
+  fi
+  return 0
+}
+
+agent_domain_remove() {
+  local D; D=$(panel_domain_state)
+  [ -n "$D" ] || [ -f "$PANEL_DOMAIN_FILE" ] || { warn "未配置面板域名"; return 1; }
+  rm -f "$PANEL_DOMAIN_FILE"
+  systemctl reload caddy 2>/dev/null || systemctl restart caddy 2>/dev/null || true
+  [ -n "$D" ] && rm -f "$AGENT_RS_DIR/PANEL_DOMAIN"
+  ok "已移除面板域名（${D:-未知}），面板恢复纯 IP:端口访问"
+}
+
+agent_domain_prompt() {  # 安装收尾时询问；AGENT_DOMAIN 环境变量可免交互
+  local D
+  if [ -n "$AGENT_DOMAIN" ]; then
+    case "$AGENT_DOMAIN" in skip|no|none|0) return 0 ;; esac
+    if agent_domain_apply "$AGENT_DOMAIN"; then return 0; fi
+    warn "面板可继续用 http://IP:$AGENT_PORT；解析生效后执行 bash install.sh agent-domain add $AGENT_DOMAIN"
+    return 0
+  fi
+  [ "${MODE_UPGRADE:-0}" = 1 ] && return 0        # 升级不动已有配置
+  [ -t 0 ] || return 0                            # 非交互（curl | bash）跳过询问
+  [ -n "$(panel_domain_state)" ] && return 0      # 已配置过
+  echo ""
+  read -rp "  是否为面板配置域名并自动开启 HTTPS？输入域名（回车跳过，之后可用 agent-domain 添加）: " D
+  if [ -z "$D" ]; then
+    info "跳过，面板使用 http://IP:$AGENT_PORT（之后可执行 bash install.sh agent-domain 添加）"
+    return 0
+  fi
+  agent_domain_apply "$D" || true
+}
+
+action_agent_domain() {  # agent-domain [add <域名> | remove | show]
+  local sub="${2:-}" D="${3:-}" cur
+  cur=$(panel_domain_state)
+  if [ -z "$sub" ]; then
+    echo ""
+    if [ -n "$cur" ]; then
+      echo -e "  当前面板域名：${c_b}$cur${c_off}（https://$cur/panel）"
+    else
+      echo "  当前面板域名：未配置（面板使用 http://IP:$AGENT_PORT）"
+    fi
+    echo ""
+    echo -e "  ${c_b}[1]${c_off} 配置 / 更换域名（自动 HTTPS）"
+    echo -e "  ${c_b}[2]${c_off} 移除域名（恢复纯 IP:端口）"
+    echo -e "  ${c_b}[0]${c_off} 返回"
+    read -rp "  请选择 [0-2]: " sub
+    case "$sub" in
+      1) read -rp "  输入域名（如 panel.example.com，需已把 A 记录解析到本机）: " D
+         [ -n "$D" ] || { warn "未输入域名"; return 1; }
+         agent_domain_apply "$D" ;;
+      2) agent_domain_remove ;;
+      *) return 0 ;;
+    esac
+  elif [ "$sub" = "add" ] || [ "$sub" = "set" ]; then
+    [ -n "$D" ] || fail "用法：bash install.sh agent-domain add <域名>"
+    agent_domain_apply "$D"
+  elif [ "$sub" = "remove" ] || [ "$sub" = "rm" ]; then
+    agent_domain_remove
+  elif [ "$sub" = "show" ]; then
+    if [ -n "$cur" ]; then echo "面板域名：$cur（https://$cur/panel）"; else echo "面板域名：未配置"; fi
+  else
+    fail "用法：bash install.sh agent-domain [add <域名> | remove | show]"
+  fi
+}
+
 agent_rs_install() {  # 成功返回 0；获取失败返回 1（离线包/网络均不可用）
   local mode="${1:-net}" arch tmpd legacy_env legacy_db db_abs i healthy=0
 
@@ -1161,13 +1299,15 @@ EOF
     warn "服务进程存在但 /health 未响应，请查看：journalctl -u $AGENT_SERVICE -n 50"
   fi
   agent_open_port
+  agent_domain_prompt
   return 0
 }
 
 agent_rs_summary() {
-  local IP VERSION_LINE
+  local IP VERSION_LINE DOMAIN
   IP=$(hostname -I 2>/dev/null | awk '{print $1}'); [ -n "$IP" ] || IP="<服务器IP>"
   VERSION_LINE=$(head -1 "$AGENT_RS_DIR/VERSION" 2>/dev/null || echo "Rust 版")
+  DOMAIN=$(panel_domain_state)
   echo ""
   if [ "${MODE_UPGRADE:-0}" = 1 ]; then
     echo -e "  ${c_g}${c_b}━━━━━━━━━━━ 升 级 完 成（Rust） ━━━━━━━━━━━${c_off}"
@@ -1175,13 +1315,19 @@ agent_rs_summary() {
     echo -e "  ${c_g}${c_b}━━━━━━━━━━━ 安 装 完 成（Rust） ━━━━━━━━━━━${c_off}"
   fi
   echo -e "  独立面板  ${c_b}http://$IP:$AGENT_PORT/panel${c_off}"
+  if [ -n "$DOMAIN" ]; then
+    echo -e "  HTTPS     ${c_b}https://$DOMAIN/panel${c_off} ${c_dim}（证书自动续期）${c_off}"
+    echo -e "  下一步    主控「节点管理」→ 节点地址填 ${c_b}https://$DOMAIN${c_off}（租户面板链接自动走 HTTPS）"
+  else
+    echo -e "  下一步    主控「节点管理」→ 添加节点 → 填入上方 Token 与节点地址"
+  fi
   echo -e "  实现      ${c_b}Rust 静态二进制${c_off} ${c_dim}（$VERSION_LINE）${c_off}"
   echo -e "  安装目录  $AGENT_RS_DIR"
   echo -e "  节点Token ${c_b}$NODE_TOKEN${c_off}"
   echo -e "  ${c_dim}─────────────────────────────────────────────${c_off}"
-  echo -e "  下一步    主控「节点管理」→ 添加节点 → 填入上方 Token 与节点地址"
+  echo -e "  域名管理  bash install.sh agent-domain（后期加/换/删域名）"
   echo -e "  常用      systemctl restart $AGENT_SERVICE · journalctl -u $AGENT_SERVICE -f"
-  echo -e "  提醒      云服务器请在控制台安全组放行 TCP $AGENT_PORT"
+  echo -e "  提醒      云服务器请在控制台安全组放行 TCP $AGENT_PORT${DOMAIN:+ 及 80/443}"
   echo -e "  ${c_g}${c_b}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c_off}"
 }
 
@@ -1437,7 +1583,8 @@ menu() {
   echo -e "  ${c_b}[4]${c_off} 卸载 独立面板（被控）       ${c_dim}实例数据可选保留${c_off}"
   echo -e "  ${c_b}[0]${c_off} 退出"
   echo ""
-  echo -e "  ${c_dim}更多子命令：bash install.sh status · agent-info · agent-reset-admin · master-reset-admin${c_off}"
+  echo -e "  ${c_dim}更多子命令：bash install.sh status · agent-info · agent-domain · agent-reset-admin · master-reset-admin${c_off}"
+  echo -e "  ${c_dim}面板域名/HTTPS：安装时询问，或之后 bash install.sh agent-domain（add/remove/show）${c_off}"
   echo -e "  ${c_dim}主控本机直装（systemd）：bash install.sh master${c_off}"
   echo ""
   read -rp "  请选择 [0-4]: " c
@@ -1456,6 +1603,7 @@ case "${1:-menu}" in
   menu)              menu ;;
   agent)             banner; action_agent ;;
   agent-rs)          banner; action_agent ;;
+  agent-domain)      banner; action_agent_domain "$@" ;;
   agent-reinstall)   banner; action_agent_reinstall ;;
   agent-uninstall)   banner; action_agent_uninstall ;;
   agent-reset-admin) banner; action_agent_reset_admin ;;
@@ -1467,5 +1615,5 @@ case "${1:-menu}" in
   status)            banner; action_status ;;
   agent-info)        banner; action_agent_info ;;
   master-reset-admin) banner; action_master_reset_admin ;;
-  *) echo -e "用法：bash install.sh [menu|agent|agent-rs|agent-reinstall|agent-uninstall|agent-reset-admin|agent-info|master|master-docker|master-reinstall|master-docker-reinstall|master-uninstall|master-reset-admin|status]"; exit 1 ;;
+  *) echo -e "用法：bash install.sh [menu|agent|agent-rs|agent-domain|agent-reinstall|agent-uninstall|agent-reset-admin|agent-info|master|master-docker|master-reinstall|master-docker-reinstall|master-uninstall|master-reset-admin|status]"; exit 1 ;;
 esac
