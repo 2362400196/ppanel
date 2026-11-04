@@ -205,6 +205,11 @@ async fn run_one(state: &AppState, cron_id: i64) {
     if row.enabled == 0 {
         return;
     }
+    // 先置 running：面板上能立刻看出任务正在执行（备份大目录可能数分钟）
+    let _ = sqlx::query("UPDATE instance_crons SET last_status = 'running' WHERE id = ?")
+        .bind(cron_id)
+        .execute(&state.db)
+        .await;
 
     let cname = instance::container_name(row.instance_id);
     let kind = if row.kind.is_empty() { "command" } else { row.kind.as_str() };
@@ -224,7 +229,8 @@ async fn run_one(state: &AppState, cron_id: i64) {
         final_status = "ok";
     }
 
-    let output: String = out.chars().take(2000).collect();
+    // last_output 需容纳备份过程日志（打包/拉取/COS 上传），放宽到 6000 字符
+    let output: String = out.chars().take(6000).collect();
     let _ = sqlx::query(
         "UPDATE instance_crons SET last_run = ?, last_status = ?, last_output = ? WHERE id = ?",
     )
@@ -271,13 +277,41 @@ async fn run_command_job(state: &AppState, row: &InstanceCron, cname: &str) -> (
     (status, out)
 }
 
-/// 备份类任务：备份目录 / 备份数据库 / 两者都备；dest 决定是否上传 COS。输出写回 last_output。
+/// 备份类任务：备份目录 / 备份数据库 / 两者都备；dest 决定是否上传 COS。
+/// 全程记录任务日志（TaskLog），结束后把完整过程日志拼进 last_output，
+/// 让「定时任务备份」也能在面板上看到每一步（打包 / 拉取 / 上传 COS）。
 async fn run_backup_job(
     state: &AppState,
     row: &InstanceCron,
     cname: &str,
     kind: &str,
     dest: &str,
+) -> (&'static str, String) {
+    let tid = format!("cronbk_{}_{}", row.id, backup::ts());
+    state
+        .tasks
+        .start(&tid, &format!("定时备份 · 实例 #{}", row.instance_id));
+    let (status, mut out) = run_backup_job_inner(state, row, cname, kind, dest, &tid).await;
+    state.tasks.finish(
+        &tid,
+        status == "ok",
+        if status == "ok" { "✔ 定时备份完成" } else { "" },
+    );
+    let lines = state.tasks.all_lines(&tid);
+    if !lines.is_empty() {
+        out.push_str("\n—— 执行日志 ——\n");
+        out.push_str(&lines.join("\n"));
+    }
+    (status, out)
+}
+
+async fn run_backup_job_inner(
+    state: &AppState,
+    row: &InstanceCron,
+    cname: &str,
+    kind: &str,
+    dest: &str,
+    tid: &str,
 ) -> (&'static str, String) {
     let Ok(docker) = state.docker.get().await else {
         return ("fail", "Docker 不可用".to_string());
@@ -300,11 +334,23 @@ async fn run_backup_job(
         if p.contains("..") || !backup::path_ok(p) {
             return ("fail", format!("目录路径无效：{p}"));
         }
-        match backup::backup_dir(state, cname, p, "").await {
-            Ok(v) => outs.push(format!(
-                "目录备份完成：{}",
-                v["file"].as_str().unwrap_or("?")
-            )),
+        state.tasks.log(tid, &format!("开始备份目录 {p}…"));
+        match backup::backup_dir(state, cname, p, tid).await {
+            Ok(v) => {
+                let fname = v["file"].as_str().unwrap_or("?").to_string();
+                // 保留策略：同类产物默认保留最近 5 份，防止大目录备份塞满磁盘
+                let base = p.trim_end_matches('/').rsplit('/').next().unwrap_or("app");
+                let base = if base.is_empty() { "app" } else { base };
+                let removed = backup::apply_instance_keep(
+                    &format!("{cname}_{base}_"),
+                    ".tar.gz",
+                    5,
+                );
+                if removed > 0 {
+                    state.tasks.log(tid, &format!("已按保留策略清理 {removed} 份旧备份"));
+                }
+                outs.push(format!("目录备份完成：{fname}"));
+            }
             Err(e) => return ("fail", format!("目录备份失败：{}", e.detail)),
         }
     }
@@ -314,12 +360,24 @@ async fn run_backup_job(
             Ok(Some(reg)) => {
                 let ver = reg["version"].as_str().unwrap_or("").to_string();
                 let db_name = reg["db_name"].as_str().unwrap_or("").to_string();
+                state
+                    .tasks
+                    .log(tid, &format!("开始备份数据库 {db_name}（MySQL {ver}）…"));
                 // tables 为空 = 备份全部表
-                match backup::backup_database(state, &ver, &db_name, &[], "").await {
-                    Ok(v) => outs.push(format!(
-                        "数据库备份完成：{}",
-                        v["file"].as_str().unwrap_or("?")
-                    )),
+                match backup::backup_database(state, &ver, &db_name, &[], tid).await {
+                    Ok(v) => {
+                        let removed =
+                            backup::apply_instance_keep(&format!("{db_name}_"), ".sql.gz", 5);
+                        if removed > 0 {
+                            state
+                                .tasks
+                                .log(tid, &format!("已按保留策略清理 {removed} 份旧备份"));
+                        }
+                        outs.push(format!(
+                            "数据库备份完成：{}",
+                            v["file"].as_str().unwrap_or("?")
+                        ))
+                    }
                     Err(e) => return ("fail", format!("数据库备份失败：{}", e.detail)),
                 }
             }
@@ -346,13 +404,21 @@ async fn run_backup_job(
                     continue;
                 }
                 let local = std::path::Path::new(&backup::backup_root()).join(fname);
+                state.tasks.log(tid, &format!("上传 COS：{fname}…"));
                 match crate::services::cos::upload(&cfg, &local.to_string_lossy(), None).await {
-                    Ok(up) => ups.push(format!(
-                        "已上传 COS：{}（{}B）",
-                        up["key"].as_str().unwrap_or(fname),
-                        up["size"].as_u64().unwrap_or(0)
-                    )),
-                    Err(e) => return ("fail", format!("COS 上传失败（{fname}）：{e}")),
+                    Ok(up) => {
+                        let msg = format!(
+                            "已上传 COS：{}（{}B）",
+                            up["key"].as_str().unwrap_or(fname),
+                            up["size"].as_u64().unwrap_or(0)
+                        );
+                        state.tasks.log(tid, &msg);
+                        ups.push(msg);
+                    }
+                    Err(e) => {
+                        state.tasks.log(tid, &format!("COS 上传失败（{fname}）：{e}"));
+                        return ("fail", format!("COS 上传失败（{fname}）：{e}"));
+                    }
                 }
                 // dest=cos 且配置了不保留本地副本 → 清理本地文件
                 if dest == "cos" && cfg.keep_local == 0 {

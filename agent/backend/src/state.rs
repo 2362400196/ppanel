@@ -175,6 +175,15 @@ impl TaskLog {
         }
     }
 
+    /// 取任务的全部日志行（供定时任务把过程日志回写进 last_output）。
+    pub fn all_lines(&self, task_id: &str) -> Vec<String> {
+        let g = self.inner.lock().unwrap();
+        g.tasks
+            .get(task_id)
+            .map(|t| t.lines.clone())
+            .unwrap_or_default()
+    }
+
     pub fn finish(&self, task_id: &str, ok: bool, msg: &str) {
         let mut g = self.inner.lock().unwrap();
         if let Some(t) = g.tasks.get_mut(task_id) {

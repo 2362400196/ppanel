@@ -572,11 +572,18 @@ async fn backup_dir_inner(
             ],
         )
         .await?;
-        if code != 0 {
+        // tar 退出码 1 =「打包时文件发生变化」等警告（大目录/热更新站点常见），
+        // 归档仍然完整可用，不判失败；退出码 ≥2 才是真错误。
+        if code > 1 {
             return Err(AppError::bad_gateway(format!(
                 "目录打包失败：{}",
                 tail(err.trim(), 200)
             )));
+        }
+        if !err.trim().is_empty() && code == 1 {
+            state
+                .tasks
+                .log(tid, &format!("tar 有警告（归档完整可用）：{}", tail(err.trim(), 200)));
         }
         state.tasks.log(tid, "打包完成，取回落盘…");
         pull_archive(state, cname, &tmp, &dest, tid).await?;
@@ -593,11 +600,8 @@ async fn backup_dir_inner(
 
     if let Err(e) = &r {
         let _ = rm_in_container(&docker, cname, &[tmp.clone()]).await;
-        if let Ok(md) = std::fs::metadata(&dest) {
-            if md.len() == 0 {
-                let _ = std::fs::remove_file(&dest);
-            }
-        }
+        // 本次产物（含拉取中断的半成品）一律清理，避免残包白白占磁盘
+        let _ = std::fs::remove_file(&dest);
         state
             .tasks
             .finish(tid, false, &format!("✘ 目录备份失败：{}", err_text(e)));
@@ -1395,6 +1399,43 @@ pub async fn run_job(state: &AppState, job_id: i64, tid: &str) -> Value {
             json!({"ok": false, "error": head(&e.detail, 500)})
         }
     }
+}
+
+/// 实例定时备份的保留策略：备份目录内以 `prefix` 开头、`ext` 结尾且尾部为
+/// 时间戳的产物，按修改时间保留最近 keep 份（与宿主备份任务默认一致）。
+/// 返回删除数量。
+pub fn apply_instance_keep(prefix: &str, ext: &str, keep: usize) -> usize {
+    let root = backup_root();
+    let mut files: Vec<(String, u64)> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(Path::new(&root)) {
+        for ent in rd.flatten() {
+            let name = ent.file_name().to_string_lossy().to_string();
+            let Some(rest) = name.strip_prefix(prefix) else { continue };
+            let Some(rest) = rest.strip_suffix(ext) else { continue };
+            if !is_ts(rest) {
+                continue;
+            }
+            let Ok(md) = ent.metadata() else { continue };
+            if !md.is_file() {
+                continue;
+            }
+            let mtime = md
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            files.push((name, mtime));
+        }
+    }
+    files.sort_by(|a, b| b.1.cmp(&a.1));
+    let mut removed = 0;
+    for (name, _) in files.into_iter().skip(keep.max(1)) {
+        if std::fs::remove_file(Path::new(&root).join(&name)).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 fn format_output(r: &Value, extra: &str, removed: i64, t0: Instant) -> String {

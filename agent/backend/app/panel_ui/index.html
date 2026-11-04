@@ -615,7 +615,7 @@ function showApidoc() {
       <button data-view="logs" onclick="switchView('logs')">日志</button>
       <button data-view="ops" onclick="switchView('ops')">操作记录</button>
       <button data-view="apidoc" onclick="switchView('apidoc')">API 文档</button>
-      <div id="uiVer" style="margin-top:auto;padding:10px 13px;font-size:10.5px;color:var(--text2);opacity:.55;user-select:none">UI v20261104.8</div>
+      <div id="uiVer" style="margin-top:auto;padding:10px 13px;font-size:10.5px;color:var(--text2);opacity:.55;user-select:none">UI v20261104.9</div>
     </nav>
 
     <div class="content">
@@ -914,6 +914,10 @@ function showApidoc() {
 
       <!-- 备份（仅本实例：自己的库 + 自己容器的目录） -->
       <div id="v-backup" class="view">
+        <div class="card" id="bkTaskBox" style="display:none">
+          <div class="page-title">后台任务日志 <span class="hint" id="bkTaskState" style="margin-left:8px"></span></div>
+          <pre id="bkTaskLog" class="mono" style="margin:8px 0 0;padding:12px;background:var(--bg,#0d1117);border:1px solid var(--line);border-radius:10px;max-height:300px;overflow:auto;font-size:12px;line-height:1.7;white-space:pre-wrap;word-break:break-all"></pre>
+        </div>
         <div class="card">
           <div class="page-title">数据库备份</div>
           <div id="bkDbInfo" class="status-text">检测数据库状态…</div>
@@ -1066,6 +1070,10 @@ function showApidoc() {
               </tr></thead>
               <tbody id="cronList"></tbody>
             </table>
+          </div>
+          <div id="cronLogBox" style="display:none;margin-top:12px">
+            <div class="page-title" style="font-size:14px;margin-bottom:8px">任务执行日志 <span class="mono" id="cronLogTitle" style="color:var(--text2);font-size:12px"></span></div>
+            <pre class="mono" style="margin:0;padding:12px;background:var(--bg,#0d1117);border:1px solid var(--line);border-radius:10px;max-height:300px;overflow:auto;font-size:12px;line-height:1.7;white-space:pre-wrap;word-break:break-all" id="cronLogText"></pre>
           </div>
         </div>
       </div>
@@ -1887,19 +1895,45 @@ async function loadBackup () {
     await loadBackupList()
   } catch (e) { toast(e.message, false) }
 }
+// 后台任务日志：轮询 task-lines，直到 done/error
+let bkTaskTimer = null
+async function watchBkTask (taskId) {
+  $('bkTaskBox').style.display = 'block'
+  $('bkTaskState').textContent = '执行中…'
+  const pre = $('bkTaskLog')
+  pre.textContent = ''
+  if (bkTaskTimer) clearInterval(bkTaskTimer)
+  let since = 0
+  const poll = async () => {
+    try {
+      const d = await api('GET', '/panel/instance/backup/task-lines?task_id=' + encodeURIComponent(taskId) + '&since=' + since)
+      ;(d.lines || []).forEach(l => { pre.textContent += l + '\n'; pre.scrollTop = pre.scrollHeight })
+      since = d.total || since
+      if (d.status === 'done' || d.status === 'error') {
+        clearInterval(bkTaskTimer); bkTaskTimer = null
+        $('bkTaskState').textContent = d.status === 'done' ? '✔ 已完成' : '✘ 失败（原因见日志）'
+        $('bkTaskState').style.color = d.status === 'done' ? '#3aa981' : '#e05a4e'
+        toast(d.status === 'done' ? '任务完成' : '任务失败，具体原因见日志', d.status === 'done')
+        loadBackupList()
+      }
+    } catch (e) { /* 瞬时错误忽略，继续轮询 */ }
+  }
+  await poll()
+  bkTaskTimer = setInterval(poll, 2000)
+}
 async function doBackupDb () {
   const tables = $('bkDbTables').value.split(',').map(s => s.trim()).filter(Boolean)
-  toast('正在备份数据库…')
   try {
     const d = await api('POST', '/panel/instance/backup/db', { tables })
-    toast(d.detail, true); loadBackupList()
+    if (d.task_id) { toast('备份任务已提交，后台执行中…'); watchBkTask(d.task_id) }
+    else { toast(d.detail, true); loadBackupList() }
   } catch (e) { toast(e.message, false) }
 }
 async function doBackupDir () {
-  toast('正在备份目录…')
   try {
     const d = await api('POST', '/panel/instance/backup/dir', { path: $('bkDirPath').value.trim() })
-    toast(d.detail, true); loadBackupList()
+    if (d.task_id) { toast('备份任务已提交，后台执行中…'); watchBkTask(d.task_id) }
+    else { toast(d.detail, true); loadBackupList() }
   } catch (e) { toast(e.message, false) }
 }
 // 备份列表前端分页（每实例文件量可控，拉全量后本地切片）
@@ -1956,12 +1990,18 @@ function showRestore (b) {
 }
 async function doRestoreDb () {
   if (!confirm('数据库恢复将覆盖现有数据，确认继续？')) return
-  toast('正在恢复…')
-  try { const d = await api('POST', '/panel/instance/backup/restore/db', { file: bkRestoreTarget.file }); toast(d.detail, true) } catch (e) { toast(e.message, false) }
+  try {
+    const d = await api('POST', '/panel/instance/backup/restore/db', { file: bkRestoreTarget.file })
+    if (d.task_id) { toast('恢复任务已提交，后台执行中…'); watchBkTask(d.task_id) }
+    else toast(d.detail, true)
+  } catch (e) { toast(e.message, false) }
 }
 async function doRestoreDir () {
-  toast('正在恢复…')
-  try { const d = await api('POST', '/panel/instance/backup/restore/dir', { file: bkRestoreTarget.file, path: $('bkRestorePath').value.trim() }); toast(d.detail, true) } catch (e) { toast(e.message, false) }
+  try {
+    const d = await api('POST', '/panel/instance/backup/restore/dir', { file: bkRestoreTarget.file, path: $('bkRestorePath').value.trim() })
+    if (d.task_id) { toast('恢复任务已提交，后台执行中…'); watchBkTask(d.task_id) }
+    else toast(d.detail, true)
+  } catch (e) { toast(e.message, false) }
 }
 
 // ---------- 安全快照 ----------
@@ -2112,15 +2152,18 @@ function cronHint () {
   }
   $('cronPreview').textContent = (freqText || '请选择执行周期') + '；' + kindText + destText + (f === 'custom' && s ? '（' + s + '）' : '')
 }
+let cronRows = []
 async function loadCrons () {
   try {
     const d = await api('GET', '/panel/instance/crons')
+    cronRows = d.crons || []
     const tb = $('cronList')
-    tb.innerHTML = d.crons.length ? '' : '<tr><td colspan="6" style="padding:10px 8px;color:var(--text2)">暂无定时任务</td></tr>'
-    d.crons.forEach(c => {
+    tb.innerHTML = cronRows.length ? '' : '<tr><td colspan="6" style="padding:10px 8px;color:var(--text2)">暂无定时任务</td></tr>'
+    cronRows.forEach(c => {
       const tr = document.createElement('tr')
       const st = c.enabled ? '<span style="color:#3aa981">启用</span>' : '<span style="color:var(--text2)">停用</span>'
-      const last = c.last_run ? `${c.last_run} <span style="color:${c.last_status === 'ok' ? '#3aa981' : '#e05a4e'}">${c.last_status === 'ok' ? '成功' : c.last_status === 'fail' ? '失败' : c.last_status}</span>` : '<span style="color:var(--text2)">未执行</span>'
+      const last = c.last_status === 'running' ? '<span style="color:#e8a33d">执行中…</span>'
+        : c.last_run ? `${c.last_run} <span style="color:${c.last_status === 'ok' ? '#3aa981' : '#e05a4e'}">${c.last_status === 'ok' ? '成功' : c.last_status === 'fail' ? '失败' : c.last_status}</span>` : '<span style="color:var(--text2)">未执行</span>'
       const kindL = CRON_KIND_LABEL[c.kind] || '执行命令'
       const destL = c.dest ? (CRON_DEST_LABEL[c.dest] || '') : ''
       const content = (c.kind && c.kind !== 'command')
@@ -2137,8 +2180,9 @@ async function loadCrons () {
       td.appendChild(btn(c.enabled ? '停用' : '启用', 'ghost sm', async () => {
         try { await api('PATCH', '/panel/instance/crons/' + c.id, { enabled: !c.enabled }); loadCrons() } catch (e) { toast(e.message, false) }
       }))
+      if (c.last_output) td.appendChild(btn('日志', 'ghost sm', () => showCronLog(c)))
       td.appendChild(btn('立即执行', 'ghost sm', async () => {
-        try { const r = await api('POST', '/panel/instance/crons/' + c.id + '/run'); toast(r.detail, true); setTimeout(loadCrons, 3000) } catch (e) { toast(e.message, false) }
+        try { const r = await api('POST', '/panel/instance/crons/' + c.id + '/run'); toast(r.detail, true); watchCronRun(c.id) } catch (e) { toast(e.message, false) }
       }))
       td.appendChild(btn('删除', 'ghost sm danger-text', async () => {
         if (!confirm('确认删除该任务？')) return
@@ -2147,6 +2191,32 @@ async function loadCrons () {
       tb.appendChild(tr)
     })
   } catch (e) { toast(e.message, false) }
+}
+function showCronLog (c) {
+  $('cronLogBox').style.display = 'block'
+  $('cronLogTitle').textContent = `任务 #${c.id} · ${c.last_run || ''} · ${c.last_status === 'ok' ? '成功' : c.last_status === 'fail' ? '失败' : (c.last_status || '')}`
+  $('cronLogText').textContent = c.last_output || ''
+  $('cronLogText').scrollTop = $('cronLogText').scrollHeight
+}
+// 立即执行后轮询刷新，直到该任务出现新的执行结果（备份大目录可能要几分钟）
+function watchCronRun (id) {
+  let n = 0
+  const before = (cronRows.find(x => x.id === id) || {})
+  const t = setInterval(async () => {
+    n++
+    await loadCrons()
+    const row = cronRows.find(x => x.id === id)
+    if (!row) { clearInterval(t); return }
+    const changed = row.last_run !== before.last_run || row.last_status !== before.last_status
+    if (changed && row.last_status !== 'running') {
+      clearInterval(t)
+      showCronLog(row)
+      toast(row.last_status === 'ok' ? '执行完成' : '执行结束（状态见日志）', row.last_status === 'ok')
+    } else if (n >= 40) {
+      clearInterval(t)
+      toast('仍在执行中，可稍后点「日志」查看结果', true)
+    }
+  }, 3000)
 }
 async function saveCron () {
   const kind = $('cronKind').value

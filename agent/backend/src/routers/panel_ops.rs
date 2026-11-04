@@ -264,6 +264,12 @@ async fn backup_delete(
 // 备份：数据库（固定本库） / 目录（固定本容器） / 恢复
 // =====================================================================
 
+/// 备份后台任务 ID：panelbk_{instance_id}_{ts}（task-lines 端点按前缀校验归属）。
+fn backup_tid(iid: i64) -> String {
+    format!("panelbk_{}_{}", iid, backup::ts())
+}
+
+/// 大文件备份可能耗时数分钟，改为后台任务：立即返回 task_id，前端轮询日志。
 async fn backup_db(
     PanelInst(inst): PanelInst,
     State(state): State<AppState>,
@@ -298,11 +304,17 @@ async fn backup_db(
         }
     }
 
-    let v = backup::backup_database(&state, &ver, &db_name, &tables, "").await?;
-    let fname = v["file"].as_str().unwrap_or("").to_string();
+    let tid = backup_tid(inst.id);
+    state.tasks.start(&tid, &format!("备份数据库 {db_name}"));
+    let st = state.clone();
+    let tid2 = tid.clone();
+    tokio::spawn(async move {
+        // backup_database 内部已带 start/finish 与逐步日志，失败会自行 finish
+        let _ = backup::backup_database(&st, &ver, &db_name, &tables, &tid2).await;
+    });
     Ok(Json(json!({
-        "detail": format!("数据库备份完成：{fname}"),
-        "file": fname,
+        "task_id": tid,
+        "detail": "备份任务已提交，正在后台执行，可在下方日志区查看进度",
     })))
 }
 
@@ -322,12 +334,33 @@ async fn backup_dir(
     if !running(&state, &cname).await {
         return Err(AppError::bad_gateway("实例容器未运行"));
     }
-    let v = backup::backup_dir(&state, &cname, &p, "").await?;
-    let fname = v["file"].as_str().unwrap_or("").to_string();
+    // 大目录打包耗时较长：后台执行 + 日志轮询，避免请求挂死、失败无从得知
+    let tid = backup_tid(inst.id);
+    state.tasks.start(&tid, &format!("备份网站目录 {p}"));
+    let st = state.clone();
+    let cname2 = cname.clone();
+    let tid2 = tid.clone();
+    tokio::spawn(async move {
+        let _ = backup::backup_dir(&st, &cname2, &p, &tid2).await;
+    });
     Ok(Json(json!({
-        "detail": format!("目录备份完成：{fname}"),
-        "file": fname,
+        "task_id": tid,
+        "detail": "备份任务已提交，正在后台执行，可在下方日志区查看进度",
     })))
+}
+
+/// 备份/恢复后台任务的日志增量拉取（按实例前缀校验，防越权读他人日志）。
+async fn backup_task_lines(
+    PanelInst(inst): PanelInst,
+    State(state): State<AppState>,
+    Query(q): Query<HashMap<String, String>>,
+) -> AppResult<Json<Value>> {
+    let tid = qp(&q, "task_id", "");
+    if !tid.starts_with(&format!("panelbk_{}_", inst.id)) {
+        return Err(AppError::bad_request("任务 ID 无效"));
+    }
+    let since = qp(&q, "since", "0").parse::<usize>().unwrap_or(0);
+    Ok(Json(state.tasks.lines(&tid, since)))
 }
 
 async fn restore_dir(
@@ -351,8 +384,20 @@ async fn restore_dir(
     if !running(&state, &cname).await {
         return Err(AppError::bad_gateway("实例容器未运行"));
     }
-    backup::restore_dir(&state, &file, &cname, &p, "").await?;
-    Ok(Json(json!({"detail": format!("已恢复至容器 {p}")})))
+    // 大包上传 + 解压耗时较长：后台执行 + 日志轮询
+    let tid = backup_tid(inst.id);
+    let st = state.clone();
+    let cname2 = cname.clone();
+    let p2 = p.clone();
+    let file2 = file.clone();
+    let tid2 = tid.clone();
+    tokio::spawn(async move {
+        let _ = backup::restore_dir(&st, &file2, &cname2, &p2, &tid2).await;
+    });
+    Ok(Json(json!({
+        "task_id": tid,
+        "detail": "恢复任务已提交，正在后台执行，可在下方日志区查看进度",
+    })))
 }
 
 async fn restore_db(
@@ -370,8 +415,17 @@ async fn restore_db(
         .ok_or_else(|| AppError::bad_request("实例尚未开通数据库，请先在「数据库」页开通"))?;
     let ver = reg["version"].as_str().unwrap_or("").to_string();
     let db_name = reg["db_name"].as_str().unwrap_or("").to_string();
-    backup::restore_database(&state, &file, &ver, &db_name, "").await?;
-    Ok(Json(json!({"detail": format!("已恢复到数据库 {db_name}（覆盖导入）")})))
+    // 导入大库耗时较长：后台执行 + 日志轮询
+    let tid = backup_tid(inst.id);
+    let st = state.clone();
+    let tid2 = tid.clone();
+    tokio::spawn(async move {
+        let _ = backup::restore_database(&st, &file, &ver, &db_name, &tid2).await;
+    });
+    Ok(Json(json!({
+        "task_id": tid,
+        "detail": "恢复任务已提交，正在后台执行，可在下方日志区查看进度",
+    })))
 }
 
 // =====================================================================
@@ -1260,6 +1314,7 @@ pub fn routes() -> Router<AppState> {
         .route("/panel/instance/backup/dir", post(backup_dir))
         .route("/panel/instance/backup/restore/dir", post(restore_dir))
         .route("/panel/instance/backup/restore/db", post(restore_db))
+        .route("/panel/instance/backup/task-lines", get(backup_task_lines))
         .route("/panel/instance/snapshots", get(snapshot_list))
         .route("/panel/instance/snapshots/restore", post(snapshot_restore))
         // 定时任务
