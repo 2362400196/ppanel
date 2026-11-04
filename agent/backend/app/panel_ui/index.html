@@ -282,7 +282,7 @@ select:focus { border-color: var(--primary); }
 .cron-field input:focus, .cron-field select:focus { border-color: var(--primary); }
 /* 宝塔式横向表单（标签在左、控件在右） */
 .bf-row { display: flex; align-items: center; gap: 26px; margin-top: 16px; flex-wrap: wrap; }
-.bf-label { width: 76px; flex-shrink: 0; font-size: 13.5px; color: var(--text); font-weight: 600; text-align: justify; text-align-last: justify; }
+.bf-label { width: 76px; flex-shrink: 0; font-size: 13.5px; color: var(--text); font-weight: 600; letter-spacing: 1px; }
 .bf-row input, .bf-row select {
   height: 36px; border: 1px solid var(--line); border-radius: 9px; padding: 0 10px;
   background: #fff; outline: none; font-size: 13px; font-family: inherit; color: var(--text); transition: border .15s; box-sizing: border-box;
@@ -615,7 +615,7 @@ function showApidoc() {
       <button data-view="logs" onclick="switchView('logs')">日志</button>
       <button data-view="ops" onclick="switchView('ops')">操作记录</button>
       <button data-view="apidoc" onclick="switchView('apidoc')">API 文档</button>
-      <div id="uiVer" style="margin-top:auto;padding:10px 13px;font-size:10.5px;color:var(--text2);opacity:.55;user-select:none">UI v20261104.6</div>
+      <div id="uiVer" style="margin-top:auto;padding:10px 13px;font-size:10.5px;color:var(--text2);opacity:.55;user-select:none">UI v20261104.7</div>
     </nav>
 
     <div class="content">
