@@ -268,16 +268,12 @@ select {
 }
 select:hover { border-color: #c3cdc8; }
 select:focus { border-color: var(--primary); }
-input[type="time"], input[type="date"] {
-  height: 34px; border: 1px solid var(--line); border-radius: 9px; padding: 0 10px; background: #fff;
-  outline: none; font-family: inherit; font-size: 13px; cursor: pointer; transition: border .15s;
-}
-input[type="time"]:focus, input[type="date"]:focus { border-color: var(--primary); }
 /* 定时任务表单（宝塔式分组字段） */
 .cron-grid { display: flex; flex-wrap: wrap; gap: 10px 12px; margin-top: 12px; }
 .cron-field { display: flex; flex-direction: column; gap: 5px; flex: 1 1 130px; min-width: 130px; }
 .cron-field.cron-grow { flex: 3 1 240px; }
 .cron-field > label { font-size: 12px; color: var(--text2); }
+.cron-field.slim { flex: 0 1 120px; min-width: 108px; }
 .cron-field input, .cron-field select {
   width: 100%; box-sizing: border-box; height: 38px; border: 1px solid var(--line);
   border-radius: 10px; padding: 0 10px; background: #fff; outline: none; font-size: 13px; transition: border .15s;
@@ -997,7 +993,7 @@ function showApidoc() {
                 <option value="custom">自定义 cron 表达式</option>
               </select>
             </div>
-            <div class="cron-field" id="cronNminField" style="display:none"><label>间隔</label>
+            <div class="cron-field slim" id="cronNminField" style="display:none"><label>间隔</label>
               <select id="cronNmin" onchange="cronHint()">
                 <option value="1">每 1 分钟</option>
                 <option value="5" selected>每 5 分钟</option>
@@ -1006,14 +1002,14 @@ function showApidoc() {
                 <option value="30">每 30 分钟</option>
               </select>
             </div>
-            <div class="cron-field" id="cronHourField" style="display:none"><label>第几分钟</label>
-              <input id="cronMinute" type="number" min="0" max="59" value="0">
+            <div class="cron-field slim" id="cronHourField" style="display:none"><label>时</label>
+              <select id="cronHour" onchange="cronHint()"></select>
             </div>
-            <div class="cron-field" id="cronDateField"><label>执行时间</label>
-              <input id="cronTime" type="time" value="03:00">
+            <div class="cron-field slim" id="cronMinField" style="display:none"><label>分</label>
+              <select id="cronMin" onchange="cronHint()"></select>
             </div>
-            <div class="cron-field" id="cronDowField" style="display:none"><label>星期</label>
-              <select id="cronDow">
+            <div class="cron-field slim" id="cronDowField" style="display:none"><label>星期</label>
+              <select id="cronDow" onchange="cronHint()">
                 <option value="1">周一</option>
                 <option value="2">周二</option>
                 <option value="3">周三</option>
@@ -1023,21 +1019,14 @@ function showApidoc() {
                 <option value="0">周日</option>
               </select>
             </div>
-            <div class="cron-field" id="cronDayField" style="display:none"><label>几号</label>
-              <select id="cronDay"></select>
+            <div class="cron-field slim" id="cronDayField" style="display:none"><label>日</label>
+              <select id="cronDay" onchange="cronHint()"></select>
             </div>
-            <div class="cron-field" id="cronMonthField" style="display:none"><label>月份</label>
-              <select id="cronMonth">
-                <option value="1">1 月</option><option value="2">2 月</option>
-                <option value="3">3 月</option><option value="4">4 月</option>
-                <option value="5">5 月</option><option value="6">6 月</option>
-                <option value="7">7 月</option><option value="8">8 月</option>
-                <option value="9">9 月</option><option value="10">10 月</option>
-                <option value="11">11 月</option><option value="12">12 月</option>
-              </select>
+            <div class="cron-field slim" id="cronMonthField" style="display:none"><label>月</label>
+              <select id="cronMonth" onchange="cronUpdateDays()"></select>
             </div>
-            <div class="cron-field" id="cronOnceField" style="display:none"><label>执行日期</label>
-              <input id="cronOnceDate" type="date">
+            <div class="cron-field slim" id="cronOnceYearField" style="display:none"><label>年份</label>
+              <select id="cronOnceYear" onchange="cronUpdateDays()"></select>
             </div>
             <div class="cron-field cron-grow" id="cronCustomField" style="display:none"><label>cron 表达式</label>
               <input id="cronCustom" placeholder="分 时 日 月 周（如 0 3 * * *），可加第 6 段年份">
@@ -1822,7 +1811,7 @@ function switchView (v) {
   if (v === 'domain') loadDomain()
   if (v === 'database') loadDatabase()
   if (v === 'backup') loadBackup()
-  if (v === 'crons') { cronFillDays(); cronKindChange(); cronFreqChange(); loadCrons() }
+  if (v === 'crons') { cronFillOptions(); cronKindChange(); cronFreqChange(); loadCrons() }
   if (v === 'site') loadSite()
   if (v === 'deps') { if (isPhp) loadPhpExt(); else if (isNode) loadNodePkgs(); else if (isGo) loadGoMod(); else loadPyPkgs() }
   if (v === 'disfn') loadDisfn()
@@ -1945,16 +1934,49 @@ async function doRestoreDir () {
 // ---------- 定时任务 ----------
 const CRON_KIND_LABEL = { command: '执行命令', dir: '备份目录', db: '备份数据库', both: '目录+数据库' }
 const CRON_DEST_LABEL = { local: '本地', cos: 'COS', both: '本地+COS' }
-let cronDayFilled = false
-function cronFillDays () {
-  if (cronDayFilled) return
+let cronFilled = false
+function cronFillOptions () {
+  if (cronFilled) return
+  const fill = (id, values, text) => {
+    const s = $(id)
+    values.forEach(v => {
+      const o = document.createElement('option')
+      o.value = v
+      o.textContent = text(v)
+      s.appendChild(o)
+    })
+  }
+  const pad = n => String(n).padStart(2, '0')
+  fill('cronHour', [...Array(24).keys()], v => pad(v) + ' 时')
+  fill('cronMin', [...Array(60).keys()], v => pad(v) + ' 分')
+  fill('cronMonth', [...Array(12).keys()].map(i => i + 1), v => v + ' 月')
+  const y = new Date().getFullYear()
+  fill('cronOnceYear', [...Array(6).keys()].map(i => y + i), v => v + ' 年')
+  cronFilled = true
+  cronUpdateDays()
+}
+function cronUpdateDays () {
+  // 按所选年/月动态调整「日」的天数（处理 2 月、小月）
+  const f = $('cronFreq').value
+  if (f !== 'once' && f !== 'monthly' && f !== 'yearly') return
+  const now = new Date()
+  let y = now.getFullYear()
+  let m = parseInt($('cronMonth').value, 10) || (now.getMonth() + 1)
+  if (f === 'once') {
+    y = parseInt($('cronOnceYear').value, 10) || y
+    m = parseInt($('cronMonth').value, 10) || m
+  }
+  const days = new Date(y, m, 0).getDate()
   const sel = $('cronDay')
-  for (let i = 1; i <= 31; i++) {
+  const cur = parseInt(sel.value, 10) || now.getDate()
+  sel.innerHTML = ''
+  for (let i = 1; i <= days; i++) {
     const o = document.createElement('option')
-    o.value = i; o.textContent = i + ' 号'
+    o.value = i
+    o.textContent = i + ' 号'
     sel.appendChild(o)
   }
-  cronDayFilled = true
+  sel.value = Math.min(cur, days)
 }
 function cronKindChange () {
   const k = $('cronKind').value
@@ -1964,35 +1986,37 @@ function cronKindChange () {
   cronHint()
 }
 function cronFreqChange () {
-  cronFillDays()
+  cronFillOptions()
   const f = $('cronFreq').value
+  const hm = ['daily', 'weekly', 'monthly', 'yearly', 'once'].includes(f)
   $('cronNminField').style.display = f === 'nmin' ? '' : 'none'
-  $('cronHourField').style.display = f === 'hourly' ? '' : 'none'
-  $('cronDateField').style.display = ['daily', 'weekly', 'monthly', 'yearly', 'once'].includes(f) ? '' : 'none'
+  $('cronHourField').style.display = hm ? '' : 'none'
+  $('cronMinField').style.display = (hm || f === 'hourly') ? '' : 'none'
   $('cronDowField').style.display = f === 'weekly' ? '' : 'none'
-  $('cronDayField').style.display = (f === 'monthly' || f === 'yearly') ? '' : 'none'
-  $('cronMonthField').style.display = f === 'yearly' ? '' : 'none'
-  $('cronOnceField').style.display = f === 'once' ? '' : 'none'
+  $('cronDayField').style.display = (f === 'monthly' || f === 'yearly' || f === 'once') ? '' : 'none'
+  $('cronMonthField').style.display = (f === 'yearly' || f === 'once') ? '' : 'none'
+  $('cronOnceYearField').style.display = f === 'once' ? '' : 'none'
   $('cronCustomField').style.display = f === 'custom' ? '' : 'none'
+  cronUpdateDays()
   cronHint()
 }
 function buildCronSchedule () {
   const f = $('cronFreq').value
   if (f === 'custom') return $('cronCustom').value.trim()
   if (f === 'nmin') return '*/' + ($('cronNmin').value || '5') + ' * * * *'
-  if (f === 'hourly') return (parseInt($('cronMinute').value, 10) || 0) + ' * * * *'
-  const t = ($('cronTime').value || '03:00').split(':')
-  const h = parseInt(t[0], 10) || 0, m = parseInt(t[1], 10) || 0
+  if (f === 'hourly') return (parseInt($('cronMin').value, 10) || 0) + ' * * * *'
+  const h = parseInt($('cronHour').value, 10) || 0
+  const m = parseInt($('cronMin').value, 10) || 0
+  const d = parseInt($('cronDay').value, 10) || 1
+  const mo = parseInt($('cronMonth').value, 10) || 1
   if (f === 'daily') return m + ' ' + h + ' * * *'
   if (f === 'weekly') return m + ' ' + h + ' * * ' + (parseInt($('cronDow').value, 10) || 0)
-  if (f === 'monthly') return m + ' ' + h + ' ' + (parseInt($('cronDay').value, 10) || 1) + ' * *'
-  if (f === 'yearly') return m + ' ' + h + ' ' + (parseInt($('cronDay').value, 10) || 1) + ' ' + (parseInt($('cronMonth').value, 10) || 1) + ' *'
+  if (f === 'monthly') return m + ' ' + h + ' ' + d + ' * *'
+  if (f === 'yearly') return m + ' ' + h + ' ' + d + ' ' + mo + ' *'
   if (f === 'once') {
-    const dv = $('cronOnceDate').value
-    if (!dv) return ''
-    const p = dv.split('-').map(x => parseInt(x, 10))
-    if (p.length !== 3 || p.some(isNaN)) return ''
-    return m + ' ' + h + ' ' + p[2] + ' ' + p[1] + ' * ' + p[0]
+    const y = parseInt($('cronOnceYear').value, 10) || 0
+    if (!y) return ''
+    return m + ' ' + h + ' ' + d + ' ' + mo + ' * ' + y
   }
   return ''
 }
@@ -2062,9 +2086,12 @@ async function saveCron () {
   const path = (kind === 'dir' || kind === 'both') ? ($('cronPath').value.trim() || '/app') : ''
   const dest = kind === 'command' ? 'local' : $('cronDest').value
   if ($('cronFreq').value === 'once') {
-    const today = new Date().toISOString().slice(0, 10)
-    if (!$('cronOnceDate').value) return toast('请选择仅一次任务的执行日期', false)
-    if ($('cronOnceDate').value < today) return toast('仅一次任务的日期不能早于今天', false)
+    const y = parseInt($('cronOnceYear').value, 10)
+    const mo = parseInt($('cronMonth').value, 10)
+    const d = parseInt($('cronDay').value, 10)
+    if (!y || !mo || !d) return toast('请选择仅一次任务的执行日期', false)
+    const t = new Date(y, mo - 1, d, parseInt($('cronHour').value, 10) || 0, parseInt($('cronMin').value, 10) || 0)
+    if (t <= new Date()) return toast('仅一次任务的执行时间必须晚于现在', false)
   }
   try { await api('POST', '/panel/instance/crons', { schedule, kind, command, path, dest }); toast('已添加', true); loadCrons() } catch (e) { toast(e.message, false) }
 }
