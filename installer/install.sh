@@ -4,8 +4,8 @@
 #
 #  一个脚本管好主控 + 被控（交互菜单选择，或子命令免交互）：
 #    bash install.sh                   -> 菜单
-#    bash install.sh agent             -> 独立面板安装/升级（被控节点）
-#    bash install.sh agent-rs          -> 独立面板（Rust 预编译二进制，可原地替换 Python 版）
+#    bash install.sh agent             -> 独立面板安装/升级（被控节点，Rust 预编译二进制）
+#    bash install.sh agent-rs          -> 同 agent（别名）
 #    bash install.sh agent-reinstall   -> 被控全新重装（清数据）
 #    bash install.sh agent-uninstall   -> 被控卸载
 #    bash install.sh agent-reset-admin -> 被控重置管理员
@@ -15,7 +15,6 @@
 #
 #  环境变量：SRC_DIR=/opt/ppanel  REPO_URL=...  MASTER_PORT=8001  PORT=9100
 #            PYPI_MIRROR=...  NPM_REGISTRY=...
-#            PPANEL_AGENT_IMPL=rust|python|auto   被控实现（默认 auto：Rust 优先，获取失败回落 Python）
 #            AGENT_RS_DIR=/opt/ppanel-agent       Rust 版安装目录
 #            AGENT_RS_TARBALL=/path/x.tar.gz      本地离线包（跳过网络下载）
 #            AGENT_RS_TAG=v1.1                    Release 标签
@@ -39,8 +38,7 @@ AGENT_SERVICE="${AGENT_SERVICE:-ppanel-agent}"
 AGENT_APP="$SRC_DIR/agent/backend"
 AGENT_PORT="${PORT:-9100}"
 
-# 被控实现：rust（预编译二进制）/ python（源码 + venv）。空 = 自动（有发布包用 rust，否则 python）
-AGENT_IMPL="${PPANEL_AGENT_IMPL:-auto}"
+# 被控实现：仅 Rust 预编译二进制（Python 版已移除；旧 .env/数据库自动兼容迁移）
 AGENT_RS_DIR="${AGENT_RS_DIR:-/opt/ppanel-agent}"   # Rust 版安装目录，与源码树解耦
 AGENT_RS_TAG="${AGENT_RS_TAG:-v1.1}"                # Release 标签（二进制附件所在版本）
 AGENT_RS_TARBALL="${AGENT_RS_TARBALL:-}"            # 本地离线包路径，设置后跳过下载
@@ -886,32 +884,8 @@ switch_mirror() {  # 国内环境自动换 apt 源
   fi
 }
 
-agent_install_base() {
-  step "1/6 安装基础依赖"
-  pkg_install curl git ca-certificates
-  if ! command -v python3 >/dev/null 2>&1; then
-    case "$PKG" in
-      apt) pkg_install python3 python3-venv python3-pip ;;
-      *)   pkg_install python3 python3-pip ;;
-    esac
-  fi
-  # Ubuntu/Debian 自带 python3 但常缺 venv/ensurepip（python3-venv 包），缺它建不了虚拟环境
-  if [ "$PKG" = "apt" ] && ! python3 -m ensurepip --version >/dev/null 2>&1; then
-    info "补装 python3-venv（缺 ensurepip，虚拟环境创建必需）..."
-    pkg_install python3-venv
-  fi
-  PYV=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
-  if python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)'; then
-    ok "Python $PYV"
-  elif python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)'; then
-    warn "系统 Python $PYV 低于 3.11，稍后由 uv 自动配置 Python 3.12"
-  else
-    fail "需要 Python >= 3.11（可由 uv 自动下载），当前 $PYV"
-  fi
-}
-
 install_caddy() {
-  step "3/6 安装 Caddy（域名自动 HTTPS / Let's Encrypt 证书）"
+  step "安装 Caddy（域名自动 HTTPS / Let's Encrypt 证书）"
   if command -v caddy >/dev/null 2>&1; then
     ok "Caddy 已存在：$(caddy version 2>/dev/null | head -1)"
   else
@@ -978,135 +952,10 @@ UNIT
   ok "Caddy 已启动，80/443 端口已放行"
 }
 
-agent_deps() {
-  step "5/6 安装 Python 依赖（uv 加速）"
-  cd "$AGENT_APP"
-  export UV_DEFAULT_INDEX="$PYPI_MIRROR"
-  export UV_INDEX_URL="$PYPI_MIRROR"
-  if python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
-    export UV_PYTHON_PREFERENCE=only-system
-    export UV_PYTHON="$(command -v python3)"
-  else
-    # 系统 Python 过旧：允许 uv 下载托管版 3.12
-    unset UV_PYTHON_PREFERENCE
-    export UV_PYTHON=3.12
-  fi
-
-  bootstrap_uv "$AGENT_APP"
-  UV_OK=0
-  if [ -n "$UV_BIN" ]; then
-    info "uv sync 安装依赖..."
-    # --inexact：保留 venv 内 uv 本体；--no-install-project：平铺结构不构建项目本身
-    if "$UV_BIN" sync --inexact --no-dev --no-install-project 2>&1 | tee /tmp/ppanel-uv-sync.log; then
-      UV_OK=1
-      git checkout -- uv.lock 2>/dev/null || true
-    elif [ "$PKG" = "apt" ]; then
-      warn "疑似缺编译头文件（aarch64 常见），安装工具链后重试..."
-      pkg_install libffi-dev python3-dev gcc
-      if "$UV_BIN" sync --inexact --no-dev --no-install-project 2>&1 | tee /tmp/ppanel-uv-sync.log; then
-        UV_OK=1
-        git checkout -- uv.lock 2>/dev/null || true
-      fi
-    fi
-  fi
-  if [ "$UV_OK" != 1 ]; then
-    warn "uv 不可用，退回 pip 安装（较慢）..."
-    [ -x "$AGENT_APP/.venv/bin/pip" ] || python3 -m venv --clear "$AGENT_APP/.venv"
-    "$AGENT_APP/.venv/bin/pip" install --upgrade pip -i "$PYPI_MIRROR"
-    "$AGENT_APP/.venv/bin/pip" install . -i "$PYPI_MIRROR"
-  fi
-  "$AGENT_APP/.venv/bin/python" -c "import fastapi, docker, uvicorn" \
-    || fail "依赖校验失败（fastapi/docker/uvicorn 导入失败）"
-  ok "依赖就绪（校验通过）"
-}
-
-agent_service() {
-  step "6/6 注册服务并启动"
-  mkdir -p /data/inst "$AGENT_APP/data"
-  if [ ! -f "$AGENT_APP/.env" ]; then
-    NODE_TOKEN="ppnode_$(openssl rand -hex 16 2>/dev/null || head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-    JWT_SECRET="$(openssl rand -hex 24 2>/dev/null || head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-    # 管理员为内部占位（无人工登录），随机化杜绝弱口令撞库；接口均走 X-Node-Token 鉴权
-    ADMIN_PASS="$(openssl rand -base64 18 2>/dev/null || head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 14)"
-    cat > "$AGENT_APP/.env" <<EOF
-# PPanel 独立面板配置（由 install.sh 生成）
-DATA_ROOT=/data/inst
-
-# 管理员为内部占位（无人工登录），已随机化防撞库；接口均走 X-Node-Token / X-API-Key 鉴权
-ADMIN_USERNAME=admin
-ADMIN_PASSWORD=$ADMIN_PASS
-
-# JWT 密钥（已随机生成）
-JWT_SECRET=$JWT_SECRET
-
-# 节点令牌：主控「节点管理」添加节点时填入
-NODE_TOKEN=$NODE_TOKEN
-EOF
-    ok "配置文件已生成（管理员密码已随机化，不对外展示）"
-  else
-    NODE_TOKEN=$(grep -E '^NODE_TOKEN=' "$AGENT_APP/.env" | cut -d= -f2)
-    [ -n "$NODE_TOKEN" ] || fail ".env 缺少 NODE_TOKEN，请补填"
-    ok "沿用现有配置文件"
-  fi
-
-  info "写入 systemd 服务（端口 $AGENT_PORT）..."
-  cat > "/etc/systemd/system/$AGENT_SERVICE.service" <<EOF
-[Unit]
-Description=PPanel Agent (standalone panel + docker node agent)
-After=network-online.target docker.service
-Wants=network-online.target
-
-[Service]
-Type=simple
-WorkingDirectory=$AGENT_APP
-ExecStart=$AGENT_APP/.venv/bin/uvicorn agent_main:app --host 0.0.0.0 --port $AGENT_PORT
-Restart=on-failure
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-EOF
-  systemctl daemon-reload
-  systemctl enable --now "$AGENT_SERVICE" >/dev/null 2>&1 || true
-  systemctl restart "$AGENT_SERVICE"
-  sleep 2
-  systemctl is-active --quiet "$AGENT_SERVICE" || fail "服务启动失败：journalctl -u $AGENT_SERVICE -n 50"
-
-  agent_open_port
-}
-
-agent_summary() {
-  IP=$(hostname -I 2>/dev/null | awk '{print $1}'); [ -n "$IP" ] || IP="<服务器IP>"
-  echo ""
-  if [ "${MODE_UPGRADE:-0}" = 1 ]; then
-    echo -e "  ${c_g}${c_b}━━━━━━━━━━━━━ 升 级 完 成 ━━━━━━━━━━━━━${c_off}"
-  else
-    echo -e "  ${c_g}${c_b}━━━━━━━━━━━━━ 安 装 完 成 ━━━━━━━━━━━━━${c_off}"
-  fi
-  echo -e "  独立面板  ${c_b}http://$IP:$AGENT_PORT/panel${c_off}"
-  echo -e "  说明      仅供主控与 API 调用（X-Node-Token 鉴权），无需登录"
-  echo -e "  节点Token ${c_b}$NODE_TOKEN${c_off}"
-  echo -e "  ${c_dim}─────────────────────────────────────────────${c_off}"
-  echo -e "  下一步    主控「节点管理」→ 添加节点 → 填入上方 Token 与节点地址"
-  echo -e "  常用      systemctl restart $AGENT_SERVICE · journalctl -u $AGENT_SERVICE -f"
-  echo -e "  提醒      云服务器请在控制台安全组放行 TCP $AGENT_PORT"
-  echo -e "  ${c_g}${c_b}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c_off}"
-}
-
-prune_for_agent() {  # 装完被控后移除仓库里用不到的主控/安装器代码（同机双装时保留）
-  if systemctl list-unit-files 2>/dev/null | awk '{print $1}' | grep -qx "ppanel-master.service" \
-     || { command -v docker >/dev/null 2>&1 && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "ppanel-master"; }; then
-    warn "检测到本机装有主控面板，保留完整仓库代码"
-    return 0
-  fi
-  [ -d "$SRC_DIR/master" ] && rm -rf "$SRC_DIR/master" && ok "已移除主控代码（仅保留被控面板）"
-  [ -d "$SRC_DIR/installer" ] && rm -rf "$SRC_DIR/installer" && ok "已移除安装器目录"
-}
-
 # ============================================================
 #  Rust 版被控：预编译二进制部署（静态 musl，无需 Python/工具链）
-#  与 Python 版共存约定：同一 systemd 单元、同一 .env、同一 SQLite 库，
-#  因此切换实现只是一次「换二进制 + 重启」，实例数据（/data/inst）不受影响。
+#  Python 版被控已移除；历史遗留的 $SRC_DIR/agent 源码与 .env/数据库
+#  会在安装/卸载时自动兼容迁移（复用配置与库，实例数据不受影响）。
 # ============================================================
 agent_rs_arch() {
   case "$(uname -m)" in
@@ -1181,7 +1030,7 @@ agent_open_port() {  # 放行被控端口（有防火墙才操作）
   fi
 }
 
-agent_rs_install() {  # 成功返回 0；无二进制可用返回 1（由调用方决定是否回落 Python）
+agent_rs_install() {  # 成功返回 0；获取失败返回 1（离线包/网络均不可用）
   local mode="${1:-net}" arch tmpd legacy_env legacy_db db_abs i healthy=0
 
   step "1/5 检查环境"
@@ -1189,6 +1038,7 @@ agent_rs_install() {  # 成功返回 0；无二进制可用返回 1（由调用�
   pkg_install curl ca-certificates
   ok "$(uname -m) 对应发布包 ppanel-agent-linux-$arch.tar.gz"
   install_docker   # 被控依赖 docker 引擎管理实例容器；已装则跳过（幂等）
+  install_caddy    # 域名与 SSL 功能依赖（agent 管理 /etc/caddy/sites）；已装则跳过（幂等）
 
   step "2/5 获取预编译二进制"
   if ! agent_rs_fetch "$mode"; then
@@ -1337,30 +1187,13 @@ agent_rs_summary() {
 
 action_agent() {
   detect_env
-  case "$AGENT_IMPL" in
-    rust)
-      if agent_rs_install net; then agent_rs_summary; return 0; fi
-      warn "Rust 版不可用，回退 Python 版安装"
-      ;;
-    auto)
-      # 自动模式：本地离线包优先（零网络），其次 Release 在线拉取（v1.1 起稳定发布），
-      # 都失败才回落 Python 源码部署（旧版兜底）
-      if agent_rs_install local; then agent_rs_summary; return 0; fi
-      if agent_rs_install net; then agent_rs_summary; return 0; fi
-      warn "Rust 版获取失败（无本地离线包且 Release 不可达），回退 Python 版安装"
-      ;;
-    python|"") ;;
-    *) fail "PPANEL_AGENT_IMPL 取值应为 rust / python / auto（当前：$AGENT_IMPL）" ;;
-  esac
-  switch_mirror
-  agent_install_base
-  install_docker
-  install_caddy
-  ensure_repo "$AGENT_APP/agent_main.py"
-  agent_deps
-  agent_service
-  prune_for_agent
-  agent_summary
+  # Python 版被控已移除：仅部署 Rust 预编译二进制
+  # 本地离线包优先（零网络），其次 Release 在线拉取
+  if agent_rs_install local || agent_rs_install net; then
+    agent_rs_summary
+    return 0
+  fi
+  fail "Rust 版被控获取失败（无本地离线包且 Release 不可达）。可把 ppanel-agent-linux-<arch>.tar.gz 放到脚本同目录后重跑，或检查网络"
 }
 
 action_agent_reinstall() {  # 全新重装：清除旧安装（含数据）后重装
@@ -1375,15 +1208,11 @@ action_agent_reinstall() {  # 全新重装：清除旧安装（含数据）后�
   remove_master_container
   rm -rf "$SRC_DIR" /data/inst /tmp/ppanel-uv-sync.log
   ok "旧安装已清除"
-  switch_mirror
-  agent_install_base
-  install_docker
-  install_caddy
-  ensure_repo "$AGENT_APP/agent_main.py"
-  agent_deps
-  agent_service
-  prune_for_agent
-  agent_summary
+  if agent_rs_install local || agent_rs_install net; then
+    agent_rs_summary
+    return 0
+  fi
+  fail "Rust 版被控获取失败，可把离线包放到脚本同目录后重跑"
 }
 
 action_agent_uninstall() {
@@ -1409,15 +1238,12 @@ action_agent_uninstall() {
 }
 
 action_agent_reset_admin() {
-  local DB PY
+  local DB
   DB=$(agent_db_path)
   [ -f "$DB" ] || fail "未找到数据库（$DB）"
   confirm "删除内置管理员并按 .env 随机密码重建？" || { warn "已取消"; return 0; }
-  if command -v python3 >/dev/null 2>&1; then PY=python3
-  elif [ -x "$AGENT_APP/.venv/bin/python" ]; then PY="$AGENT_APP/.venv/bin/python"
-  else fail "需要 python3 写库"
-  fi
-  "$PY" - "$DB" <<'PYEOF'
+  command -v python3 >/dev/null 2>&1 || pkg_install python3
+  python3 - "$DB" <<'PYEOF'
 import sqlite3, sys
 c = sqlite3.connect(sys.argv[1])
 c.execute("DELETE FROM users WHERE username='admin'")
@@ -1606,23 +1432,21 @@ menu() {
   banner
   echo ""
   echo -e "  ${c_b}[1]${c_off} 安装 主控面板               ${c_dim}Docker 部署 · 自动拉取预构建镜像${c_off}"
-  echo -e "  ${c_b}[2]${c_off} 安装 独立面板（被控）       ${c_dim}Rust 预编译二进制 · 推荐${c_off}"
-  echo -e "  ${c_b}[3]${c_off} 安装 独立面板（Python 版）  ${c_dim}源码部署 · 旧版备用，Rust 不可用时选${c_off}"
-  echo -e "  ${c_b}[4]${c_off} 卸载 主控面板               ${c_dim}数据可选保留${c_off}"
-  echo -e "  ${c_b}[5]${c_off} 卸载 独立面板（被控）       ${c_dim}实例数据可选保留${c_off}"
+  echo -e "  ${c_b}[2]${c_off} 安装 独立面板（被控）       ${c_dim}Rust 预编译二进制 · 9100 端口${c_off}"
+  echo -e "  ${c_b}[3]${c_off} 卸载 主控面板               ${c_dim}数据可选保留${c_off}"
+  echo -e "  ${c_b}[4]${c_off} 卸载 独立面板（被控）       ${c_dim}实例数据可选保留${c_off}"
   echo -e "  ${c_b}[0]${c_off} 退出"
   echo ""
-  echo -e "  ${c_dim}更多子命令：bash install.sh status · agent-info · master-reset-admin${c_off}"
+  echo -e "  ${c_dim}更多子命令：bash install.sh status · agent-info · agent-reset-admin · master-reset-admin${c_off}"
   echo -e "  ${c_dim}主控本机直装（systemd）：bash install.sh master${c_off}"
   echo ""
-  read -rp "  请选择 [0-5]: " c
+  read -rp "  请选择 [0-4]: " c
   echo ""
   case "$c" in
     1) action_master_docker ;;
-    2) AGENT_IMPL=rust; action_agent ;;
-    3) AGENT_IMPL=python; action_agent ;;
-    4) action_master_uninstall ;;
-    5) action_agent_uninstall ;;
+    2) action_agent ;;
+    3) action_master_uninstall ;;
+    4) action_agent_uninstall ;;
     0) exit 0 ;;
     *) warn "无效选择"; exit 1 ;;
   esac
@@ -1631,7 +1455,7 @@ menu() {
 case "${1:-menu}" in
   menu)              menu ;;
   agent)             banner; action_agent ;;
-  agent-rs)          banner; AGENT_IMPL=rust; action_agent ;;
+  agent-rs)          banner; action_agent ;;
   agent-reinstall)   banner; action_agent_reinstall ;;
   agent-uninstall)   banner; action_agent_uninstall ;;
   agent-reset-admin) banner; action_agent_reset_admin ;;
