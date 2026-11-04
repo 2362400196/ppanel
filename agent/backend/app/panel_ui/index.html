@@ -431,7 +431,7 @@ tr[data-kind='file'] .f-svg { color: var(--text2); }
 <!-- 登录 -->
 <div id="loginView" class="login-wrap">
   <div class="login-card">
-    <div class="logo-row"><span class="logo">P</span><span class="brand">PPanel 容器面板</span></div>
+    <div class="logo-row"><span class="logo">P</span><span class="brand" id="loginBrand">PPanel 容器面板</span></div>
     <div class="login-tabs">
       <button id="ltToken" class="on" onclick="loginMode('token')">面板令牌</button>
       <button id="ltAdmin" onclick="loginMode('admin')">管理员</button>
@@ -1898,11 +1898,20 @@ async function pmaToggle () {
 }
 
 // ---------- 概览 ----------
+function applyBrand (name) {
+  if (!name) return
+  // 浏览器标签页标题 + 登录页品牌跟随实例名（改名后立即生效）
+  document.title = name + ' · PPanel 容器面板'
+  localStorage.setItem('ppanel_inst_name', name)
+  const b = $('loginBrand')
+  if (b) b.textContent = name
+}
 function renderTop () {
   $('hName').textContent = inst.name
   $('hDot').className = 'dot ' + inst.status
   $('hStatus').textContent = statusText(inst.status)
   $('hPort').textContent = ':' + inst.ext_port
+  applyBrand(inst.name)
 }
 function renderOverview () {
   $('oName').textContent = inst.name
@@ -4192,6 +4201,9 @@ async function adminEnterPanel (id) {
 }
 
 (async function init () {
+  // 登录页品牌/标题先恢复为上次登录的实例名（改名后登录页也同步）
+  const savedName = localStorage.getItem('ppanel_inst_name')
+  if (savedName) applyBrand(savedName)
   const t = new URLSearchParams(location.search).get('t')
   if (t) {
     $('tokenInput').value = t
