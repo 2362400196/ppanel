@@ -15,10 +15,10 @@
 #
 #  环境变量：SRC_DIR=/opt/ppanel  REPO_URL=...  MASTER_PORT=8001  PORT=9100
 #            PYPI_MIRROR=...  NPM_REGISTRY=...
-#            PPANEL_AGENT_IMPL=rust|python|auto   被控实现（默认 python；auto=有本地包则 rust）
+#            PPANEL_AGENT_IMPL=rust|python|auto   被控实现（默认 auto：Rust 优先，获取失败回落 Python）
 #            AGENT_RS_DIR=/opt/ppanel-agent       Rust 版安装目录
 #            AGENT_RS_TARBALL=/path/x.tar.gz      本地离线包（跳过网络下载）
-#            AGENT_RS_TAG=v1.0                    Release 标签
+#            AGENT_RS_TAG=v1.1                    Release 标签
 # ============================================================
 set -euo pipefail
 
@@ -1156,11 +1156,20 @@ agent_rs_fetch() {  # $1=local|net；成功导出 RS_TGZ
 
   gitee="https://gitee.com/zhuxiaohuaqn/ppanel/releases/download/$AGENT_RS_TAG"
   github="https://github.com/2362400196/ppanel/releases/download/$AGENT_RS_TAG"
-  for base in "$gitee" "$github" "https://ghfast.top/$github" "https://gh-proxy.com/$github"; do
-    info "下载 $name"
-    info "  $base"
-    if agent_rs_try_dl "$base" "$name"; then RS_TGZ=/tmp/ppanel-agent-rs.tar.gz; return 0; fi
-  done
+  # 国内 gitee 优先（直连快）；海外/香港直连 github（gitee 反而慢且可能 404）
+  if is_cn; then
+    for base in "$gitee" "$github" "https://ghfast.top/$github" "https://gh-proxy.com/$github"; do
+      info "下载 $name"
+      info "  $base"
+      if agent_rs_try_dl "$base" "$name"; then RS_TGZ=/tmp/ppanel-agent-rs.tar.gz; return 0; fi
+    done
+  else
+    for base in "$github" "https://ghfast.top/$github" "https://gh-proxy.com/$github" "$gitee"; do
+      info "下载 $name"
+      info "  $base"
+      if agent_rs_try_dl "$base" "$name"; then RS_TGZ=/tmp/ppanel-agent-rs.tar.gz; return 0; fi
+    done
+  fi
   return 1
 }
 
@@ -1179,6 +1188,7 @@ agent_rs_install() {  # 成功返回 0；无二进制可用返回 1（由调用�
   arch=$(agent_rs_arch) || { warn "不支持的架构：$(uname -m)，Rust 版暂无对应二进制"; return 1; }
   pkg_install curl ca-certificates
   ok "$(uname -m) 对应发布包 ppanel-agent-linux-$arch.tar.gz"
+  install_docker   # 被控依赖 docker 引擎管理实例容器；已装则跳过（幂等）
 
   step "2/5 获取预编译二进制"
   if ! agent_rs_fetch "$mode"; then
@@ -1333,8 +1343,11 @@ action_agent() {
       warn "Rust 版不可用，回退 Python 版安装"
       ;;
     auto)
-      # 自动模式只看本地是否有离线包，不发起网络探测（避免每次安装都等超时）
+      # 自动模式：本地离线包优先（零网络），其次 Release 在线拉取（v1.1 起稳定发布），
+      # 都失败才回落 Python 源码部署（旧版兜底）
       if agent_rs_install local; then agent_rs_summary; return 0; fi
+      if agent_rs_install net; then agent_rs_summary; return 0; fi
+      warn "Rust 版获取失败（无本地离线包且 Release 不可达），回退 Python 版安装"
       ;;
     python|"") ;;
     *) fail "PPANEL_AGENT_IMPL 取值应为 rust / python / auto（当前：$AGENT_IMPL）" ;;
@@ -1593,8 +1606,8 @@ menu() {
   banner
   echo ""
   echo -e "  ${c_b}[1]${c_off} 安装 主控面板               ${c_dim}Docker 部署 · 自动拉取预构建镜像${c_off}"
-  echo -e "  ${c_b}[2]${c_off} 安装 独立面板（被控）       ${c_dim}9100 端口 · Python 源码部署${c_off}"
-  echo -e "  ${c_b}[3]${c_off} 安装 独立面板（Rust 版）    ${c_dim}预编译静态二进制 · 可原地替换 [2]${c_off}"
+  echo -e "  ${c_b}[2]${c_off} 安装 独立面板（被控）       ${c_dim}Rust 预编译二进制 · 推荐${c_off}"
+  echo -e "  ${c_b}[3]${c_off} 安装 独立面板（Python 版）  ${c_dim}源码部署 · 旧版备用，Rust 不可用时选${c_off}"
   echo -e "  ${c_b}[4]${c_off} 卸载 主控面板               ${c_dim}数据可选保留${c_off}"
   echo -e "  ${c_b}[5]${c_off} 卸载 独立面板（被控）       ${c_dim}实例数据可选保留${c_off}"
   echo -e "  ${c_b}[0]${c_off} 退出"
@@ -1606,8 +1619,8 @@ menu() {
   echo ""
   case "$c" in
     1) action_master_docker ;;
-    2) AGENT_IMPL=python; action_agent ;;
-    3) AGENT_IMPL=rust; action_agent ;;
+    2) AGENT_IMPL=rust; action_agent ;;
+    3) AGENT_IMPL=python; action_agent ;;
     4) action_master_uninstall ;;
     5) action_agent_uninstall ;;
     0) exit 0 ;;
