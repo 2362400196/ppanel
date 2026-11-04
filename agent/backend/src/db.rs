@@ -205,6 +205,9 @@ const DDL: &[&str] = &[
         instance_id INTEGER NOT NULL,
         schedule VARCHAR(64) NOT NULL,
         command VARCHAR(512) NOT NULL,
+        kind VARCHAR(16) NOT NULL DEFAULT 'command',
+        path VARCHAR(255) NOT NULL DEFAULT '',
+        dest VARCHAR(8) NOT NULL DEFAULT 'local',
         enabled INTEGER NOT NULL DEFAULT 1,
         last_run DATETIME,
         last_status VARCHAR(16) NOT NULL DEFAULT '',
@@ -275,4 +278,8 @@ const ALTERS: &[&str] = &[
     // 实例来源：master=主控商城开通（默认），local=独立面板本地创建
     "ALTER TABLE instances ADD COLUMN source VARCHAR(16) DEFAULT 'master'",
     "ALTER TABLE host_backup_jobs ADD COLUMN dest VARCHAR(8) DEFAULT 'local'",
+    // 定时任务类型：command=命令 dir=备份目录 db=备份数据库 both=目录+数据库
+    "ALTER TABLE instance_crons ADD COLUMN kind VARCHAR(16) DEFAULT 'command'",
+    "ALTER TABLE instance_crons ADD COLUMN path VARCHAR(255) DEFAULT ''",
+    "ALTER TABLE instance_crons ADD COLUMN dest VARCHAR(8) DEFAULT 'local'",
 ];

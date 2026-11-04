@@ -136,6 +136,15 @@ pub struct InstanceCron {
     pub instance_id: i64,
     pub schedule: String,
     pub command: String,
+    /// command=执行命令 dir=备份目录 db=备份数据库 both=目录+数据库
+    #[sqlx(default)]
+    pub kind: String,
+    /// 备份目录时的容器内路径（kind=dir/both 时有效）
+    #[sqlx(default)]
+    pub path: String,
+    /// 备份去向：local=本地磁盘 cos=仅COS both=本地+COS（备份类任务有效）
+    #[sqlx(default)]
+    pub dest: String,
     pub enabled: i64,
     pub last_run: Option<NaiveDateTime>,
     pub last_status: String,

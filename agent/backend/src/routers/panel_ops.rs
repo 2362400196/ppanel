@@ -383,6 +383,9 @@ fn cron_out(r: &InstanceCron) -> Value {
         "id": r.id,
         "schedule": r.schedule,
         "command": r.command,
+        "kind": if r.kind.is_empty() { "command".to_string() } else { r.kind.clone() },
+        "path": r.path,
+        "dest": if r.dest.is_empty() { "local".to_string() } else { r.dest.clone() },
         "enabled": r.enabled != 0,
         "last_run": r.last_run.map(|t| t.format("%m-%d %H:%M").to_string()).unwrap_or_default(),
         "last_status": r.last_status,
@@ -417,17 +420,29 @@ async fn crons_create(
     if let Some(err) = cron::validate(&schedule) {
         return Err(AppError::bad_request(format!("cron 表达式无效：{err}")));
     }
+    let kind = {
+        let k = sfield(&body, "kind");
+        if k.is_empty() { "command".to_string() } else { k }
+    };
+    if !matches!(kind.as_str(), "command" | "dir" | "db" | "both") {
+        return Err(AppError::bad_request("任务类型无效"));
+    }
     let cmd = sfield(&body, "command").trim().to_string();
-    if cmd.is_empty() || cmd.chars().count() > 512 {
+    if kind == "command" && (cmd.is_empty() || cmd.chars().count() > 512) {
         return Err(AppError::bad_request("命令不能为空且不超过 512 字符"));
     }
+    let path = normalize_cron_path(&sfield(&body, "path"), &kind)?;
+    let dest = normalize_cron_dest(&state, &sfield(&body, "dest"), &kind).await?;
     let res = sqlx::query(
-        "INSERT INTO instance_crons (instance_id, schedule, command, enabled, last_status, \
-         last_output, created_at) VALUES (?,?,?,1,'','',?)",
+        "INSERT INTO instance_crons (instance_id, schedule, command, kind, path, dest, enabled, \
+         last_status, last_output, created_at) VALUES (?,?,?,?,?,?,1,'','',?)",
     )
     .bind(inst.id)
     .bind(schedule.trim())
     .bind(&cmd)
+    .bind(&kind)
+    .bind(&path)
+    .bind(&dest)
     .bind(crate::models::utcnow())
     .execute(&state.db)
     .await?;
@@ -436,6 +451,39 @@ async fn crons_create(
         .fetch_one(&state.db)
         .await?;
     Ok(Json(cron_out(&row)))
+}
+
+/// 备份类任务的目标目录校验与默认值（kind=db 时忽略路径）。
+fn normalize_cron_path(raw: &str, kind: &str) -> AppResult<String> {
+    if kind != "dir" && kind != "both" {
+        return Ok(String::new());
+    }
+    let p = raw.trim().trim_end_matches('/');
+    let p = if p.is_empty() { "/app" } else { p };
+    if p.contains("..") || !backup::path_ok(p) {
+        return Err(AppError::bad_request("目录路径无效（需为容器内绝对路径，如 /app/uploads）"));
+    }
+    Ok(p.to_string())
+}
+
+/// 备份去向校验：local/cos/both；备份类任务才允许非 local，且 COS 需已启用。
+async fn normalize_cron_dest(state: &AppState, raw: &str, kind: &str) -> AppResult<String> {
+    let d = if raw.trim().is_empty() { "local" } else { raw.trim() };
+    if !matches!(d, "local" | "cos" | "both") {
+        return Err(AppError::bad_request("备份去向无效（local / cos / both）"));
+    }
+    if (kind == "command") && d != "local" {
+        return Err(AppError::bad_request("命令任务没有备份去向，请保持本地"));
+    }
+    if d != "local" {
+        let cfg = crate::services::cos::get_config(&state.db).await?;
+        if cfg.enabled == 0 {
+            return Err(AppError::bad_request(
+                "腾讯云 COS 未启用，请先在「备份」页配置并启用，或选择备份到本地",
+            ));
+        }
+    }
+    Ok(d.to_string())
 }
 
 async fn crons_patch(
@@ -451,7 +499,12 @@ async fn crons_patch(
     let mut row = found
         .filter(|r| r.instance_id == inst.id)
         .ok_or_else(|| AppError::not_found("任务不存在"))?;
-
+    if row.kind.is_empty() {
+        row.kind = "command".to_string();
+    }
+    if row.dest.is_empty() {
+        row.dest = "local".to_string();
+    }
     if let Some(v) = body.get("schedule").filter(|v| !v.is_null()) {
         let schedule = v.as_str().unwrap_or("").to_string();
         if let Some(err) = cron::validate(&schedule) {
@@ -459,23 +512,44 @@ async fn crons_patch(
         }
         row.schedule = schedule.trim().to_string();
     }
+    if let Some(v) = body.get("kind").filter(|v| !v.is_null()) {
+        let k = v.as_str().unwrap_or("command").to_string();
+        if !matches!(k.as_str(), "command" | "dir" | "db" | "both") {
+            return Err(AppError::bad_request("任务类型无效"));
+        }
+        row.kind = k;
+    }
     if let Some(v) = body.get("command").filter(|v| !v.is_null()) {
         let cmd = v.as_str().unwrap_or("").trim().to_string();
-        if cmd.is_empty() || cmd.chars().count() > 512 {
-            return Err(AppError::bad_request("命令不能为空且不超过 512 字符"));
+        if cmd.chars().count() > 512 {
+            return Err(AppError::bad_request("命令不超过 512 字符"));
         }
         row.command = cmd;
+    }
+    if let Some(v) = body.get("path").filter(|v| !v.is_null()) {
+        row.path = normalize_cron_path(v.as_str().unwrap_or(""), &row.kind)?;
+    }
+    if let Some(v) = body.get("dest").filter(|v| !v.is_null()) {
+        row.dest = normalize_cron_dest(&state, v.as_str().unwrap_or(""), &row.kind).await?;
+    }
+    if row.kind == "command" && row.command.trim().is_empty() {
+        return Err(AppError::bad_request("命令不能为空"));
     }
     if let Some(v) = body.get("enabled").filter(|v| !v.is_null()) {
         row.enabled = if v.as_bool().unwrap_or(false) { 1 } else { 0 };
     }
-    sqlx::query("UPDATE instance_crons SET schedule = ?, command = ?, enabled = ? WHERE id = ?")
-        .bind(&row.schedule)
-        .bind(&row.command)
-        .bind(row.enabled)
-        .bind(cid)
-        .execute(&state.db)
-        .await?;
+    sqlx::query(
+        "UPDATE instance_crons SET schedule = ?, command = ?, kind = ?, path = ?, dest = ?, enabled = ? WHERE id = ?",
+    )
+    .bind(&row.schedule)
+    .bind(&row.command)
+    .bind(&row.kind)
+    .bind(&row.path)
+    .bind(&row.dest)
+    .bind(row.enabled)
+    .bind(cid)
+    .execute(&state.db)
+    .await?;
     Ok(Json(cron_out(&row)))
 }
 

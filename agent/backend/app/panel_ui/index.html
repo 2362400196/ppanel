@@ -261,7 +261,29 @@ td .op.del:hover { color: var(--bad); }
 .term-status.connecting .dot { background: var(--warn); }
 @keyframes termBreathe { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
 .flex-spacer { flex: 1; }
-select { height: 34px; border: 1px solid var(--line); border-radius: 9px; padding: 0 8px; background: #fff; outline: none; }
+select {
+  height: 34px; border: 1px solid var(--line); border-radius: 9px; padding: 0 30px 0 10px; outline: none;
+  background: #fff url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%239aa5a0' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat right 10px center / 10px 6px;
+  appearance: none; -webkit-appearance: none; cursor: pointer; transition: border .15s;
+}
+select:hover { border-color: #c3cdc8; }
+select:focus { border-color: var(--primary); }
+input[type="time"], input[type="date"] {
+  height: 34px; border: 1px solid var(--line); border-radius: 9px; padding: 0 10px; background: #fff;
+  outline: none; font-family: inherit; font-size: 13px; cursor: pointer; transition: border .15s;
+}
+input[type="time"]:focus, input[type="date"]:focus { border-color: var(--primary); }
+/* 定时任务表单（宝塔式分组字段） */
+.cron-grid { display: flex; flex-wrap: wrap; gap: 10px 12px; margin-top: 12px; }
+.cron-field { display: flex; flex-direction: column; gap: 5px; flex: 1 1 130px; min-width: 130px; }
+.cron-field.cron-grow { flex: 3 1 240px; }
+.cron-field > label { font-size: 12px; color: var(--text2); }
+.cron-field input, .cron-field select {
+  width: 100%; box-sizing: border-box; height: 38px; border: 1px solid var(--line);
+  border-radius: 10px; padding: 0 10px; background: #fff; outline: none; font-size: 13px; transition: border .15s;
+}
+.cron-field select { padding-right: 30px; }
+.cron-field input:focus, .cron-field select:focus { border-color: var(--primary); }
 
 /* 自绘下拉（pps-enhance 生成的按钮与列表） */
 .pps-btn { position: relative; display: inline-flex; align-items: center; text-align: left; padding-right: 28px !important;
@@ -939,12 +961,92 @@ function showApidoc() {
       <div id="v-crons" class="view">
         <div class="card">
           <div class="page-title">新建定时任务</div>
-          <div class="domain-row">
-            <input id="cronSchedule" placeholder="cron 表达式：分 时 日 月 周（如 0 3 * * * 每天凌晨3点）">
-            <input id="cronCommand" placeholder="在实例容器内执行的命令（如 php /app/bin/console cache:clear）">
-            <button class="btn" onclick="saveCron()">添加</button>
+          <div class="cron-grid">
+            <div class="cron-field"><label>任务类型</label>
+              <select id="cronKind" onchange="cronKindChange()">
+                <option value="command">执行命令</option>
+                <option value="dir">备份目录</option>
+                <option value="db">备份数据库</option>
+                <option value="both">备份目录 + 数据库</option>
+              </select>
+            </div>
+            <div class="cron-field" id="cronDestField" style="display:none"><label>备份到哪里</label>
+              <select id="cronDest" onchange="cronHint()">
+                <option value="local">本地磁盘</option>
+                <option value="cos">COS 云存储</option>
+                <option value="both">本地 + COS</option>
+              </select>
+            </div>
+            <div class="cron-field cron-grow" id="cronCmdField"><label>执行命令</label>
+              <input id="cronCommand" placeholder="在实例容器内执行的命令（如 php /app/bin/console cache:clear）">
+            </div>
+            <div class="cron-field cron-grow" id="cronPathField" style="display:none"><label>备份目录</label>
+              <input id="cronPath" placeholder="容器内目录（如 /app/uploads）">
+            </div>
           </div>
-          <p class="hint">命令在实例容器内执行（docker exec）。示例：每天 3 点备份 <span class="mono">tar -czf /app/bak_$(date +\%F).tar.gz -C /app uploads</span>；每 5 分钟触发 <span class="mono">*/5 * * * *</span>。</p>
+          <div class="cron-grid">
+            <div class="cron-field"><label>执行周期</label>
+              <select id="cronFreq" onchange="cronFreqChange()">
+                <option value="nmin">每 N 分钟</option>
+                <option value="hourly">每小时</option>
+                <option value="daily" selected>每天</option>
+                <option value="weekly">每周</option>
+                <option value="monthly">每月</option>
+                <option value="yearly">每年</option>
+                <option value="once">仅一次（指定日期）</option>
+                <option value="custom">自定义 cron 表达式</option>
+              </select>
+            </div>
+            <div class="cron-field" id="cronNminField" style="display:none"><label>间隔</label>
+              <select id="cronNmin" onchange="cronHint()">
+                <option value="1">每 1 分钟</option>
+                <option value="5" selected>每 5 分钟</option>
+                <option value="10">每 10 分钟</option>
+                <option value="15">每 15 分钟</option>
+                <option value="30">每 30 分钟</option>
+              </select>
+            </div>
+            <div class="cron-field" id="cronHourField" style="display:none"><label>第几分钟</label>
+              <input id="cronMinute" type="number" min="0" max="59" value="0">
+            </div>
+            <div class="cron-field" id="cronDateField"><label>执行时间</label>
+              <input id="cronTime" type="time" value="03:00">
+            </div>
+            <div class="cron-field" id="cronDowField" style="display:none"><label>星期</label>
+              <select id="cronDow">
+                <option value="1">周一</option>
+                <option value="2">周二</option>
+                <option value="3">周三</option>
+                <option value="4">周四</option>
+                <option value="5">周五</option>
+                <option value="6">周六</option>
+                <option value="0">周日</option>
+              </select>
+            </div>
+            <div class="cron-field" id="cronDayField" style="display:none"><label>几号</label>
+              <select id="cronDay"></select>
+            </div>
+            <div class="cron-field" id="cronMonthField" style="display:none"><label>月份</label>
+              <select id="cronMonth">
+                <option value="1">1 月</option><option value="2">2 月</option>
+                <option value="3">3 月</option><option value="4">4 月</option>
+                <option value="5">5 月</option><option value="6">6 月</option>
+                <option value="7">7 月</option><option value="8">8 月</option>
+                <option value="9">9 月</option><option value="10">10 月</option>
+                <option value="11">11 月</option><option value="12">12 月</option>
+              </select>
+            </div>
+            <div class="cron-field" id="cronOnceField" style="display:none"><label>执行日期</label>
+              <input id="cronOnceDate" type="date">
+            </div>
+            <div class="cron-field cron-grow" id="cronCustomField" style="display:none"><label>cron 表达式</label>
+              <input id="cronCustom" placeholder="分 时 日 月 周（如 0 3 * * *），可加第 6 段年份">
+            </div>
+          </div>
+          <div style="display:flex;align-items:center;gap:14px;margin-top:16px">
+            <button class="btn" onclick="saveCron()">添加任务</button>
+            <span class="hint" id="cronHint" style="margin:0"></span>
+          </div>
         </div>
         <div class="card">
           <div class="page-title">任务列表</div>
@@ -952,8 +1054,9 @@ function showApidoc() {
             <table style="width:100%;border-collapse:collapse;font-size:12.5px">
               <thead><tr style="color:var(--text2);text-align:left">
                 <th style="padding:6px 8px;border-bottom:1px solid var(--line)">状态</th>
-                <th style="padding:6px 8px;border-bottom:1px solid var(--line)">表达式</th>
-                <th style="padding:6px 8px;border-bottom:1px solid var(--line)">命令</th>
+                <th style="padding:6px 8px;border-bottom:1px solid var(--line)">类型</th>
+                <th style="padding:6px 8px;border-bottom:1px solid var(--line)">执行周期</th>
+                <th style="padding:6px 8px;border-bottom:1px solid var(--line)">内容</th>
                 <th style="padding:6px 8px;border-bottom:1px solid var(--line)">上次执行</th>
                 <th style="padding:6px 8px;border-bottom:1px solid var(--line)">操作</th>
               </tr></thead>
@@ -1306,6 +1409,7 @@ function showApidoc() {
               <option value="2000">最近 2000 行</option>
             </select>
             <button class="btn ghost" onclick="logStop()">断开</button>
+            <button id="logBottom" class="btn ghost" style="display:none" onclick="logToBottom()">↓ 回到底部</button>
             <span id="logHint" class="status-text"></span>
           </div>
           <div id="logBox" class="log-box">切换到本页开始实时跟踪日志…</div>
@@ -1718,7 +1822,7 @@ function switchView (v) {
   if (v === 'domain') loadDomain()
   if (v === 'database') loadDatabase()
   if (v === 'backup') loadBackup()
-  if (v === 'crons') loadCrons()
+  if (v === 'crons') { cronFillDays(); cronKindChange(); cronFreqChange(); loadCrons() }
   if (v === 'site') loadSite()
   if (v === 'deps') { if (isPhp) loadPhpExt(); else if (isNode) loadNodePkgs(); else if (isGo) loadGoMod(); else loadPyPkgs() }
   if (v === 'disfn') loadDisfn()
@@ -1839,19 +1943,97 @@ async function doRestoreDir () {
 }
 
 // ---------- 定时任务 ----------
+const CRON_KIND_LABEL = { command: '执行命令', dir: '备份目录', db: '备份数据库', both: '目录+数据库' }
+const CRON_DEST_LABEL = { local: '本地', cos: 'COS', both: '本地+COS' }
+let cronDayFilled = false
+function cronFillDays () {
+  if (cronDayFilled) return
+  const sel = $('cronDay')
+  for (let i = 1; i <= 31; i++) {
+    const o = document.createElement('option')
+    o.value = i; o.textContent = i + ' 号'
+    sel.appendChild(o)
+  }
+  cronDayFilled = true
+}
+function cronKindChange () {
+  const k = $('cronKind').value
+  $('cronCmdField').style.display = k === 'command' ? '' : 'none'
+  $('cronPathField').style.display = (k === 'dir' || k === 'both') ? '' : 'none'
+  $('cronDestField').style.display = k === 'command' ? 'none' : ''
+  cronHint()
+}
+function cronFreqChange () {
+  cronFillDays()
+  const f = $('cronFreq').value
+  $('cronNminField').style.display = f === 'nmin' ? '' : 'none'
+  $('cronHourField').style.display = f === 'hourly' ? '' : 'none'
+  $('cronDateField').style.display = ['daily', 'weekly', 'monthly', 'yearly', 'once'].includes(f) ? '' : 'none'
+  $('cronDowField').style.display = f === 'weekly' ? '' : 'none'
+  $('cronDayField').style.display = (f === 'monthly' || f === 'yearly') ? '' : 'none'
+  $('cronMonthField').style.display = f === 'yearly' ? '' : 'none'
+  $('cronOnceField').style.display = f === 'once' ? '' : 'none'
+  $('cronCustomField').style.display = f === 'custom' ? '' : 'none'
+  cronHint()
+}
+function buildCronSchedule () {
+  const f = $('cronFreq').value
+  if (f === 'custom') return $('cronCustom').value.trim()
+  if (f === 'nmin') return '*/' + ($('cronNmin').value || '5') + ' * * * *'
+  if (f === 'hourly') return (parseInt($('cronMinute').value, 10) || 0) + ' * * * *'
+  const t = ($('cronTime').value || '03:00').split(':')
+  const h = parseInt(t[0], 10) || 0, m = parseInt(t[1], 10) || 0
+  if (f === 'daily') return m + ' ' + h + ' * * *'
+  if (f === 'weekly') return m + ' ' + h + ' * * ' + (parseInt($('cronDow').value, 10) || 0)
+  if (f === 'monthly') return m + ' ' + h + ' ' + (parseInt($('cronDay').value, 10) || 1) + ' * *'
+  if (f === 'yearly') return m + ' ' + h + ' ' + (parseInt($('cronDay').value, 10) || 1) + ' ' + (parseInt($('cronMonth').value, 10) || 1) + ' *'
+  if (f === 'once') {
+    const dv = $('cronOnceDate').value
+    if (!dv) return ''
+    const p = dv.split('-').map(x => parseInt(x, 10))
+    if (p.length !== 3 || p.some(isNaN)) return ''
+    return m + ' ' + h + ' ' + p[2] + ' ' + p[1] + ' * ' + p[0]
+  }
+  return ''
+}
+function cronHint () {
+  const k = $('cronKind').value
+  const f = $('cronFreq').value
+  const s = buildCronSchedule()
+  const kindText = k === 'command' ? '命令在实例容器内执行（docker exec）'
+    : k === 'db' ? '备份实例已开通数据库的全部表'
+    : k === 'dir' ? '把容器内指定目录打包为 .tar.gz'
+    : '先备份目录，再备份数据库'
+  let destText = ''
+  if (k !== 'command') {
+    const d = $('cronDest').value
+    destText = d === 'cos' ? '，仅上传腾讯云 COS（本地是否保留看备份页配置）'
+      : d === 'both' ? '，保存本地并上传腾讯云 COS'
+      : '，保存到节点本地备份目录'
+  }
+  const freqText = f === 'custom' ? '自定义 cron 表达式' : '对应表达式 ' + (s || '-')
+  const onceTip = (f === 'once' && s) ? '（执行一次后自动停用）' : ''
+  $('cronHint').textContent = kindText + destText + '；' + freqText + onceTip
+}
 async function loadCrons () {
   try {
     const d = await api('GET', '/panel/instance/crons')
     const tb = $('cronList')
-    tb.innerHTML = d.crons.length ? '' : '<tr><td colspan="5" style="padding:10px 8px;color:var(--text2)">暂无定时任务</td></tr>'
+    tb.innerHTML = d.crons.length ? '' : '<tr><td colspan="6" style="padding:10px 8px;color:var(--text2)">暂无定时任务</td></tr>'
     d.crons.forEach(c => {
       const tr = document.createElement('tr')
       const st = c.enabled ? '<span style="color:#3aa981">启用</span>' : '<span style="color:var(--text2)">停用</span>'
       const last = c.last_run ? `${c.last_run} <span style="color:${c.last_status === 'ok' ? '#3aa981' : '#e05a4e'}">${c.last_status === 'ok' ? '成功' : c.last_status === 'fail' ? '失败' : c.last_status}</span>` : '<span style="color:var(--text2)">未执行</span>'
+      const kindL = CRON_KIND_LABEL[c.kind] || '执行命令'
+      const destL = c.dest ? (CRON_DEST_LABEL[c.dest] || '') : ''
+      const content = (c.kind && c.kind !== 'command')
+        ? `${c.path ? c.path + ' · ' : ''}${destL ? '→ ' + destL : ''}`
+        : (c.command || '')
       tr.innerHTML = `
         <td style="padding:7px 8px;border-bottom:1px solid var(--line)">${st}</td>
+        <td style="padding:7px 8px;border-bottom:1px solid var(--line)">${kindL}</td>
         <td class="mono" style="padding:7px 8px;border-bottom:1px solid var(--line)">${c.schedule}</td>
-        <td class="mono" style="padding:7px 8px;border-bottom:1px solid var(--line);max-width:260px;overflow:hidden;text-overflow:ellipsis" title="${(c.command || '').replace(/"/g, '&quot;')}">${c.command}</td>
+        <td class="mono" style="padding:7px 8px;border-bottom:1px solid var(--line);max-width:240px;overflow:hidden;text-overflow:ellipsis" title="${content.replace(/"/g, '&quot;')}">${content}</td>
         <td class="mono" style="padding:7px 8px;border-bottom:1px solid var(--line);white-space:nowrap">${last}</td>
         <td style="padding:7px 8px;border-bottom:1px solid var(--line);white-space:nowrap"></td>`
       const td = tr.lastElementChild
@@ -1870,10 +2052,21 @@ async function loadCrons () {
   } catch (e) { toast(e.message, false) }
 }
 async function saveCron () {
-  const schedule = $('cronSchedule').value.trim()
-  const command = $('cronCommand').value.trim()
-  if (!schedule || !command) return toast('表达式和命令都不能为空', false)
-  try { await api('POST', '/panel/instance/crons', { schedule, command }); $('cronSchedule').value = ''; $('cronCommand').value = ''; toast('已添加', true); loadCrons() } catch (e) { toast(e.message, false) }
+  const kind = $('cronKind').value
+  const schedule = buildCronSchedule()
+  if (!schedule || schedule.split(/\s+/).length < 5 || schedule.split(/\s+/).length > 6) {
+    return toast('请先选择执行时间，或填写合法的 cron 表达式（5-6 段）', false)
+  }
+  const command = kind === 'command' ? $('cronCommand').value.trim() : ''
+  if (kind === 'command' && !command) return toast('命令不能为空', false)
+  const path = (kind === 'dir' || kind === 'both') ? ($('cronPath').value.trim() || '/app') : ''
+  const dest = kind === 'command' ? 'local' : $('cronDest').value
+  if ($('cronFreq').value === 'once') {
+    const today = new Date().toISOString().slice(0, 10)
+    if (!$('cronOnceDate').value) return toast('请选择仅一次任务的执行日期', false)
+    if ($('cronOnceDate').value < today) return toast('仅一次任务的日期不能早于今天', false)
+  }
+  try { await api('POST', '/panel/instance/crons', { schedule, kind, command, path, dest }); toast('已添加', true); loadCrons() } catch (e) { toast(e.message, false) }
 }
 
 // ---------- 网站防护 ----------
@@ -3935,19 +4128,32 @@ function connectLogs () {
   logStop()
   const box = $('logBox')
   box.textContent = ''
+  $('logBottom').style.display = 'none'
   $('logHint').textContent = '连接中…'
   const seq = ++logSeq
   const tail = $('logTail').value
   logWS = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host +
     '/panel/ws/logs?ptoken=' + encodeURIComponent(JWT) + '&tail=' + tail)
-  logWS.onopen = () => { if (seq === logSeq) $('logHint').textContent = '实时跟踪中' }
+  logWS.onopen = () => { if (seq === logSeq) { $('logHint').textContent = '实时跟踪中'; box.scrollTop = box.scrollHeight } }
   logWS.onmessage = ev => {
     if (seq !== logSeq) return
+    // 只有当用户本来就停留在底部附近时才跟随滚动；向上翻阅时保持位置不动
+    const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 60
     box.textContent += ev.data + '\n'
-    box.scrollTop = box.scrollHeight
+    if (nearBottom) {
+      box.scrollTop = box.scrollHeight
+      $('logBottom').style.display = 'none'
+    } else {
+      $('logBottom').style.display = ''
+    }
   }
   logWS.onclose = () => { if (seq === logSeq) $('logHint').textContent = '已断开' }
   logWS.onerror = () => { if (seq === logSeq) $('logHint').textContent = '连接失败（容器可能未运行）' }
+}
+function logToBottom () {
+  const box = $('logBox')
+  box.scrollTop = box.scrollHeight
+  $('logBottom').style.display = 'none'
 }
 function logStop () {
   if (logWS) { try { logWS.close() } catch (e) {} logWS = null }

@@ -64,25 +64,32 @@ pub fn field_hit(expr: &str, val: i64, lo: i64, hi: i64) -> bool {
     ok
 }
 
-/// 5 段表达式匹配（非法表达式返回 false）。
+/// 5 段（分 时 日 月 周）或 6 段（分 时 日 月 周 年）表达式匹配（非法表达式返回 false）。
+/// 6 段的年字段（如 2026、2026-2030、*/n）用于「仅一次」任务：指定年执行。
 pub fn cron_match(schedule: &str, now: NaiveDateTime) -> bool {
     let fields: Vec<&str> = schedule.split_whitespace().collect();
-    if fields.len() != 5 {
+    if fields.len() != 5 && fields.len() != 6 {
         return false;
     }
     let dow = now.weekday().num_days_from_sunday() as i64; // 0=周日
-    field_hit(fields[0], now.minute() as i64, 0, 59)
+    let y_hit = if fields.len() == 6 {
+        field_hit(fields[5], now.year() as i64, 1, 9999)
+    } else {
+        true
+    };
+    y_hit
+        && field_hit(fields[0], now.minute() as i64, 0, 59)
         && field_hit(fields[1], now.hour() as i64, 0, 23)
         && field_hit(fields[2], now.day() as i64, 1, 31)
         && field_hit(fields[3], now.month() as i64, 1, 12)
         && field_hit(fields[4], dow, 0, 6)
 }
 
-/// 把 Python 5 段表达式的「周字段」翻译成 cron crate 的 6 段（1=周日…7=周六）。
-/// 无法安全翻译时返回 None（调用方回退到手写匹配）。
+/// 把 Python 5 段表达式的「周字段」翻译成 cron crate 的 6 段（1=周日…7=周六）；
+/// 6 段输入（带年）翻译成 7 段。无法安全翻译时返回 None（调用方回退到手写匹配）。
 fn crate_spec(schedule: &str) -> Option<String> {
     let fields: Vec<&str> = schedule.split_whitespace().collect();
-    if fields.len() != 5 {
+    if fields.len() != 5 && fields.len() != 6 {
         return None;
     }
     let map_dow = |n: i64| -> Option<i64> {
@@ -118,9 +125,15 @@ fn crate_spec(schedule: &str) -> Option<String> {
         });
     }
     let dow = dow_parts.join(",");
+    // cron crate 7 段：秒 分 时 日 月 周 年（年可省略）
+    let year = if fields.len() == 6 {
+        format!(" {}", fields[5])
+    } else {
+        " *".to_string()
+    };
     Some(format!(
-        "0 {} {} {} {} {} *",
-        fields[0], fields[1], fields[2], fields[3], dow
+        "0 {} {} {} {} {}{}",
+        fields[0], fields[1], fields[2], fields[3], dow, year
     ))
 }
 
@@ -138,8 +151,14 @@ pub fn cron_hit(schedule: &str, now: NaiveDateTime) -> bool {
 /// 字段级可达性校验（文案与 Python `validate` 完全一致）。
 pub fn validate(schedule: &str) -> Option<String> {
     let fields: Vec<&str> = schedule.split_whitespace().collect();
-    if fields.len() != 5 {
-        return Some("格式须为 5 段：分 时 日 月 周".to_string());
+    if fields.len() != 5 && fields.len() != 6 {
+        return Some("格式须为 5 段（分 时 日 月 周）或 6 段（加年份）".to_string());
+    }
+    if fields.len() == 6 {
+        // 年字段：白名单校验（2024-2100 内可达即可）
+        if !(2024..=2100).any(|y| field_hit(fields[5], y, 1, 9999)) {
+            return Some("年份字段在 2024-2100 内不会触发".to_string());
+        }
     }
     if !(0..60).any(|m| field_hit(fields[0], m, 0, 59)) {
         return Some("分钟字段在任何分钟都不会触发".to_string());
@@ -163,6 +182,12 @@ pub fn validate(schedule: &str) -> Option<String> {
     Some("日/月/周组合在可预见时间内不会出现（例如 2 月 31 日）".to_string())
 }
 
+/// 是否为「仅一次」任务：6 段表达式且年字段不是 `*`。执行成功后自动停用。
+pub fn is_once(schedule: &str) -> bool {
+    let fields: Vec<&str> = schedule.split_whitespace().collect();
+    fields.len() == 6 && fields[5].trim() != "*"
+}
+
 // ---------- 实例定时任务 ----------
 
 fn is_expired(inst: &Instance, now: NaiveDateTime) -> bool {
@@ -181,18 +206,48 @@ async fn run_one(state: &AppState, cron_id: i64) {
         return;
     }
 
-    // 各分支必定赋值且只赋一次，无需初始值与 mut（避免多余告警）
+    let cname = instance::container_name(row.instance_id);
+    let kind = if row.kind.is_empty() { "command" } else { row.kind.as_str() };
+    let dest = if row.dest.is_empty() { "local" } else { row.dest.as_str() };
+    let (status, out) = match kind {
+        "dir" | "db" | "both" => run_backup_job(state, &row, &cname, kind, dest).await,
+        _ => run_command_job(state, &row, &cname).await,
+    };
+
+    // 「仅一次」任务（6 段表达式 + 具体年份）执行成功后自动停用，避免来年误触发
+    let mut final_status = status;
+    if status == "ok" && is_once(&row.schedule) {
+        let _ = sqlx::query("UPDATE instance_crons SET enabled = 0 WHERE id = ?")
+            .bind(cron_id)
+            .execute(&state.db)
+            .await;
+        final_status = "ok";
+    }
+
+    let output: String = out.chars().take(2000).collect();
+    let _ = sqlx::query(
+        "UPDATE instance_crons SET last_run = ?, last_status = ?, last_output = ? WHERE id = ?",
+    )
+    .bind(utcnow())
+    .bind(final_status)
+    .bind(&output)
+    .bind(cron_id)
+    .execute(&state.db)
+    .await;
+}
+
+/// 旧类型：在实例容器内执行 shell 命令。
+async fn run_command_job(state: &AppState, row: &InstanceCron, cname: &str) -> (&'static str, String) {
     let out;
     let mut status = "fail";
-    let cname = instance::container_name(row.instance_id);
     match state.docker.get().await {
-        Ok(docker) => match docker.inspect_container(&cname, None).await {
+        Ok(docker) => match docker.inspect_container(cname, None).await {
             Ok(info) => {
                 let running = info.state.as_ref().and_then(|s| s.running).unwrap_or(false);
                 if !running {
                     out = "容器未运行".to_string();
                 } else {
-                    match backup::exec_demux(&docker, &cname, vec!["sh".into(), "-c".into(), row.command.clone()])
+                    match backup::exec_demux(&docker, cname, vec!["sh".into(), "-c".into(), row.command.clone()])
                         .await
                     {
                         Ok((code, stdout, stderr)) => {
@@ -213,17 +268,102 @@ async fn run_one(state: &AppState, cron_id: i64) {
         },
         Err(e) => out = e.detail.chars().take(500).collect(),
     }
+    (status, out)
+}
 
-    let output: String = out.chars().take(2000).collect();
-    let _ = sqlx::query(
-        "UPDATE instance_crons SET last_run = ?, last_status = ?, last_output = ? WHERE id = ?",
-    )
-    .bind(utcnow())
-    .bind(status)
-    .bind(&output)
-    .bind(cron_id)
-    .execute(&state.db)
-    .await;
+/// 备份类任务：备份目录 / 备份数据库 / 两者都备；dest 决定是否上传 COS。输出写回 last_output。
+async fn run_backup_job(
+    state: &AppState,
+    row: &InstanceCron,
+    cname: &str,
+    kind: &str,
+    dest: &str,
+) -> (&'static str, String) {
+    let Ok(docker) = state.docker.get().await else {
+        return ("fail", "Docker 不可用".to_string());
+    };
+    let running = docker
+        .inspect_container(cname, None)
+        .await
+        .ok()
+        .and_then(|info| info.state.and_then(|s| s.running))
+        .unwrap_or(false);
+    if !running {
+        return ("fail", "容器未运行".to_string());
+    }
+
+    let mut outs: Vec<String> = Vec::new();
+
+    if kind == "dir" || kind == "both" {
+        let p = row.path.trim();
+        let p = if p.is_empty() { "/app" } else { p };
+        if p.contains("..") || !backup::path_ok(p) {
+            return ("fail", format!("目录路径无效：{p}"));
+        }
+        match backup::backup_dir(state, cname, p, "").await {
+            Ok(v) => outs.push(format!(
+                "目录备份完成：{}",
+                v["file"].as_str().unwrap_or("?")
+            )),
+            Err(e) => return ("fail", format!("目录备份失败：{}", e.detail)),
+        }
+    }
+
+    if kind == "db" || kind == "both" {
+        match mysql::get_instance_db(state, row.instance_id).await {
+            Ok(Some(reg)) => {
+                let ver = reg["version"].as_str().unwrap_or("").to_string();
+                let db_name = reg["db_name"].as_str().unwrap_or("").to_string();
+                // tables 为空 = 备份全部表
+                match backup::backup_database(state, &ver, &db_name, &[], "").await {
+                    Ok(v) => outs.push(format!(
+                        "数据库备份完成：{}",
+                        v["file"].as_str().unwrap_or("?")
+                    )),
+                    Err(e) => return ("fail", format!("数据库备份失败：{}", e.detail)),
+                }
+            }
+            Ok(None) => return ("fail", "实例尚未开通数据库，请先在「数据库」页开通".to_string()),
+            Err(e) => return ("fail", format!("数据库信息读取失败：{}", e.detail)),
+        }
+    }
+
+    // COS 上传（dest=cos/both 时）：本地备份已完成，把产物逐个上传
+    if dest == "cos" || dest == "both" {
+        let cfg = match crate::services::cos::get_config(&state.db).await {
+            Ok(c) => c,
+            Err(e) => return ("fail", format!("COS 配置读取失败：{}", e.detail)),
+        };
+        if cfg.enabled == 0 {
+            return ("fail", "腾讯云 COS 未启用，请先在「备份」页配置并启用".to_string());
+        }
+        let mut ups: Vec<String> = Vec::new();
+        for line in &outs {
+            // 从「目录备份完成：xxx.tar.gz」中提取文件名
+            if let Some(fname) = line.rsplit('：').next() {
+                let fname = fname.trim();
+                if fname.is_empty() || !fname.contains(".tar.gz") && !fname.contains(".sql.gz") {
+                    continue;
+                }
+                let local = std::path::Path::new(&backup::backup_root()).join(fname);
+                match crate::services::cos::upload(&cfg, &local.to_string_lossy(), None).await {
+                    Ok(up) => ups.push(format!(
+                        "已上传 COS：{}（{}B）",
+                        up["key"].as_str().unwrap_or(fname),
+                        up["size"].as_u64().unwrap_or(0)
+                    )),
+                    Err(e) => return ("fail", format!("COS 上传失败（{fname}）：{e}")),
+                }
+                // dest=cos 且配置了不保留本地副本 → 清理本地文件
+                if dest == "cos" && cfg.keep_local == 0 {
+                    let _ = std::fs::remove_file(&local);
+                }
+            }
+        }
+        outs.extend(ups);
+    }
+
+    ("ok", outs.join("\n"))
 }
 
 /// 一轮实例任务调度（命中且本分钟未触发的任务各自 spawn，不阻塞本轮）。
