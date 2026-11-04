@@ -8,6 +8,31 @@ export function fmtBytes(n) {
   return v.toFixed(v >= 100 ? 0 : 1) + ' ' + units[i]
 }
 
+// 复制文本到剪贴板：优先 Clipboard API（仅 HTTPS/localhost 可用），
+// 非 HTTPS 环境（如 http://IP:端口）降级为隐藏 textarea + execCommand。
+export async function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    try { await navigator.clipboard.writeText(text); return true } catch { /* 继续降级 */ }
+  }
+  try {
+    const ta = document.createElement('textarea')
+    ta.value = text
+    ta.setAttribute('readonly', '')
+    ta.style.cssText = 'position:fixed;top:-100px;left:-100px;opacity:0'
+    document.body.appendChild(ta)
+    const sel = document.getSelection()
+    const saved = sel && sel.rangeCount ? sel.getRangeAt(0) : null
+    ta.select()
+    ta.setSelectionRange(0, text.length)
+    const ok = document.execCommand('copy')
+    ta.remove()
+    if (saved && sel) { sel.removeAllRanges(); sel.addRange(saved) }
+    return ok
+  } catch {
+    return false
+  }
+}
+
 export function fmtTime(s) {
   if (!s) return '-'
   const d = new Date(s)

@@ -2,6 +2,7 @@
 // 管理员优惠券：创建（面额/门槛/数量/有效期）+ 列表 + 停用
 import { onMounted, ref } from 'vue'
 import { api, errText } from '../api/client'
+import { copyText } from '../utils/format'
 import { toastErr, toastOk } from '../components/ui/toast'
 import UIButton from '../components/ui/UIButton.vue'
 import UIInput from '../components/ui/UIInput.vue'
@@ -86,9 +87,10 @@ async function doDisable() {
   }
 }
 
-function copyCode(code) {
-  navigator.clipboard?.writeText(code)
-  toastOk('券码已复制')
+async function copyCode(code) {
+  const ok = await copyText(code)
+  if (ok) toastOk('券码已复制')
+  else toastErr('复制失败，请手动复制')
 }
 </script>
 

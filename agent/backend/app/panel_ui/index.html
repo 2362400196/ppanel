@@ -1702,6 +1702,24 @@ function toast (msg, ok) {
   clearTimeout(t._tm)
   t._tm = setTimeout(() => { t.className = 'toast' }, 2600)
 }
+// 复制文本：Clipboard API 仅 HTTPS/localhost 可用，HTTP 环境降级 execCommand
+async function copyText (txt) {
+  if (navigator.clipboard && window.isSecureContext) {
+    try { await navigator.clipboard.writeText(txt); return true } catch (e) { /* 降级 */ }
+  }
+  try {
+    const ta = document.createElement('textarea')
+    ta.value = txt
+    ta.setAttribute('readonly', '')
+    ta.style.cssText = 'position:fixed;top:-100px;left:-100px;opacity:0'
+    document.body.appendChild(ta)
+    ta.select()
+    ta.setSelectionRange(0, txt.length)
+    const ok = document.execCommand('copy')
+    ta.remove()
+    return ok
+  } catch (e) { return false }
+}
 async function api (method, path, body, isForm) {
   const opt = { method, headers: { Authorization: 'Bearer ' + JWT } }
   if (body !== undefined && !isForm) {
@@ -3408,9 +3426,7 @@ function copyDomainLog () {
     return (t && t.textContent ? '[' + t.textContent + '] ' : '') + (x ? x.textContent : '')
   }).join('\n')
   if (!txt) { toast('暂无日志', false); return }
-  if (navigator.clipboard) {
-    navigator.clipboard.writeText(txt).then(() => toast('日志已复制', true)).catch(() => toast('复制失败', false))
-  } else { toast('当前浏览器不支持复制', false) }
+  copyText(txt).then(ok => toast(ok ? '日志已复制' : '复制失败', ok))
 }
 
 async function saveDomain () {
@@ -3521,8 +3537,7 @@ function copyDbDsn () {
   if (!d.name || d.name === '-') return
   const host = d.ext && d.ext !== '未启用' ? d.ext : $('dbInternal').textContent
   const dsn = `mysql://${d.user}:${d.pwd}@${host}/${d.name}`
-  if (navigator.clipboard) navigator.clipboard.writeText(dsn).then(() => toast('连接串已复制', true))
-  else toast('复制失败', false)
+  copyText(dsn).then(ok => toast(ok ? '连接串已复制' : '复制失败', ok))
 }
 
 // ---------- 禁用函数（侧边栏独立视图，仅 PHP 实例；表格自选，保存后重建生效） ----------
@@ -4523,7 +4538,7 @@ async function adminTokenAction (reset) {
 function adminCopyToken () {
   const v = $('adminTokenVal').textContent
   if (!v) return
-  navigator.clipboard?.writeText(v).then(() => toast('已复制', true), () => toast('复制失败', false))
+  copyText(v).then(ok => toast(ok ? '已复制' : '复制失败', ok))
 }
 
 // 管理员拿到令牌后直接跳进该实例的面板视图

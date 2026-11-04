@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { api, errText } from '../../api/client'
+import { copyText } from '../../utils/format'
 import { toastErr, toastOk } from '../../components/ui/toast'
 import UIButton from '../../components/ui/UIButton.vue'
 import ConfirmDialog from '../../components/ui/ConfirmDialog.vue'
@@ -76,12 +77,9 @@ async function doReset() {
 
 async function copyPanelLink() {
   const link = `${panelUrl.value}?t=${panelToken.value}`
-  try {
-    await navigator.clipboard.writeText(link)
-    toastOk('一键登录链接已复制')
-  } catch {
-    toastErr('复制失败，请手动复制')
-  }
+  const ok = await copyText(link)
+  if (ok) toastOk('一键登录链接已复制')
+  else toastErr('复制失败，请手动复制')
 }
 </script>
 
