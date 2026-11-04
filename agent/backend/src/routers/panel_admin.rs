@@ -235,6 +235,34 @@ async fn delete_instance(
     })))
 }
 
+// ---------- 改名 ----------
+
+#[derive(Debug, Deserialize)]
+struct RenameIn {
+    name: String,
+}
+
+async fn rename_instance(
+    _a: LocalAdmin,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(body): Json<RenameIn>,
+) -> AppResult<Json<Value>> {
+    let name = body.name.trim().to_string();
+    if name.is_empty() || name.chars().count() > 64 {
+        return Err(AppError::bad_request("名称需为 1-64 个字符"));
+    }
+    let r = sqlx::query("UPDATE instances SET name = ? WHERE id = ?")
+        .bind(&name)
+        .bind(id)
+        .execute(&state.db)
+        .await?;
+    if r.rows_affected() == 0 {
+        return Err(AppError::not_found("实例不存在"));
+    }
+    Ok(Json(json!({"detail": "已改名", "name": name})))
+}
+
 // ---------- 面板令牌 ----------
 
 #[derive(Debug, Deserialize, Default)]
@@ -278,6 +306,9 @@ pub fn routes() -> Router<AppState> {
             "/panel-admin/instances/{id}/token",
             get(instance_token).post(instance_token),
         )
-        .route("/panel-admin/instances/{id}", axum::routing::delete(delete_instance))
+        .route(
+            "/panel-admin/instances/{id}",
+            axum::routing::patch(rename_instance).delete(delete_instance),
+        )
         .route("/panel-admin/images", get(list_images))
 }

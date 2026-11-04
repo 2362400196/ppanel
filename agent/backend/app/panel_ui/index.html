@@ -51,6 +51,26 @@ input, textarea, select { font-family: inherit; font-size: 13px; }
 .topbar { background: var(--card); border-bottom: 1px solid var(--line); padding: 0 22px; height: 56px; display: flex; align-items: center; gap: 14px; position: sticky; top: 0; z-index: 10; }
 .topbar .logo { width: 30px; height: 30px; font-size: 15px; border-radius: 9px; }
 .topbar .name { font-weight: 800; font-size: 15px; }
+
+/* 管理实例卡片 */
+.agrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; }
+.acard { border: 1px solid var(--line); border-radius: 14px; background: var(--card); padding: 16px; transition: border-color .15s, box-shadow .15s; }
+.acard:hover { border-color: rgba(47, 181, 159, .45); box-shadow: 0 6px 18px rgba(47, 181, 159, .10); }
+.acard-head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+.acard-name { font-weight: 800; font-size: 15px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acard-edit { display: inline-flex; color: var(--text2); cursor: pointer; flex-shrink: 0; opacity: .5; }
+.acard-edit svg { width: 14px; height: 14px; }
+.acard-edit:hover { color: var(--primary); opacity: 1; }
+.acard-status { font-size: 12px; color: var(--text2); }
+.acard-status.running { color: var(--ok); }
+.acard-meta { display: grid; grid-template-columns: 1fr 1fr; gap: 7px 16px; margin-bottom: 14px; }
+.acard-meta div { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 12.5px; min-width: 0; }
+.acard-meta span { color: var(--text2); flex-shrink: 0; }
+.acard-meta b { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acard-acts { display: flex; flex-wrap: wrap; gap: 6px; border-top: 1px dashed var(--line); padding-top: 12px; }
+
+/* 面板模态框模式：进入面板以弹窗覆盖，管理员列表保留在底层 */
+#app.pmode { position: fixed; inset: 2.5vh 3vw; z-index: 80; overflow-y: auto; background: var(--bg); border-radius: 16px; border: 1px solid var(--line); box-shadow: 0 30px 80px rgba(15, 40, 34, .35); }
 .expire-banner { margin: 10px 22px 0; padding: 9px 14px; border-radius: 10px; font-size: 12.5px; font-weight: 600; }
 .expire-banner.warn { background: rgba(245, 158, 11, .12); color: #b45309; border: 1px solid rgba(245, 158, 11, .35); }
 .expire-banner.danger { background: rgba(239, 68, 68, .10); color: #b91c1c; border: 1px solid rgba(239, 68, 68, .35); }
@@ -489,15 +509,7 @@ function showApidoc() {
         <span style="font-weight:700;font-size:15px">本机实例</span>
         <span class="hint" id="adminCount"></span>
       </div>
-      <div style="overflow-x:auto">
-        <table class="ftable" id="adminTbl">
-          <thead><tr>
-            <th>名称</th><th>镜像</th><th>状态</th><th>端口</th><th>规格</th><th>来源</th><th>到期</th>
-            <th style="text-align:right">操作</th>
-          </tr></thead>
-          <tbody></tbody>
-        </table>
-      </div>
+      <div id="adminCards" class="agrid"></div>
       <div id="adminEmpty" class="empty" style="display:none">还没有实例，点右上角「新建实例」创建一个</div>
     </div>
   </div>
@@ -555,7 +567,7 @@ function showApidoc() {
     <span class="mono status-text" id="hPort"></span>
     <span class="spacer"></span>
     <button class="btn ghost" onclick="refreshAll()">刷新</button>
-    <button class="btn danger-text" onclick="logout()">退出</button>
+    <button class="btn danger-text" id="btnExit" onclick="logout()">退出</button>
   </div>
   <div id="expireBanner" class="expire-banner" style="display:none"></div>
 
@@ -1635,6 +1647,8 @@ function logout (silent) {
   inst = null
   logStop()
   termStop()
+  $('app').classList.remove('pmode')
+  document.body.style.overflow = ''
   $('app').style.display = 'none'
   if (ATOKEN) {
     // 从实例面板退回管理员视图（管理员跳转进来时保留管理能力）
@@ -1648,6 +1662,9 @@ function logout (silent) {
 function enterApp (data) {
   inst = data
   $('loginView').style.display = 'none'
+  $('app').classList.add('pmode')
+  document.body.style.overflow = 'hidden'
+  $('btnExit').textContent = ATOKEN ? '返回管理' : '退出'
   $('app').style.display = 'block'
   renderTop()
   renderExpireBanner()
@@ -4051,33 +4068,53 @@ async function loadAdminInstances () {
 }
 
 function renderAdminRows () {
-  const tb = $('adminTbl').querySelector('tbody')
-  tb.innerHTML = ''
+  const grid = $('adminCards')
+  grid.innerHTML = ''
   $('adminEmpty').style.display = adminRows.length ? 'none' : ''
-  $('adminTbl').style.display = adminRows.length ? '' : 'none'
   $('adminCount').textContent = `共 ${adminRows.length} 个实例（本地创建的实例仅存在于本机）`
+  const pencil = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>'
   adminRows.forEach(it => {
-    const tr = document.createElement('tr')
     const spec = `${it.cpu_limit}核 / ${it.mem_limit}MB / ${it.disk_quota}MB`
     const expire = it.expire_at ? new Date(it.expire_at).toLocaleDateString('zh-CN') : '永久'
     const running = it.status === 'running'
-    tr.innerHTML = `
-      <td><b>${esc(it.name)}</b></td>
-      <td class="mono">${esc(it.image)}</td>
-      <td><span class="adot ${esc(it.status)}"></span>${statusText(it.status)}</td>
-      <td class="mono">${it.ext_port}</td>
-      <td class="mono text-sub">${spec}</td>
-      <td class="text-sub">${it.source === 'local' ? '本地' : '主控'}</td>
-      <td class="text-sub">${expire}</td>
-      <td style="text-align:right;white-space:nowrap">
-        <button class="qbtn sm" onclick="adminEnterPanel(${it.id})">进入面板</button>
+    const card = document.createElement('div')
+    card.className = 'acard'
+    card.innerHTML = `
+      <div class="acard-head">
+        <span class="acard-name" title="${esc(it.name)}">${esc(it.name)}</span>
+        <span class="acard-edit" title="改名">${pencil}</span>
+        <span class="adot ${esc(it.status)}"></span>
+        <span class="acard-status ${esc(it.status)}">${statusText(it.status)}</span>
+      </div>
+      <div class="acard-meta">
+        <div><span>镜像</span><b class="mono" title="${esc(it.image)}">${esc(it.image)}</b></div>
+        <div><span>端口</span><b class="mono">${it.ext_port}</b></div>
+        <div><span>规格</span><b>${spec}</b></div>
+        <div><span>来源</span><b>${it.source === 'local' ? '本地' : '主控'}</b></div>
+        <div><span>到期</span><b>${expire}</b></div>
+      </div>
+      <div class="acard-acts">
+        <button class="qbtn sm primary" onclick="adminEnterPanel(${it.id})">进入面板</button>
         <button class="qbtn sm" onclick="adminAction(${it.id}, '${running ? 'stop' : 'start'}')">${running ? '停止' : '启动'}</button>
         ${running ? `<button class="qbtn sm" onclick="adminAction(${it.id}, 'restart')">重启</button>` : ''}
         <button class="qbtn sm" onclick="adminAction(${it.id}, 'reset')">重置</button>
         <button class="qbtn sm" onclick="adminShowToken(${it.id})">令牌</button>
         <button class="qbtn sm text-btn danger" onclick="adminDel(${it.id}, '${esc(it.name).replace(/'/g, "\\'")}')">删除</button>
-      </td>`
-    tb.appendChild(tr)
+      </div>`
+    card.querySelector('.acard-edit').onclick = () => adminRename(it.id)
+    grid.appendChild(card)
+  })
+}
+
+function adminRename (id) {
+  const it = adminRows.find(x => x.id === id) || {}
+  promptInput('实例改名', '新名称', it.name || '', async nn => {
+    if (!nn || nn === it.name) return
+    try {
+      await adminApi('PATCH', `/panel-admin/instances/${id}`, { name: nn })
+      toast('已改名', true)
+      loadAdminInstances()
+    } catch (e) { toast(e.message, false) }
   })
 }
 
@@ -4226,6 +4263,13 @@ async function adminEnterPanel (id) {
   }
   $('loginView').style.display = 'flex'
 })()
+// Esc 关闭面板弹窗（回到管理员列表；输入焦点在输入框/终端时不触发）
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Escape') return
+  const tag = (e.target && e.target.tagName) || ''
+  if (/INPUT|TEXTAREA|SELECT/.test(tag)) return
+  if (ATOKEN && $('app').style.display !== 'none' && $('app').classList.contains('pmode')) logout()
+})
 let usageTick = 0
 setInterval(() => {
   if (!inst) return
