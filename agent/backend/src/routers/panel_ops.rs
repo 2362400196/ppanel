@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use axum::body::Body;
-use axum::extract::{Path as AxPath, Query, State};
+use axum::extract::{DefaultBodyLimit, Multipart, Path as AxPath, Query, State};
 use axum::http::{header, HeaderMap};
 use axum::response::Response;
 use axum::routing::{get, post};
@@ -65,8 +65,8 @@ async fn stream_file(path: PathBuf, filename: String) -> AppResult<Response> {
 fn own_file(iid: i64, file: &str) -> AppResult<PathBuf> {
     let path = backup::safe_path(file)?;
     let mut ok = file.starts_with(&format!("ppanel-{iid}_")) || file.starts_with(&format!("ppanel_{iid}_"));
-    if ok && file.ends_with(".tar") {
-        // 容器整包备份仅管理员（节点面板）可用
+    if ok && file.ends_with(".tar") && !file.ends_with(".image.tar") {
+        // 容器整包备份仅管理员（节点面板）可用；镜像导出包（.image.tar）租户可下载
         ok = false;
     }
     if !ok || !path.is_file() {
@@ -203,7 +203,11 @@ async fn backup_list(PanelInst(inst): PanelInst) -> AppResult<Json<Value>> {
     if let Ok(rd) = std::fs::read_dir(dir) {
         for ent in rd.flatten() {
             let name = ent.file_name().to_string_lossy().to_string();
-            if !has_prefix(iid, &name) || name.ends_with(".tar") {
+            if !has_prefix(iid, &name) {
+                continue;
+            }
+            let is_image_tar = name.ends_with(".image.tar");
+            if !is_image_tar && name.ends_with(".tar") {
                 continue;
             }
             let Ok(md) = ent.metadata() else { continue };
@@ -212,6 +216,8 @@ async fn backup_list(PanelInst(inst): PanelInst) -> AppResult<Json<Value>> {
             }
             let kind = if name.ends_with(".sql.gz") {
                 "database"
+            } else if is_image_tar {
+                "image"
             } else if name.ends_with(".tar.gz") {
                 "dir"
             } else {
@@ -438,6 +444,95 @@ async fn image_delete(
     let tag = qp(&q, "tag", "");
     instance::delete_snapshot_image(&state, inst.id, &tag).await?;
     Ok(Json(json!({"detail": format!("已删除 {tag}")})))
+}
+
+/// 导出镜像快照为 .image.tar（后台任务）：docker save 到备份目录，
+/// 完成后出现在「备份文件」列表，可下载带走、在别的面板导入。
+async fn image_export(
+    PanelInst(inst): PanelInst,
+    State(state): State<AppState>,
+    Json(body): Json<Value>,
+) -> AppResult<Json<Value>> {
+    let tag = sfield(&body, "tag");
+    let iid = inst.id;
+    let tid = format!("panelimg_{}_{}", iid, backup::ts());
+    state
+        .tasks
+        .start(&tid, &format!("导出镜像快照 · 实例 #{iid}"));
+    let st = state.clone();
+    let tid2 = tid.clone();
+    tokio::spawn(async move {
+        match instance::export_snapshot_image(&st, iid, &tag, &tid2).await {
+            Ok(_) => st.tasks.finish(&tid2, true, ""),
+            Err(e) => st.tasks.finish(&tid2, false, &format!("✘ 导出失败：{}", e.detail)),
+        }
+    });
+    Ok(Json(json!({
+        "task_id": tid,
+        "detail": "导出任务已提交，完成后可在「备份文件」页签下载",
+    })))
+}
+
+/// 导入镜像包（multipart 上传 .image.tar）：落盘到备份目录后，
+/// 后台 docker load 并归属为本实例快照。镜像包可达数 GB，单独放宽 body 限制。
+async fn image_import(
+    PanelInst(inst): PanelInst,
+    State(state): State<AppState>,
+    mut multipart: Multipart,
+) -> AppResult<Json<Value>> {
+    use tokio::io::AsyncWriteExt;
+    let mut saved: Option<String> = None;
+    while let Some(mut field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| AppError::bad_request(format!("上传数据解析失败：{e}")))?
+    {
+        let fname = field.file_name().map(|s| s.to_string()).unwrap_or_default();
+        if fname.is_empty() {
+            let _ = field.bytes().await;
+            continue;
+        }
+        if !fname.ends_with(".tar") {
+            return Err(AppError::bad_request("镜像包必须为 .image.tar 文件"));
+        }
+        let out_name = format!("ppanel-{}_img_import_{}.image.tar", inst.id, backup::ts());
+        let path = backup::safe_path(&out_name)?;
+        let mut f = tokio::fs::File::create(&path)
+            .await
+            .map_err(|e| AppError::internal(format!("创建文件失败：{e}")))?;
+        while let Some(chunk) = field
+            .chunk()
+            .await
+            .map_err(|e| AppError::bad_request(format!("接收数据失败：{e}")))?
+        {
+            f.write_all(&chunk)
+                .await
+                .map_err(|e| AppError::internal(format!("写入失败：{e}")))?;
+        }
+        f.flush()
+            .await
+            .map_err(|e| AppError::internal(format!("写入失败：{e}")))?;
+        saved = Some(out_name);
+        break;
+    }
+    let Some(file) = saved else {
+        return Err(AppError::bad_request("未收到镜像包文件"));
+    };
+    let iid = inst.id;
+    let tid = format!("panelimg_{}_{}", iid, backup::ts());
+    state.tasks.start(&tid, &format!("导入镜像快照 · 实例 #{iid}"));
+    let st = state.clone();
+    let tid2 = tid.clone();
+    tokio::spawn(async move {
+        match instance::import_snapshot_image(&st, iid, &file, &tid2).await {
+            Ok(_) => st.tasks.finish(&tid2, true, ""),
+            Err(e) => st.tasks.finish(&tid2, false, &format!("✘ 导入失败：{}", e.detail)),
+        }
+    });
+    Ok(Json(json!({
+        "task_id": tid,
+        "detail": "上传完成，后台导入中，可在日志弹窗查看进度",
+    })))
 }
 
 async fn restore_dir(
@@ -1394,6 +1489,11 @@ pub fn routes() -> Router<AppState> {
         .route("/panel/instance/backup/task-lines", get(backup_task_lines))
         .route("/panel/instance/images", get(image_list).post(image_create).delete(image_delete))
         .route("/panel/instance/images/apply", post(image_apply))
+        .route("/panel/instance/images/export", post(image_export))
+        .route(
+            "/panel/instance/images/import",
+            post(image_import).layer(DefaultBodyLimit::max(16 * 1024 * 1024 * 1024)),
+        )
         .route("/panel/instance/snapshots", get(snapshot_list))
         .route("/panel/instance/snapshots/restore", post(snapshot_restore))
         // 定时任务

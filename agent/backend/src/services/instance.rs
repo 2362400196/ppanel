@@ -10,6 +10,7 @@ use bollard::container::{
 use bollard::exec::{CreateExecOptions, StartExecOptions, StartExecResults};
 use bollard::image::{CreateImageOptions, ListImagesOptions, RemoveImageOptions};
 use bollard::image::CommitContainerOptions;
+use bollard::image::{ImportImageOptions, TagImageOptions};
 use bollard::models::{HostConfig, PortBinding, PortMap, RestartPolicy, RestartPolicyNameEnum};
 use bollard::network::CreateNetworkOptions;
 use futures_util::StreamExt;
@@ -1861,6 +1862,193 @@ fn fmt_size(bytes: i64) -> String {
     } else {
         format!("{:.0} KB", b / 1024.0)
     }
+}
+
+// =====================================================================
+// 镜像快照导出 / 导入：跨节点迁移环境
+// 导出 = docker save 到备份目录（ppanel-{IID}_img_{ts}.image.tar，
+// 复用备份文件的下载/删除链路）；导入 = docker load 后按本实例 repo 重新打 tag。
+// =====================================================================
+
+/// 导出镜像快照为 tar（后台任务）。返回生成的文件名（在备份目录）。
+pub async fn export_snapshot_image(
+    state: &AppState,
+    iid: i64,
+    tag: &str,
+    tid: &str,
+) -> AppResult<String> {
+    let prefix = snapshot_prefix(iid);
+    if !tag.starts_with(&prefix) {
+        return Err(AppError::bad_request("镜像不存在或不属于本实例"));
+    }
+    let docker = state.docker.get().await?;
+    let size = docker
+        .inspect_image(tag)
+        .await
+        .ok()
+        .and_then(|v| v.size)
+        .unwrap_or(0);
+    let fname = format!("ppanel-{iid}_img_{}.image.tar", crate::services::backup::ts());
+    let dir = std::path::PathBuf::from(crate::services::backup::backup_root());
+    let _ = tokio::fs::create_dir_all(&dir).await;
+    let path = dir.join(&fname);
+
+    state
+        .tasks
+        .log(tid, &format!("导出镜像：{tag}（约 {}）", fmt_size(size as i64)));
+    state
+        .tasks
+        .log(tid, "正在打包镜像（docker save，大镜像可能需要几分钟）…");
+    let t0 = std::time::Instant::now();
+    let mut stream = docker.export_image(tag);
+    use tokio::io::AsyncWriteExt;
+    let mut file = tokio::fs::File::create(&path)
+        .await
+        .map_err(|e| AppError::internal(format!("创建导出文件失败：{e}")))?;
+    let mut written: i64 = 0;
+    let mut last_pct: i64 = -1;
+    while let Some(chunk) = stream.next().await {
+        let bytes = match chunk {
+            Ok(b) => b,
+            Err(e) => {
+                let _ = tokio::fs::remove_file(&path).await;
+                return Err(AppError::bad_gateway(format!("导出镜像失败：{e}")));
+            }
+        };
+        file.write_all(&bytes)
+            .await
+            .map_err(|e| AppError::internal(format!("写入导出文件失败：{e}")))?;
+        written += bytes.len() as i64;
+        if size > 0 {
+            let pct = written * 100 / size;
+            if pct >= last_pct + 10 {
+                last_pct = pct;
+                state
+                    .tasks
+                    .log(tid, &format!("…已写入 {}（约 {pct}%）", fmt_size(written)));
+            }
+        }
+    }
+    file.flush()
+        .await
+        .map_err(|e| AppError::internal(format!("写入导出文件失败：{e}")))?;
+    drop(file);
+    if written < 1024 {
+        let _ = tokio::fs::remove_file(&path).await;
+        return Err(AppError::bad_gateway("导出结果为空，镜像可能已损坏"));
+    }
+    state.tasks.log(
+        tid,
+        &format!(
+            "✔ 导出完成：{fname}（{}，耗时 {:.1}s）",
+            fmt_size(written),
+            t0.elapsed().as_secs_f64()
+        ),
+    );
+    state.tasks.log(
+        tid,
+        "已放入「备份文件」列表，可下载到本地；在新面板「镜像快照」页签点「导入镜像包」即可迁移",
+    );
+    let _ = log_op(&state.db, iid, "image", &format!("导出镜像快照 {tag}")).await;
+    Ok(fname)
+}
+
+/// 导入镜像包（备份目录中的 .image.tar，由上传接口落盘）：docker load
+/// 后按本实例 repo 重新打 tag，随后出现在本实例的镜像快照列表。
+pub async fn import_snapshot_image(
+    state: &AppState,
+    iid: i64,
+    file: &str,
+    tid: &str,
+) -> AppResult<()> {
+    let path = crate::services::backup::safe_path(file)?;
+    let ok = file.starts_with(&format!("ppanel-{iid}_")) && file.ends_with(".image.tar");
+    if !ok || !path.is_file() {
+        return Err(AppError::bad_request("镜像包不存在或不属于本实例"));
+    }
+    let docker = state.docker.get().await?;
+    let fsize = path.metadata().map(|m| m.len() as i64).unwrap_or(0);
+    state
+        .tasks
+        .log(tid, &format!("载入镜像包：{file}（{}）", fmt_size(fsize as i64)));
+    state
+        .tasks
+        .log(tid, "正在 docker load（大镜像可能需要几分钟）…");
+    let t0 = std::time::Instant::now();
+    let f = tokio::fs::File::open(&path)
+        .await
+        .map_err(|e| AppError::internal(format!("镜像包读取失败：{e}")))?;
+    let root_fs = tokio_util::io::ReaderStream::new(f)
+        .map(|r| r.expect("读取镜像包失败"));
+    let mut stream = docker.import_image_stream(ImportImageOptions { quiet: false }, root_fs, None);
+    let mut loaded: Option<String> = None;
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(msg) => {
+                let s = msg.stream.unwrap_or_default();
+                let line = s.trim();
+                if !line.is_empty() && !line.starts_with("Loading layer") {
+                    state.tasks.log(tid, line);
+                }
+                if let Some(rest) = line.strip_prefix("Loaded image: ") {
+                    loaded = Some(rest.trim().to_string());
+                }
+            }
+            Err(e) => {
+                state.tasks.log(tid, &format!("✘ 导入失败：{e}"));
+                return Err(AppError::bad_gateway(format!("docker load 失败：{e}")));
+            }
+        }
+    }
+    let src = loaded.ok_or_else(|| {
+        AppError::bad_gateway("导入完成但未识别到镜像（文件可能不是 docker 镜像包）")
+    })?;
+    state.tasks.log(tid, &format!("已载入镜像：{src}"));
+
+    // 重新归属：repo 改为本实例；tag 保留原 kind-{ts} 形态（kind 内嵌识别运行时）
+    let (src_repo, src_tag) = src
+        .split_once(':')
+        .ok_or_else(|| AppError::bad_gateway("镜像 tag 异常"))?;
+    let kind = snap_kind(&src);
+    let tag = {
+        let t = src_tag.to_string();
+        if t.starts_with("php-") || t.starts_with("node-") || t.starts_with("go-") || t.starts_with("python-") {
+            t
+        } else {
+            format!("{kind}-{}", chrono::Local::now().format("%Y%m%d_%H%M%S"))
+        }
+    };
+    let repo = snapshot_repo(iid);
+    let mut full = format!("{repo}:{tag}");
+    if src_repo != repo && docker.inspect_image(&full).await.is_ok() {
+        let now = chrono::Local::now().format("%Y%m%d_%H%M%S");
+        full = format!("{repo}:{tag}-imp{now}");
+    }
+    if full != src {
+        let (new_repo, new_tag) = full.split_once(':').unwrap_or((repo.as_str(), ""));
+        docker
+            .tag_image(&src, Some(TagImageOptions { repo: new_repo.to_string(), tag: new_tag.to_string() }))
+            .await
+            .map_err(|e| AppError::bad_gateway(format!("镜像重命名失败：{e}")))?;
+        state.tasks.log(tid, &format!("已归属为本实例快照：{full}"));
+        if src_repo.starts_with("ppanel-img-inst") && src_repo != repo {
+            state.tasks.log(
+                tid,
+                &format!("提示：原标签 {src} 仍保留（属于其他实例），不影响本实例使用"),
+            );
+        }
+    } else {
+        state.tasks.log(tid, "镜像标签与当前实例一致，无需重命名");
+    }
+    state.tasks.log(
+        tid,
+        &format!(
+            "✔ 导入完成（耗时 {:.1}s），可在镜像快照列表「应用」此镜像",
+            t0.elapsed().as_secs_f64()
+        ),
+    );
+    let _ = log_op(&state.db, iid, "image", &format!("导入镜像快照 {full}")).await;
+    Ok(())
 }
 
 pub async fn fetch_instance(pool: &SqlitePool, id: i64) -> AppResult<Instance> {
