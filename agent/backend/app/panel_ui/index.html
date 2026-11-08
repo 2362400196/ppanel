@@ -615,7 +615,7 @@ function showApidoc() {
       <button data-view="logs" onclick="switchView('logs')">日志</button>
       <button data-view="ops" onclick="switchView('ops')">操作记录</button>
       <button data-view="apidoc" onclick="switchView('apidoc')">API 文档</button>
-      <div id="uiVer" style="margin-top:auto;padding:10px 13px;font-size:10.5px;color:var(--text2);opacity:.55;user-select:none">UI v20261104.10</div>
+      <div id="uiVer" style="margin-top:auto;padding:10px 13px;font-size:10.5px;color:var(--text2);opacity:.55;user-select:none">UI v20261104.11</div>
     </nav>
 
     <div class="content">
@@ -1723,6 +1723,15 @@ let isGo = false
 
 // ---------- 基础 ----------
 function $ (id) { return document.getElementById(id) }
+// 后端存 UTC 时间（如 "2026-11-08 13:56:06.864"），转浏览器本地时间显示
+function fmtUtc (s) {
+  if (!s) return s
+  const d = new Date(String(s).trim().replace(' ', 'T') + 'Z')
+  if (isNaN(d)) return s
+  const p = n => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
+
 function toast (msg, ok) {
   const t = $('toast')
   t.textContent = msg
@@ -2225,7 +2234,7 @@ async function loadCrons () {
       const tr = document.createElement('tr')
       const st = c.enabled ? '<span style="color:#3aa981">启用</span>' : '<span style="color:var(--text2)">停用</span>'
       const last = c.last_status === 'running' ? '<span style="color:#e8a33d">执行中…</span>'
-        : c.last_run ? `${c.last_run} <span style="color:${c.last_status === 'ok' ? '#3aa981' : '#e05a4e'}">${c.last_status === 'ok' ? '成功' : c.last_status === 'fail' ? '失败' : c.last_status}</span>` : '<span style="color:var(--text2)">未执行</span>'
+        : c.last_run ? `${fmtUtc(c.last_run)} <span style="color:${c.last_status === 'ok' ? '#3aa981' : '#e05a4e'}">${c.last_status === 'ok' ? '成功' : c.last_status === 'fail' ? '失败' : c.last_status}</span>` : '<span style="color:var(--text2)">未执行</span>'
       const kindL = CRON_KIND_LABEL[c.kind] || '执行命令'
       const destL = c.dest ? (CRON_DEST_LABEL[c.dest] || '') : ''
       const content = (c.kind && c.kind !== 'command')
@@ -2256,7 +2265,7 @@ async function loadCrons () {
 }
 function showCronLog (c) {
   $('cronLogBox').style.display = 'block'
-  $('cronLogTitle').textContent = `任务 #${c.id} · ${c.last_run || ''} · ${c.last_status === 'ok' ? '成功' : c.last_status === 'fail' ? '失败' : (c.last_status || '')}`
+  $('cronLogTitle').textContent = `任务 #${c.id} · ${fmtUtc(c.last_run) || ''} · ${c.last_status === 'ok' ? '成功' : c.last_status === 'fail' ? '失败' : (c.last_status || '')}`
   $('cronLogText').textContent = c.last_output || ''
   $('cronLogText').scrollTop = $('cronLogText').scrollHeight
 }

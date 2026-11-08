@@ -16,7 +16,7 @@
 use std::str::FromStr;
 use std::time::Duration;
 
-use chrono::{Datelike, NaiveDateTime, Timelike};
+use chrono::{Datelike, Local, NaiveDateTime, TimeZone, Timelike};
 
 use crate::models::{utcnow, Instance, InstanceCron, MySqlService};
 use crate::services::{backup, instance, mysql};
@@ -138,14 +138,25 @@ fn crate_spec(schedule: &str) -> Option<String> {
 }
 
 /// 优先用 cron crate 判定；翻译/解析失败时回退到 Python 语义的手写匹配。
-pub fn cron_hit(schedule: &str, now: NaiveDateTime) -> bool {
+///
+/// 两个关键语义：
+/// 1. 匹配基准为**服务器本地时间**（与系统 crontab 一致）；入参是 UTC naive，
+///    内部先转本地时间。服务器时区决定「0 0 * * *」落点的绝对时刻。
+/// 2. 秒位强制归零：cron crate 的 `includes` 会精确比对秒，而翻译出的表达式
+///    秒位固定为 0、调度循环每 30s 以任意相位唤醒——若不归零，任何 5 段
+///    表达式都几乎永远不会命中（曾导致定时备份从未自动执行）。
+pub fn cron_hit(schedule: &str, utc_now: NaiveDateTime) -> bool {
+    let ldt = Local.from_utc_datetime(&utc_now);
     if let Some(spec) = crate_spec(schedule) {
         if let Ok(sched) = cron::Schedule::from_str(&spec) {
-            let dt = chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(now, chrono::Utc);
+            let dt = ldt
+                .with_second(0)
+                .and_then(|t| t.with_nanosecond(0))
+                .unwrap_or(ldt);
             return sched.includes(dt);
         }
     }
-    cron_match(schedule, now)
+    cron_match(schedule, ldt.naive_local())
 }
 
 /// 字段级可达性校验（文案与 Python `validate` 完全一致）。
@@ -466,6 +477,13 @@ async fn tick_instance_crons(state: &AppState) -> usize {
         }
         let st = state.clone();
         let id = row.id;
+        // 先写回触发时间再 spawn：长任务（大目录备份可达数分钟）执行期间，
+        // 后续 tick 靠 last_run >= minute_start 去重，避免同一窗口重复触发
+        let _ = sqlx::query("UPDATE instance_crons SET last_run = ?, last_status = 'running' WHERE id = ?")
+            .bind(now)
+            .bind(id)
+            .execute(&state.db)
+            .await;
         tokio::spawn(async move {
             run_one(&st, id).await;
         });
@@ -501,6 +519,12 @@ async fn tick_host_backup_jobs(state: &AppState) -> usize {
         }
         let st = state.clone();
         let job_id = job.id;
+        // 先写回触发时间再 spawn（与实例任务同因：长任务去重）
+        let _ = sqlx::query("UPDATE host_backup_jobs SET last_run = ?, last_status = 'running' WHERE id = ?")
+            .bind(now)
+            .bind(job_id)
+            .execute(&state.db)
+            .await;
         tokio::spawn(async move {
             // request=None 语义：任务日志 id 传空串，不产生 X-Task-Id 记录
             let _ = backup::run_job(&st, job_id, "").await;
