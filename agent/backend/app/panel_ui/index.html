@@ -615,7 +615,7 @@ function showApidoc() {
       <button data-view="logs" onclick="switchView('logs')">日志</button>
       <button data-view="ops" onclick="switchView('ops')">操作记录</button>
       <button data-view="apidoc" onclick="switchView('apidoc')">API 文档</button>
-      <div id="uiVer" style="margin-top:auto;padding:10px 13px;font-size:10.5px;color:var(--text2);opacity:.55;user-select:none">UI v20261104.11</div>
+      <div id="uiVer" style="margin-top:auto;padding:10px 13px;font-size:10.5px;color:var(--text2);opacity:.55;user-select:none">UI v20261104.12</div>
     </nav>
 
     <div class="content">
@@ -919,87 +919,96 @@ function showApidoc() {
           <pre id="bkTaskLog" class="mono" style="margin:8px 0 0;padding:12px;background:var(--bg,#0d1117);border:1px solid var(--line);border-radius:10px;max-height:300px;overflow:auto;font-size:12px;line-height:1.7;white-space:pre-wrap;word-break:break-all"></pre>
         </div>
         <div class="card">
-          <div class="page-title">数据库备份</div>
-          <div id="bkDbInfo" class="status-text">检测数据库状态…</div>
-          <div id="bkDbOps" style="display:none">
+          <div class="ptabs" id="bkTabs">
+            <button class="ptab active" data-bktab="db" onclick="switchBkTab('db')">数据库备份</button>
+            <button class="ptab" data-bktab="dir" onclick="switchBkTab('dir')">目录备份</button>
+            <button class="ptab" data-bktab="snap" onclick="switchBkTab('snap')">安全快照</button>
+            <button class="ptab" data-bktab="img" onclick="switchBkTab('img')">镜像快照</button>
+            <button class="ptab" data-bktab="files" onclick="switchBkTab('files')">备份文件</button>
+          </div>
+
+          <div id="bktab-db">
+            <div id="bkDbInfo" class="status-text">检测数据库状态…</div>
+            <div id="bkDbOps" style="display:none">
+              <div class="domain-row">
+                <input id="bkDbTables" placeholder="表名，逗号分隔；留空 = 整库备份（如 wp_posts,wp_options）">
+                <button class="btn" onclick="doBackupDb()">备份数据库</button>
+              </div>
+              <p class="hint" id="bkDbHint">只能备份本实例的数据库。表名留空备份整库；填表名则只备份选中的表。常用表可在下方提示中直接复制。</p>
+              <div id="bkDbTableChips" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px"></div>
+            </div>
+          </div>
+
+          <div id="bktab-dir" style="display:none">
             <div class="domain-row">
-              <input id="bkDbTables" placeholder="表名，逗号分隔；留空 = 整库备份（如 wp_posts,wp_options）">
-              <button class="btn" onclick="doBackupDb()">备份数据库</button>
+              <input id="bkDirPath" placeholder="容器内绝对路径，留空默认 /app">
+              <button class="btn" onclick="doBackupDir()">备份目录</button>
             </div>
-            <p class="hint" id="bkDbHint">只能备份本实例的数据库。表名留空备份整库；填表名则只备份选中的表。常用表可在下方提示中直接复制。</p>
-            <div id="bkDbTableChips" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px"></div>
+            <p class="hint">把实例容器内的某个目录打包为 tar.gz（比整容器备份体积小得多）。恢复时解压覆盖到目标目录的同名文件，不会删除其他文件。</p>
           </div>
-        </div>
-        <div class="card">
-          <div class="page-title">网站目录备份</div>
-          <div class="domain-row">
-            <input id="bkDirPath" placeholder="容器内绝对路径，留空默认 /app">
-            <button class="btn" onclick="doBackupDir()">备份目录</button>
-          </div>
-          <p class="hint">把实例容器内的某个目录打包为 tar.gz（比整容器备份体积小得多）。恢复时解压覆盖到目标目录的同名文件，不会删除其他文件。</p>
-        </div>
-        <div class="card">
-          <div class="page-title">安全快照</div>
-          <p class="hint">你在「重置实例」「删除」等危险操作前，系统会自动把整个数据目录打包存档（保留最近 10 份）。如果误操作了，可以从这里的快照一键找回全部数据（含网站文件）。恢复前系统还会自动留档当前状态。</p>
-          <div id="snapListWrap" style="overflow-x:auto">
-            <table style="width:100%;border-collapse:collapse;font-size:12.5px">
-              <thead><tr style="color:var(--text2);text-align:left">
-                <th style="padding:6px 8px;border-bottom:1px solid var(--line)">快照文件</th>
-                <th style="padding:6px 8px;border-bottom:1px solid var(--line)">大小</th>
-                <th style="padding:6px 8px;border-bottom:1px solid var(--line)">生成时间</th>
-                <th style="padding:6px 8px;border-bottom:1px solid var(--line)">操作</th>
-              </tr></thead>
-              <tbody id="snapList"></tbody>
-            </table>
-          </div>
-        </div>
-        <div class="card">
-          <div class="page-title">镜像快照</div>
-          <p class="hint">把当前容器整体环境（系统 + 运行时 + 已安装依赖 + 配置）固化成镜像快照。之后可随时用快照重建容器：环境立即恢复原样，/app 数据目录不受影响。生成期间容器会短暂暂停几秒；镜像只存在本节点，仅本实例可用。</p>
-          <div class="domain-row">
-            <input id="imgComment" placeholder="备注（可选，如：装好了 ffmpeg 和 redis-cli）">
-            <button class="btn" onclick="doCreateImage()">生成镜像快照</button>
-          </div>
-          <div id="imgListWrap" style="overflow-x:auto;margin-top:10px">
-            <table style="width:100%;border-collapse:collapse;font-size:12.5px">
-              <thead><tr style="color:var(--text2);text-align:left">
-                <th style="padding:6px 8px;border-bottom:1px solid var(--line)">镜像</th>
-                <th style="padding:6px 8px;border-bottom:1px solid var(--line)">类型</th>
-                <th style="padding:6px 8px;border-bottom:1px solid var(--line)">大小</th>
-                <th style="padding:6px 8px;border-bottom:1px solid var(--line)">生成时间</th>
-                <th style="padding:6px 8px;border-bottom:1px solid var(--line)">操作</th>
-              </tr></thead>
-              <tbody id="imgList"></tbody>
-            </table>
-          </div>
-        </div>
-        <div class="card">
-          <div class="page-title">备份文件</div>
-          <div id="bkListWrap" style="overflow-x:auto">
-            <table style="width:100%;border-collapse:collapse;font-size:12.5px">
-              <thead><tr style="color:var(--text2);text-align:left">
-                <th style="padding:6px 8px;border-bottom:1px solid var(--line)">文件</th>
-                <th style="padding:6px 8px;border-bottom:1px solid var(--line)">类型</th>
-                <th style="padding:6px 8px;border-bottom:1px solid var(--line)">大小</th>
-                <th style="padding:6px 8px;border-bottom:1px solid var(--line)">时间</th>
-                <th style="padding:6px 8px;border-bottom:1px solid var(--line)">操作</th>
-              </tr></thead>
-              <tbody id="bkList"></tbody>
-            </table>
-          </div>
-          <div id="bkPager" style="display:none;justify-content:flex-end;align-items:center;gap:8px;margin-top:8px;font-size:12.5px;color:var(--text2);flex-wrap:wrap"></div>
-          <div id="bkRestorePanel" style="display:none;margin-top:12px;padding:12px;border:1px dashed var(--line);border-radius:10px">
-            <div class="page-title" style="margin-bottom:8px">恢复 <span class="mono" id="bkRestoreFile"></span></div>
-            <div class="domain-row" id="bkRestoreDbRow" style="display:none">
-              <span style="font-size:13px;color:var(--text2)">目标库固定为本实例库，覆盖导入</span>
-              <button class="btn" onclick="doRestoreDb()">确认恢复</button>
-            </div>
-            <div class="domain-row" id="bkRestoreDirRow" style="display:none">
-              <input id="bkRestorePath" placeholder="目标目录，留空默认 /app">
-              <button class="btn" onclick="doRestoreDir()">确认恢复</button>
+
+          <div id="bktab-snap" style="display:none">
+            <p class="hint" style="margin-top:0">你在「重置实例」「删除」等危险操作前，系统会自动把整个数据目录打包存档（保留最近 10 份）。如果误操作了，可以从这里的快照一键找回全部数据（含网站文件）。恢复前系统还会自动留档当前状态。</p>
+            <div id="snapListWrap" style="overflow-x:auto">
+              <table style="width:100%;border-collapse:collapse;font-size:12.5px">
+                <thead><tr style="color:var(--text2);text-align:left">
+                  <th style="padding:6px 8px;border-bottom:1px solid var(--line)">快照文件</th>
+                  <th style="padding:6px 8px;border-bottom:1px solid var(--line)">大小</th>
+                  <th style="padding:6px 8px;border-bottom:1px solid var(--line)">生成时间</th>
+                  <th style="padding:6px 8px;border-bottom:1px solid var(--line)">操作</th>
+                </tr></thead>
+                <tbody id="snapList"></tbody>
+              </table>
             </div>
           </div>
-          <p class="hint">备份文件仅本实例可见。数据库恢复会覆盖导入现有数据；目录恢复覆盖同名文件。请谨慎操作。</p>
+
+          <div id="bktab-img" style="display:none">
+            <p class="hint" style="margin-top:0">把当前容器整体环境（系统 + 运行时 + 已安装依赖 + 配置）固化成镜像快照。之后可随时用快照重建容器：环境立即恢复原样，/app 数据目录不受影响。生成期间容器会短暂暂停几秒；镜像只存在本节点，仅本实例可用。</p>
+            <div class="domain-row">
+              <input id="imgComment" placeholder="备注（可选，如：装好了 ffmpeg 和 redis-cli）">
+              <button class="btn" onclick="doCreateImage()">生成镜像快照</button>
+            </div>
+            <div id="imgListWrap" style="overflow-x:auto;margin-top:10px">
+              <table style="width:100%;border-collapse:collapse;font-size:12.5px">
+                <thead><tr style="color:var(--text2);text-align:left">
+                  <th style="padding:6px 8px;border-bottom:1px solid var(--line)">镜像</th>
+                  <th style="padding:6px 8px;border-bottom:1px solid var(--line)">类型</th>
+                  <th style="padding:6px 8px;border-bottom:1px solid var(--line)">大小</th>
+                  <th style="padding:6px 8px;border-bottom:1px solid var(--line)">生成时间</th>
+                  <th style="padding:6px 8px;border-bottom:1px solid var(--line)">操作</th>
+                </tr></thead>
+                <tbody id="imgList"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div id="bktab-files" style="display:none">
+            <div id="bkListWrap" style="overflow-x:auto">
+              <table style="width:100%;border-collapse:collapse;font-size:12.5px">
+                <thead><tr style="color:var(--text2);text-align:left">
+                  <th style="padding:6px 8px;border-bottom:1px solid var(--line)">文件</th>
+                  <th style="padding:6px 8px;border-bottom:1px solid var(--line)">类型</th>
+                  <th style="padding:6px 8px;border-bottom:1px solid var(--line)">大小</th>
+                  <th style="padding:6px 8px;border-bottom:1px solid var(--line)">时间</th>
+                  <th style="padding:6px 8px;border-bottom:1px solid var(--line)">操作</th>
+                </tr></thead>
+                <tbody id="bkList"></tbody>
+              </table>
+            </div>
+            <div id="bkPager" style="display:none;justify-content:flex-end;align-items:center;gap:8px;margin-top:8px;font-size:12.5px;color:var(--text2);flex-wrap:wrap"></div>
+            <div id="bkRestorePanel" style="display:none;margin-top:12px;padding:12px;border:1px dashed var(--line);border-radius:10px">
+              <div class="page-title" style="margin-bottom:8px">恢复 <span class="mono" id="bkRestoreFile"></span></div>
+              <div class="domain-row" id="bkRestoreDbRow" style="display:none">
+                <span style="font-size:13px;color:var(--text2)">目标库固定为本实例库，覆盖导入</span>
+                <button class="btn" onclick="doRestoreDb()">确认恢复</button>
+              </div>
+              <div class="domain-row" id="bkRestoreDirRow" style="display:none">
+                <input id="bkRestorePath" placeholder="目标目录，留空默认 /app">
+                <button class="btn" onclick="doRestoreDir()">确认恢复</button>
+              </div>
+            </div>
+            <p class="hint">备份文件仅本实例可见。数据库恢复会覆盖导入现有数据；目录恢复覆盖同名文件。请谨慎操作。</p>
+          </div>
         </div>
       </div>
 
@@ -1890,6 +1899,14 @@ function switchView (v) {
 }
 
 // ---------- 备份（仅本实例） ----------
+function switchBkTab (t) {
+  if (!$('bktab-' + t)) t = 'db'
+  localStorage.setItem('bkTab', t)
+  for (const b of document.querySelectorAll('#bkTabs .ptab')) b.classList.toggle('active', b.dataset.bktab === t)
+  for (const p of ['db', 'dir', 'snap', 'img', 'files']) $('bktab-' + p).style.display = p === t ? 'block' : 'none'
+}
+switchBkTab(localStorage.getItem('bkTab') || 'db')
+
 let bkInfo = null
 async function loadBackup () {
   try {
