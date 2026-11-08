@@ -615,7 +615,7 @@ function showApidoc() {
       <button data-view="logs" onclick="switchView('logs')">日志</button>
       <button data-view="ops" onclick="switchView('ops')">操作记录</button>
       <button data-view="apidoc" onclick="switchView('apidoc')">API 文档</button>
-      <div id="uiVer" style="margin-top:auto;padding:10px 13px;font-size:10.5px;color:var(--text2);opacity:.55;user-select:none">UI v20261104.12</div>
+      <div id="uiVer" style="margin-top:auto;padding:10px 13px;font-size:10.5px;color:var(--text2);opacity:.55;user-select:none">UI v20261104.13</div>
     </nav>
 
     <div class="content">
@@ -914,10 +914,6 @@ function showApidoc() {
 
       <!-- 备份（仅本实例：自己的库 + 自己容器的目录） -->
       <div id="v-backup" class="view">
-        <div class="card" id="bkTaskBox" style="display:none">
-          <div class="page-title">后台任务日志 <span class="hint" id="bkTaskState" style="margin-left:8px"></span></div>
-          <pre id="bkTaskLog" class="mono" style="margin:8px 0 0;padding:12px;background:var(--bg,#0d1117);border:1px solid var(--line);border-radius:10px;max-height:300px;overflow:auto;font-size:12px;line-height:1.7;white-space:pre-wrap;word-break:break-all"></pre>
-        </div>
         <div class="card">
           <div class="ptabs" id="bkTabs">
             <button class="ptab active" data-bktab="db" onclick="switchBkTab('db')">数据库备份</button>
@@ -1555,6 +1551,26 @@ function showApidoc() {
   </div>
 </div>
 
+<!-- 备份 / 快照后台任务日志弹窗 -->
+<div id="bkMask" class="qmodal-mask">
+  <div class="qmodal" style="width:680px">
+    <div class="qmodal-head"><span class="title" id="bkJobTitle">任务日志</span>
+      <span class="icon-close" onclick="bkTaskClose()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></span>
+    </div>
+    <div class="qmodal-body">
+      <div id="bkJobState" class="status-text" style="margin-bottom:8px">执行中…</div>
+      <pre id="bkJobLog" style="height:360px;max-height:55vh;overflow:auto;margin:0;background:#10161a;color:#c7e5df;border-radius:10px;padding:12px;font-family:ui-monospace,Consolas,monospace;font-size:12px;white-space:pre-wrap;word-break:break-all"></pre>
+      <p class="hint" style="margin-top:10px">任务在服务器后台执行，关闭弹窗不影响执行；可点右下角悬浮提示随时回来查看进度。</p>
+    </div>
+    <div class="qmodal-foot">
+      <button class="qbtn" onclick="bkTaskClose()">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- 后台任务悬浮提示（弹窗被关闭且任务仍在执行时显示） -->
+<div id="bkTaskPill" onclick="bkTaskPillClick()" style="display:none;position:fixed;right:18px;bottom:18px;z-index:900;align-items:center;gap:8px;background:#10b981;color:#fff;padding:10px 16px;border-radius:999px;font-size:13px;cursor:pointer;box-shadow:0 6px 18px rgba(16,185,129,.4);user-select:none">⏳ 任务后台执行中，点击查看实时日志</div>
+
 <!-- 输入弹窗 -->
 <div id="inputMask" class="qmodal-mask">
   <div class="qmodal" style="width:400px">
@@ -1941,13 +1957,26 @@ async function loadBackup () {
     await loadBackupList()
   } catch (e) { toast(e.message, false) }
 }
-// 后台任务日志：轮询 task-lines，直到 done/error
+// 后台任务日志：弹窗展示，轮询 task-lines 直到 done/error；弹窗可随时关闭，右下角悬浮提示续看
 let bkTaskTimer = null
-async function watchBkTask (taskId) {
-  $('bkTaskBox').style.display = 'block'
-  $('bkTaskState').textContent = '执行中…'
-  const pre = $('bkTaskLog')
+let bkTaskRunning = null
+function bkTaskClose () {
+  closeModal('bkMask')
+  if (bkTaskRunning) $('bkTaskPill').style.display = 'flex'
+}
+function bkTaskPillClick () {
+  $('bkTaskPill').style.display = 'none'
+  $('bkMask').classList.add('open')
+}
+async function watchBkTask (taskId, title) {
+  $('bkJobTitle').textContent = title || '任务日志'
+  $('bkJobState').textContent = '执行中…'
+  $('bkJobState').style.color = ''
+  const pre = $('bkJobLog')
   pre.textContent = ''
+  bkTaskRunning = taskId
+  $('bkTaskPill').style.display = 'none'
+  $('bkMask').classList.add('open')
   if (bkTaskTimer) clearInterval(bkTaskTimer)
   let since = 0
   const poll = async () => {
@@ -1957,10 +1986,15 @@ async function watchBkTask (taskId) {
       since = d.total || since
       if (d.status === 'done' || d.status === 'error') {
         clearInterval(bkTaskTimer); bkTaskTimer = null
-        $('bkTaskState').textContent = d.status === 'done' ? '✔ 已完成' : '✘ 失败（原因见日志）'
-        $('bkTaskState').style.color = d.status === 'done' ? '#3aa981' : '#e05a4e'
-        toast(d.status === 'done' ? '任务完成' : '任务失败，具体原因见日志', d.status === 'done')
+        bkTaskRunning = null
+        const ok = d.status === 'done'
+        $('bkJobState').textContent = ok ? '✔ 已完成' : '✘ 失败（原因见日志）'
+        $('bkJobState').style.color = ok ? '#1a7f5a' : '#c0392b'
+        $('bkTaskPill').style.display = 'none'
+        toast(ok ? '任务完成' : '任务失败，具体原因见日志', ok)
         loadBackupList()
+      } else if (bkTaskRunning && !$('bkMask').classList.contains('open')) {
+        $('bkTaskPill').style.display = 'flex'
       }
     } catch (e) { /* 瞬时错误忽略，继续轮询 */ }
   }
@@ -1971,14 +2005,14 @@ async function doBackupDb () {
   const tables = $('bkDbTables').value.split(',').map(s => s.trim()).filter(Boolean)
   try {
     const d = await api('POST', '/panel/instance/backup/db', { tables })
-    if (d.task_id) { toast('备份任务已提交，后台执行中…'); watchBkTask(d.task_id) }
+    if (d.task_id) { toast('备份任务已提交，后台执行中…'); watchBkTask(d.task_id, '备份数据库') }
     else { toast(d.detail, true); loadBackupList() }
   } catch (e) { toast(e.message, false) }
 }
 async function doBackupDir () {
   try {
     const d = await api('POST', '/panel/instance/backup/dir', { path: $('bkDirPath').value.trim() })
-    if (d.task_id) { toast('备份任务已提交，后台执行中…'); watchBkTask(d.task_id) }
+    if (d.task_id) { toast('备份任务已提交，后台执行中…'); watchBkTask(d.task_id, '备份目录') }
     else { toast(d.detail, true); loadBackupList() }
   } catch (e) { toast(e.message, false) }
 }
@@ -2038,14 +2072,14 @@ async function doRestoreDb () {
   if (!confirm('数据库恢复将覆盖现有数据，确认继续？')) return
   try {
     const d = await api('POST', '/panel/instance/backup/restore/db', { file: bkRestoreTarget.file })
-    if (d.task_id) { toast('恢复任务已提交，后台执行中…'); watchBkTask(d.task_id) }
+    if (d.task_id) { toast('恢复任务已提交，后台执行中…'); watchBkTask(d.task_id, '恢复数据库') }
     else toast(d.detail, true)
   } catch (e) { toast(e.message, false) }
 }
 async function doRestoreDir () {
   try {
     const d = await api('POST', '/panel/instance/backup/restore/dir', { file: bkRestoreTarget.file, path: $('bkRestorePath').value.trim() })
-    if (d.task_id) { toast('恢复任务已提交，后台执行中…'); watchBkTask(d.task_id) }
+    if (d.task_id) { toast('恢复任务已提交，后台执行中…'); watchBkTask(d.task_id, '恢复目录') }
     else toast(d.detail, true)
   } catch (e) { toast(e.message, false) }
 }
@@ -2072,7 +2106,7 @@ async function loadImages () {
         confirmBox('应用镜像快照', `将用镜像 ${m.tag} 重建容器：运行环境与已装依赖立即恢复到生成快照时的状态；/app 数据目录不受影响，但快照之后通过终端安装的依赖会被回退。实例会短暂重启，确定继续？`, async () => {
           try {
             const r = await api('POST', '/panel/instance/images/apply', { tag: m.tag })
-            toast('已提交，后台执行中…'); watchBkTask(r.task_id)
+            toast('已提交，后台执行中…'); watchBkTask(r.task_id, '应用镜像快照')
           } catch (e) { toast(e.message, false) }
         })
       }))
@@ -2088,7 +2122,7 @@ async function doCreateImage () {
   try {
     const d = await api('POST', '/panel/instance/images', { comment: $('imgComment').value.trim() })
     toast('镜像快照任务已提交，后台执行中…')
-    watchBkTask(d.task_id)
+    watchBkTask(d.task_id, '生成镜像快照')
   } catch (e) { toast(e.message, false) }
 }
 
