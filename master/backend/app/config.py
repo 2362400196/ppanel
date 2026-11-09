@@ -84,6 +84,12 @@ class Settings:
         "GO_IMAGES",
         ["golang:1.23-alpine", "golang:1.24-alpine"],
     ))
+    # 数据库镜像：节点 MySQL 服务（每版本一容器）与租户一键 phpMyAdmin 依赖，
+    # 仅管理员平台镜像预拉用，不进入实例运行环境白名单（租户 /images 列表不显示）
+    mysql_images: list = field(default_factory=lambda: _env_list(
+        "MYSQL_IMAGES",
+        ["mysql:5.7", "mysql:8.0", "mysql:8.4", "phpmyadmin:5.2-apache"],
+    ))
     # PHP 安全：默认禁用的危险函数（需与被控节点 PHP_DISABLE_FUNCTIONS 一致）
     php_disable_functions: str = field(default_factory=lambda: _env(
         "PHP_DISABLE_FUNCTIONS",
@@ -92,8 +98,13 @@ class Settings:
 
     @property
     def all_images(self) -> list:
-        """全部允许的运行环境（白名单校验统一入口）。"""
+        """全部允许的实例运行环境（白名单校验统一入口，不含数据库镜像）。"""
         return self.python_images + self.php_images + self.node_images + self.go_images
+
+    @property
+    def platform_images(self) -> list:
+        """管理员「平台镜像就绪度」清单：运行环境 + 数据库镜像（预拉取）。"""
+        return self.all_images + self.mysql_images
 
     # 经主控中转的上传/下载内存上限
     transfer_limit_mb: int = field(default_factory=lambda: _env_int("TRANSFER_LIMIT_MB", 200))

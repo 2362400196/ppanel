@@ -44,7 +44,8 @@ def create_user(body: UserCreate, db: Session = Depends(get_db)):
 
 @router.get("/admin/images")
 def admin_images():
-    return settings.all_images
+    """管理员平台镜像清单：运行环境 + 数据库镜像（mysql_* 仅此处出现）。"""
+    return settings.platform_images
 
 
 @router.get("/admin/images/status")
@@ -58,7 +59,7 @@ def admin_images_status(db: Session = Depends(get_db)):
     from app.agent_client import agent_url
     from app.models import Node
 
-    wanted = list(settings.all_images)
+    wanted = list(settings.platform_images)
     nodes = db.query(Node).filter(Node.enabled.is_(True)).all()
     out = []
     for n in nodes:

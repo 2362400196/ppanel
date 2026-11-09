@@ -869,9 +869,12 @@ async fn panel_term_task(socket: WebSocket, state: AppState, inst: crate::models
         let _ = msg_tx.send(json_msg(&json!({"type": "closed"})));
         return;
     };
-    // 提示符随 cd 实时变化（dash/busybox ash/bash 均支持 PS1 参数展开）
+    // 提示符随 cd 实时变化；优先 bash：--norc 保留自定义 PS1，-i 启用 readline
+    // 行编辑（↑↓ 历史命令、Tab 补全）；Debian 系镜像均自带 bash，
+    // Alpine 无 bash 时回落 busybox ash（busybox ash 自带行编辑）。
     let inner = format!(
-        "export TERM=xterm-256color PS1='app@{}:$PWD\\$ '; exec /bin/sh",
+        "export TERM=xterm-256color PS1='app@{}:$PWD\\$ '; \
+         if [ -x /bin/bash ]; then exec /bin/bash --norc -i; else exec /bin/sh; fi",
         inst.name
     );
     let created = docker
