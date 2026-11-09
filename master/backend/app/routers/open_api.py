@@ -12,7 +12,7 @@ from app.agent_client import agent_json, resolve_node
 from app.auth import hash_password
 from app.config import settings
 from app.database import get_db
-from app.models import Instance, Node, OpLog, User
+from app.models import Instance, Node, OpLog, User, archive_instance
 from app.schemas import OpenInstanceCreate, OpenRenew
 from app.status_sync import sync_instances_status
 
@@ -145,6 +145,7 @@ def open_delete(instance_uuid: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="实例不存在")
     node = db.get(Node, inst.node_id)
     agent_json(node, "DELETE", f"/agent/instances/{inst.agent_iid}?purge=1")
+    archive_instance(db, inst)
     db.delete(inst)
     db.add(OpLog(instance_uuid=instance_uuid, action="open_delete", detail="商城回收"))
     db.commit()

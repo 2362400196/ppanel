@@ -62,6 +62,38 @@ class Instance(Base):
     suspend_reason: Mapped[str] = mapped_column(String(16), default="")
 
 
+class InstanceArchive(Base):
+    """实例回收归档：只保留归属信息，不随实例删除。
+
+    备份目录里的 predestroy / predrop 存档属于「已被删除的实例」，主控
+    instances 表已无记录；留档后备份中心仍能把历史备份对上用户与实例名。
+    """
+
+    __tablename__ = "instance_archives"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    node_id: Mapped[int] = mapped_column(Integer, index=True)
+    agent_iid: Mapped[int] = mapped_column(Integer, index=True)
+    instance_uuid: Mapped[str] = mapped_column(String(36), default="")
+    user_id: Mapped[int] = mapped_column(Integer, index=True)
+    username: Mapped[str] = mapped_column(String(64), default="")
+    instance_name: Mapped[str] = mapped_column(String(64), default="")
+    archived_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+def archive_instance(db, inst: "Instance") -> None:
+    """回收实例前留档归属（由调用方 commit）。"""
+    u = db.get(User, inst.user_id)
+    db.add(InstanceArchive(
+        node_id=inst.node_id,
+        agent_iid=inst.agent_iid,
+        instance_uuid=inst.uuid,
+        user_id=inst.user_id,
+        username=(u.username if u else f"user#{inst.user_id}"),
+        instance_name=inst.name,
+    ))
+
+
 class OpLog(Base):
     __tablename__ = "op_logs"
 

@@ -14,7 +14,7 @@ from app.config import settings
 from app.database import Base, SessionLocal, engine
 from app.domain_proxy import try_domain_proxy
 from app.metrics_sampler import metrics_loop
-from app.models import (Alert, Domain, Instance, InstanceEvent, Metric,
+from app.models import (Alert, Domain, Instance, InstanceArchive, InstanceEvent, Metric,
                         Node, NodeHeartbeat, OpLog, Plan, User)  # noqa: F401 确保模型注册
 from app.routers import (ai_router, alerts_admin, auth_router, docker_proxy, host_proxy,
                          instances, nodes_admin, open_api, pay_router,

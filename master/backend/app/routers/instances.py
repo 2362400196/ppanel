@@ -23,7 +23,7 @@ from app.auth import Principal, get_principal
 from app.config import settings
 from app.database import get_db
 from app.models import (Domain, Instance, Metric, Node, OpLog, Order, Plan, User,
-                        utcnow)
+                        archive_instance, utcnow)
 from app.schemas import InstanceCreate, InstanceUpdate, InstallIn
 from app.status_sync import sync_instances_status
 
@@ -235,6 +235,7 @@ def delete_instance(instance_uuid: str, p: Principal = Depends(get_principal),
                 tasks.log(tid, f"节点返回 404：{detail}")
         if tid:
             tasks.log(tid, "清理主控记录…")
+        archive_instance(db, inst)  # 留档归属，历史备份仍可对上用户与实例名
         db.delete(inst)
         _oplog(db, "delete_instance", user_id=p.user_id, instance_uuid=inst.uuid,
                detail=detail)

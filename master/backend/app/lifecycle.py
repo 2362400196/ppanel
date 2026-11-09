@@ -18,7 +18,8 @@ from datetime import timedelta
 from app.agent_client import agent_json
 from app.config import settings
 from app.database import SessionLocal
-from app.models import (Alert, Domain, Instance, Node, Notice, OpLog, utcnow)
+from app.models import (Alert, Domain, Instance, Node, Notice, OpLog,
+                        archive_instance, utcnow)
 
 log = logging.getLogger("ppanel.lifecycle")
 
@@ -156,6 +157,7 @@ def _remind_and_expire(db) -> None:
                 name = inst.name
                 for d in db.query(Domain).filter(Domain.instance_uuid == inst.uuid).all():
                     db.delete(d)
+                archive_instance(db, inst)
                 db.delete(inst)
                 db.add(OpLog(action="platform_purge", instance_uuid=None,
                              user_id=inst.user_id,

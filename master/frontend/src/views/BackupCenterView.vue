@@ -111,19 +111,42 @@
         <div class="bar">
           <h3 class="card-title">备份文件</h3>
           <span class="sp" />
-          <span class="hint-text">共 {{ bkTotal }} 个（保留策略之外的旧文件可在此手动清理）</span>
+          <span class="hint-text">节点：{{ curNode?.name || '—' }}</span>
+          <UIInput v-model="bkKeyword" style="width:220px" placeholder="搜索文件名 / 用户 / 实例名" />
           <UIButton type="ghost" size="sm" :loading="bkLoading" @click="loadFiles">刷新</UIButton>
         </div>
+        <div class="bk-tabs">
+          <UITabs v-model="bkTab" :tabs="bkTabs" />
+          <span class="hint-text">每份均标注来源用户 / 实例 / 节点，共 {{ filteredBackups.length }} 份</span>
+        </div>
         <table class="ftable">
-          <thead><tr><th>文件名</th><th>类型</th><th>大小</th><th>时间</th><th /></tr></thead>
+          <thead><tr>
+            <th>文件名 / 用途</th>
+            <th style="width:132px">归属用户</th>
+            <th style="width:132px">来源实例</th>
+            <th style="width:110px">节点</th>
+            <th style="width:92px">类型</th>
+            <th>大小</th><th>时间</th><th />
+          </tr></thead>
           <tbody>
-            <tr v-for="b in backups" :key="b.file">
-              <td class="mono">{{ b.file }}</td>
-              <td>
-                <UITag :tone="b.kind === 'container' ? 'primary' : b.kind === 'database' ? 'ok' : b.kind === 'dir' ? 'warn' : 'dim'">
-                  {{ b.kind === 'container' ? '容器' : b.kind === 'database' ? '数据库' : b.kind === 'dir' ? '目录' : '其他' }}
-                </UITag>
+            <tr v-for="b in pageRows" :key="b.file">
+              <td class="bk-file mono">
+                <span :title="b.file">{{ b.file }}</span>
+                <div class="bk-desc">{{ b.desc || '备份产物' }}</div>
               </td>
+              <td>
+                <span v-if="b.owner" class="bk-owner">{{ b.owner }}</span>
+                <span v-else class="dim">{{ b.source_state === 'node' ? '节点级' : '归属无记录' }}</span>
+                <div v-if="b.source_state === 'archived' || b.source_state === 'deleted'" class="bk-desc">实例已回收</div>
+                <div v-else-if="b.source_state === 'node'" class="bk-desc">无用户归属</div>
+              </td>
+              <td>
+                <span :title="b.inst_name">{{ b.inst_name || '—' }}</span>
+                <div v-if="b.agent_iid && b.source_state !== 'deleted'" class="bk-desc mono">ID {{ b.agent_iid }}</div>
+                <div v-else-if="b.source_state === 'deleted'" class="bk-desc">旧实例，未留档</div>
+              </td>
+              <td><UITag tone="dim">{{ b.node_name || `节点#${b.node_id}` }}</UITag></td>
+              <td><UITag :tone="catTone(b.category)">{{ catLabel(b.category) }}</UITag></td>
               <td class="mono">{{ fmtSize(b.size) }}</td>
               <td class="dim">{{ b.created_at }}</td>
               <td class="ops">
@@ -131,12 +154,11 @@
                 <UIButton type="text" class="danger" @click="askDelFile(b.file)">删除</UIButton>
               </td>
             </tr>
-            <tr v-if="!backups"><td colspan="5" class="empty">暂无备份文件</td></tr>
+            <tr v-if="!pageRows.length"><td colspan="8" class="empty">{{ bkLoading ? '加载中…' : '该分类下暂无备份文件' }}</td></tr>
           </tbody>
         </table>
-        <UIPager v-if="bkTotal > 0" class="ft-pager"
-                 :total="bkTotal" v-model:page="bkPage" v-model:pageSize="bkPageSize"
-                 @change="loadFiles" />
+        <UIPager v-if="filteredBackups.length > bkPageSize" class="ft-pager"
+                 :total="filteredBackups.length" v-model:page="bkPage" v-model:pageSize="bkPageSize" />
         <p class="tip">恢复操作（导入容器 / 覆盖导入数据库）在「节点管理 → 备份」中执行，防止误覆盖线上数据。</p>
       </div>
     </template>
@@ -193,6 +215,7 @@ import UIInput from '../components/ui/UIInput.vue'
 import UIModal from '../components/ui/UIModal.vue'
 import UISelect from '../components/ui/UISelect.vue'
 import UIPager from '../components/ui/UIPager.vue'
+import UITabs from '../components/ui/UITabs.vue'
 import UITag from '../components/ui/UITag.vue'
 import StatusDot from '../components/ui/StatusDot.vue'
 import ConfirmDialog from '../components/ui/ConfirmDialog.vue'
@@ -366,25 +389,60 @@ async function delJob(j) {
 }
 
 // ---------- 备份文件 ----------
+// 全量拉取后在前端分类/分页：页签数量与分页总数才准确（被控分页只对当前页生效）
 const backups = ref([])
 const bkTotal = ref(0)
 const bkPage = ref(1)
 const bkPageSize = ref(20)
 const bkLoading = ref(false)
+const bkTab = ref('all')
+const bkKeyword = ref('')
+
+const BK_CATS = [
+  { key: 'all', label: '全部' },
+  { key: 'database', label: '数据库' },
+  { key: 'dir', label: '目录' },
+  { key: 'snapshot', label: '安全快照' },
+  { key: 'image', label: '镜像 / 容器' },
+  { key: 'other', label: '其他' },
+]
+const CAT_LABEL = { database: '数据库', dir: '目录', snapshot: '安全快照',
+  image: '镜像包', container: '容器', other: '其他' }
+function catOf (b) {
+  const c = b.category || 'other'
+  return (c === 'container' || c === 'image') ? 'image' : c
+}
+function catLabel (c) { return CAT_LABEL[c] || '其他' }
+function catTone (c) {
+  return { database: 'ok', dir: 'warn', snapshot: 'primary', image: 'primary', container: 'primary' }[c] || 'dim'
+}
+const bkTabs = computed(() => BK_CATS.map(t => ({
+  key: t.key,
+  label: `${t.label} ${t.key === 'all' ? backups.value.length : backups.value.filter(b => catOf(b) === t.key).length}`
+})))
+const filteredBackups = computed(() => {
+  let rows = backups.value
+  if (bkTab.value !== 'all') rows = rows.filter(b => catOf(b) === bkTab.value)
+  const k = bkKeyword.value.trim().toLowerCase()
+  if (k) rows = rows.filter(b => [b.file, b.owner, b.inst_name, b.node_name, b.desc]
+    .some(v => String(v || '').toLowerCase().includes(k)))
+  return rows
+})
+const pageRows = computed(() => filteredBackups.value.slice(
+  (bkPage.value - 1) * bkPageSize.value, bkPage.value * bkPageSize.value))
+watch([bkTab, bkKeyword], () => { bkPage.value = 1 })
+watch(filteredBackups, rows => {
+  const maxPage = Math.max(1, Math.ceil(rows.length / bkPageSize.value))
+  if (bkPage.value > maxPage) bkPage.value = maxPage
+})
 
 async function loadFiles() {
   bkLoading.value = true
   try {
-    const { data } = await api.get('/host/backups', {
-      params: { ...np(), page: bkPage.value, page_size: bkPageSize.value }
-    })
+    // 不传 page：被控返回全量，主控转发层已为每项补齐来源信息
+    const { data } = await api.get('/host/backups', { params: np() })
     backups.value = data.backups || []
-    bkTotal.value = data.total || 0
-    // 删除后当前页空了 → 回退到最后一页
-    if (!backups.value.length && bkPage.value > 1 && bkTotal.value > 0) {
-      bkPage.value = Math.ceil(bkTotal.value / bkPageSize.value)
-      return loadFiles()
-    }
+    bkTotal.value = data.total ?? backups.value.length
   } catch (e) {
     const s = e?.response?.status
     if (s !== 404) toastErr(errText(e))
@@ -503,4 +561,11 @@ table.ftable { width: 100%; border-collapse: collapse; font-size: 13px; margin-t
 .ftable td { padding: 7px 10px; border-bottom: 1px solid color-mix(in srgb, var(--line) 55%, transparent); vertical-align: middle; }
 .ftable tbody tr:hover td { background: color-mix(in srgb, var(--primary) 4%, transparent); }
 .danger { color: var(--danger, #e5484d); }
+/* 备份文件：页签 + 来源信息 */
+.bk-tabs { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 12px; }
+.bk-file { max-width: 300px; }
+.bk-file > span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.bk-desc { margin-top: 2px; font-size: 11.5px; color: var(--text-dim); font-weight: 400;
+  max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bk-owner { font-weight: 600; color: var(--primary-strong, var(--primary)); }
 </style>
