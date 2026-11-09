@@ -357,6 +357,9 @@ async fn run_backup_job_inner(
                     ".tar.gz",
                     5,
                 );
+                // 份数之外再兜总大小上限（默认 10GB），防大目录备份塞满磁盘
+                let capped = backup::enforce_size_cap(&format!("{cname}_{base}_"), ".tar.gz", 10 * 1024);
+                let removed = removed + capped;
                 if removed > 0 {
                     state.tasks.log(tid, &format!("已按保留策略清理 {removed} 份旧备份"));
                 }
@@ -377,8 +380,8 @@ async fn run_backup_job_inner(
                 // tables 为空 = 备份全部表
                 match backup::backup_database(state, &ver, &db_name, &[], tid).await {
                     Ok(v) => {
-                        let removed =
-                            backup::apply_instance_keep(&format!("{db_name}_"), ".sql.gz", 5);
+                        let removed = backup::apply_instance_keep(&format!("{db_name}_"), ".sql.gz", 5)
+                            + backup::enforce_size_cap(&format!("{db_name}_"), ".sql.gz", 10 * 1024);
                         if removed > 0 {
                             state
                                 .tasks

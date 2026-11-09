@@ -40,6 +40,7 @@ urlencoding = "2"
 regex = "1"
 http-body-util = "0.1"
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+fs2 = "0.4"
 
 [profile.release]
 opt-level = 2

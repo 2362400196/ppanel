@@ -548,7 +548,6 @@ async fn backup_dir_inner(
     check_container_dir(&docker, cname, &p).await?;
 
     let base = p.rsplit_once('/').map(|(_, b)| b.to_string()).unwrap_or_default();
-    let tmp = format!("/tmp/ppanel_dirbk_{}_{}.tar.gz", ts(), rand_hex6());
     let fname = format!("{cname}_{base}_{}.tar.gz", ts());
     if !name_ok(&fname) {
         return Err(AppError::bad_request("目录名无法生成合法备份文件名"));
@@ -561,19 +560,60 @@ async fn backup_dir_inner(
         .tasks
         .start(tid, &format!("备份网站目录 {p}（{cname}）"));
     let r = async {
-        state.tasks.log(tid, "容器内打包目录（tar.gz）…");
-        let (code, _out, err) = exec_demux(
+        // 空间预检：目录原始大小（gzip 包不会大于原始目录）+ 1GB 余量。
+        // 可用空间不足时直接不开跑——旧流程打包到一半把整盘写满，
+        // 磁盘 100% 会拖垮同机的 MySQL / 主控 / 其他实例。
+        state.tasks.log(tid, "预估目录大小并检查磁盘空间…");
+        let (_c, du_out, _e) = exec_demux(
             &docker,
             cname,
             vec![
                 "sh".into(),
                 "-c".into(),
-                format!("tar -czf {tmp} -C '{p}' ."),
+                format!("du -sm '{p}' 2>/dev/null | tail -1"),
             ],
         )
         .await?;
-        // tar 退出码 1 =「打包时文件发生变化」等警告（大目录/热更新站点常见），
-        // 归档仍然完整可用，不判失败；退出码 ≥2 才是真错误。
+        let src_mb: u64 = du_out
+            .lines()
+            .next()
+            .and_then(|l| l.split('\t').next())
+            .and_then(|x| x.trim().parse().ok())
+            .unwrap_or(0);
+        let avail_mb = fs2::available_space(Path::new(&dir)).unwrap_or(0) / (1024 * 1024);
+        let need_mb = src_mb + 1024;
+        if src_mb > 0 && avail_mb < need_mb {
+            return Err(AppError::bad_gateway(format!(
+                "磁盘空间不足：可用 {} GB，本次备份预计需要约 {} GB（目录原始约 {} GB）。请先在「备份」页清理旧备份 / 删除不用的镜像快照，或升级磁盘",
+                avail_mb / 1024,
+                need_mb / 1024,
+                src_mb / 1024
+            )));
+        }
+        if src_mb > 0 {
+            state.tasks.log(
+                tid,
+                &format!("目录原始约 {} MB，磁盘可用 {} MB，空间足够", src_mb, avail_mb),
+            );
+        }
+
+        // tar 直接输出到 stdout，agent 流式写宿主文件：
+        // 全程只有宿主一份 tar.gz，不再向容器 /tmp 写临时包再拉取
+        // （旧流程双份占用 ~2×目录大小，大目录会把磁盘写满）。
+        state.tasks.log(tid, "容器内打包并流式写回宿主（tar.gz）…");
+        let (code, err, written) = exec_tar_stream_to_file(
+            &docker,
+            cname,
+            vec![
+                "sh".into(),
+                "-c".into(),
+                format!("tar -czf - -C '{p}' ."),
+            ],
+            &dest,
+            &|mb| state.tasks.log(tid, &format!("…已写 {} MB", mb)),
+        )
+        .await?;
+        // tar 退出码 1 =「打包时文件变化」等警告（归档完整可用）；≥2 才是真错误
         if code > 1 {
             return Err(AppError::bad_gateway(format!(
                 "目录打包失败：{}",
@@ -585,10 +625,10 @@ async fn backup_dir_inner(
                 .tasks
                 .log(tid, &format!("tar 有警告（归档完整可用）：{}", tail(err.trim(), 200)));
         }
-        state.tasks.log(tid, "打包完成，取回落盘…");
-        pull_archive(state, cname, &tmp, &dest, tid).await?;
-        let _ = rm_in_container(&docker, cname, &[tmp.clone()]).await;
-        let size_kb = std::fs::metadata(&dest).map(|m| m.len() / 1024).unwrap_or(0);
+        if written < 1024 {
+            return Err(AppError::bad_gateway("备份产物为空，目录可能为空或打包异常"));
+        }
+        let size_kb = written / 1024;
         state.tasks.finish(
             tid,
             true,
@@ -599,14 +639,77 @@ async fn backup_dir_inner(
     .await;
 
     if let Err(e) = &r {
-        let _ = rm_in_container(&docker, cname, &[tmp.clone()]).await;
-        // 本次产物（含拉取中断的半成品）一律清理，避免残包白白占磁盘
+        // 失败清理半成品，避免残包白白占磁盘
         let _ = std::fs::remove_file(&dest);
         state
             .tasks
             .finish(tid, false, &format!("✘ 目录备份失败：{}", err_text(e)));
     }
     r
+}
+
+/// 容器内命令的 stdout 字节流直接落盘宿主文件（二进制安全、内存占用恒定）。
+/// 返回 (exit_code, stderr 文本, 写入字节数)。每写 256MB 触发一次进度回调。
+async fn exec_tar_stream_to_file(
+    docker: &Docker,
+    cname: &str,
+    cmd: Vec<String>,
+    dest: &Path,
+    on_progress: &(dyn Fn(u64) + Send + Sync),
+) -> AppResult<(i64, String, u64)> {
+    let exec = docker
+        .create_exec(
+            cname,
+            CreateExecOptions {
+                cmd: Some(cmd),
+                attach_stdout: Some(true),
+                attach_stderr: Some(true),
+                ..Default::default()
+            },
+        )
+        .await?;
+    let exec_id = exec.id;
+    let start = docker
+        .start_exec(
+            &exec_id,
+            Some(StartExecOptions { detach: false, tty: false, output_capacity: None }),
+        )
+        .await?;
+    let mut stderr = String::new();
+    let mut total: u64 = 0;
+    let mut mark: u64 = 256 * 1024 * 1024;
+    if let StartExecResults::Attached { mut output, .. } = start {
+        let mut f = tokio::fs::File::create(dest)
+            .await
+            .map_err(|e| AppError::bad_gateway(format!("创建备份文件失败：{e}")))?;
+        while let Some(item) = output.next().await {
+            match item {
+                Ok(bollard::container::LogOutput::StdOut { message })
+                | Ok(bollard::container::LogOutput::Console { message }) => {
+                    f.write_all(&message)
+                        .await
+                        .map_err(|e| AppError::bad_gateway(format!("写入备份失败：{e}")))?;
+                    total += message.len() as u64;
+                    if total >= mark {
+                        mark += 256 * 1024 * 1024;
+                        on_progress(total / (1024 * 1024));
+                    }
+                }
+                Ok(bollard::container::LogOutput::StdErr { message }) => {
+                    stderr.push_str(&String::from_utf8_lossy(&message));
+                }
+                _ => {}
+            }
+        }
+        let _ = f.flush().await;
+    }
+    let code = docker
+        .inspect_exec(&exec_id)
+        .await
+        .ok()
+        .and_then(|i| i.exit_code)
+        .unwrap_or(-1);
+    Ok((code, stderr, total))
 }
 
 /// POST /host/backups/dir
@@ -1405,8 +1508,38 @@ pub async fn run_job(state: &AppState, job_id: i64, tid: &str) -> Value {
 /// 时间戳的产物，按修改时间保留最近 keep 份（与宿主备份任务默认一致）。
 /// 返回删除数量。
 pub fn apply_instance_keep(prefix: &str, ext: &str, keep: usize) -> usize {
+    let files = collect_instance_backups(prefix, ext);
+    let mut removed = 0;
+    for (name, _) in files.into_iter().skip(keep.max(1)) {
+        if std::fs::remove_file(Path::new(&backup_root()).join(&name)).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// 实例备份的总大小上限：同类产物合计超过 cap_mb 时从最旧开始删，
+/// 永远保留最新 1 份。大目录（数 GB）做本地备份时份数太多照样塞满磁盘，
+/// 份数策略之外再兜一层总大小。返回删除数量。
+pub fn enforce_size_cap(prefix: &str, ext: &str, cap_mb: u64) -> usize {
+    let files = collect_instance_backups(prefix, ext);
+    let mut total: u64 = files.iter().map(|(_, size)| *size).sum();
+    let mut removed = 0;
+    let mut idx = files.len();
+    while total > cap_mb && idx > 1 {
+        idx -= 1;
+        total -= files[idx].1;
+        if std::fs::remove_file(Path::new(&backup_root()).join(&files[idx].0)).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// 收集本实例同类备份产物：(文件名, 大小 MB)，按修改时间新→旧排序。
+fn collect_instance_backups(prefix: &str, ext: &str) -> Vec<(String, u64)> {
     let root = backup_root();
-    let mut files: Vec<(String, u64)> = Vec::new();
+    let mut files: Vec<(String, u64, u64)> = Vec::new();
     if let Ok(rd) = std::fs::read_dir(Path::new(&root)) {
         for ent in rd.flatten() {
             let name = ent.file_name().to_string_lossy().to_string();
@@ -1425,17 +1558,11 @@ pub fn apply_instance_keep(prefix: &str, ext: &str, keep: usize) -> usize {
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
-            files.push((name, mtime));
+            files.push((name, mtime, md.len() / (1024 * 1024)));
         }
     }
     files.sort_by(|a, b| b.1.cmp(&a.1));
-    let mut removed = 0;
-    for (name, _) in files.into_iter().skip(keep.max(1)) {
-        if std::fs::remove_file(Path::new(&root).join(&name)).is_ok() {
-            removed += 1;
-        }
-    }
-    removed
+    files.into_iter().map(|(name, _, size)| (name, size)).collect()
 }
 
 fn format_output(r: &Value, extra: &str, removed: i64, t0: Instant) -> String {
