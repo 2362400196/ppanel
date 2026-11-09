@@ -643,7 +643,7 @@ function showApidoc() {
       <button data-view="logs" onclick="switchView('logs')">日志</button>
       <button data-view="ops" onclick="switchView('ops')">操作记录</button>
       <button data-view="apidoc" onclick="switchView('apidoc')">API 文档</button>
-      <div id="uiVer" style="margin-top:auto;padding:10px 13px;font-size:10.5px;color:var(--text2);opacity:.55;user-select:none">UI v20261104.15</div>
+      <div id="uiVer" style="margin-top:auto;padding:10px 13px;font-size:10.5px;color:var(--text2);opacity:.55;user-select:none">UI v20261104.16</div>
     </nav>
 
     <div class="content">
@@ -3383,27 +3383,27 @@ function pickUpFiles () { $('uploadFilesInput').value = ''; $('uploadFilesInput'
 // ---------- 拖拽上传：文件列表区 + 上传弹窗内均可拖 ----------
 ;(() => {
   const wrap = document.querySelector('#v-files .table-wrap')
-  if (!wrap) return
-  const overOn = el => { ev => { ev.preventDefault(); el.classList.add('drag-over') } }
-  const overOff = el => { ev => { ev.preventDefault(); if (!el.contains(ev.relatedTarget)) el.classList.remove('drag-over') } }
+  const body = document.querySelector('#uploadMask .qmodal-body')
+  if (!wrap || !body) return
+  const bindDrop = (el, onDrop) => {
+    el.addEventListener('dragover', ev => { ev.preventDefault(); el.classList.add('drag-over') })
+    el.addEventListener('dragleave', ev => { if (!el.contains(ev.relatedTarget)) el.classList.remove('drag-over') })
+    el.addEventListener('drop', ev => {
+      ev.preventDefault()
+      el.classList.remove('drag-over')
+      onDrop(ev)
+    })
+  }
   // 文件管理页：拖文件进来直接弹上传窗并填充
-  wrap.addEventListener('dragover', overOn(wrap))
-  wrap.addEventListener('dragleave', overOff(wrap))
-  wrap.addEventListener('drop', ev => {
-    ev.preventDefault(); ev.stopPropagation()
-    wrap.classList.remove('drag-over')
+  bindDrop(wrap, ev => {
+    ev.stopPropagation()
     const fl = ev.dataTransfer && ev.dataTransfer.files
     if (!fl || !fl.length) return
     openUploadMask()
     onPickFiles(fl)
   })
   // 上传弹窗内：继续拖入追加文件
-  const body = document.querySelector('#uploadMask .qmodal-body')
-  body.addEventListener('dragover', overOn(body))
-  body.addEventListener('dragleave', overOff(body))
-  body.addEventListener('drop', ev => {
-    ev.preventDefault()
-    body.classList.remove('drag-over')
+  bindDrop(body, ev => {
     const fl = ev.dataTransfer && ev.dataTransfer.files
     if (fl && fl.length) onPickFiles(fl)
   })
