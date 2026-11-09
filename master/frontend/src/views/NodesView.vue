@@ -1,5 +1,6 @@
 <script setup>
 import { onMounted, onUnmounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { api, errText } from '../api/client'
 import { toastErr, toastOk } from '../components/ui/toast'
 import UIButton from '../components/ui/UIButton.vue'
@@ -73,6 +74,14 @@ async function openNodeInstances(n) {
 }
 
 const instRunning = () => instRows.value.filter(i => i.status === 'running').length
+
+// 跳到实例管理并自动切到这台节点（该页按节点分页签展示）
+const router = useRouter()
+function gotoNodeInstances(n) {
+  if (!n) return
+  instOpen.value = false
+  router.push({ path: '/manage', query: { node_id: n.id } })
+}
 
 function fmtWhen(v) {
   if (!v) return '-'
@@ -300,6 +309,9 @@ onUnmounted(() => clearInterval(timer))
         <template #col-created_at="{ row }"><span class="text-dim">{{ fmtWhen(row.created_at) }}</span></template>
       </UITable>
       <div v-if="!instLoading && !instRows.length" class="inst-empty">该节点上还没有任何实例。</div>
+      <div class="inst-foot">
+        <UIButton size="sm" type="ghost" @click="gotoNodeInstances(instNode)">在实例管理中查看该节点</UIButton>
+      </div>
     </UIModal>
 
     <!-- 节点管理面板（概览/容器/镜像/文件管理/宿主机终端） -->
@@ -320,6 +332,7 @@ onUnmounted(() => clearInterval(timer))
 .inst-summary b { color: var(--primary-deep); font-family: var(--font-mono); }
 .owner { font-weight: 600; }
 .inst-empty { text-align: center; color: var(--text-dim); font-size: 13px; padding: 18px 0 6px; }
+.inst-foot { display: flex; justify-content: flex-end; margin-top: 12px; }
 .field { display: flex; flex-direction: column; gap: 6px; }
 .field span { font-size: 12px; font-weight: 600; color: var(--text-2); }
 .form-tip { font-size: 12px; color: var(--text-dim); margin: 0; line-height: 1.6; }

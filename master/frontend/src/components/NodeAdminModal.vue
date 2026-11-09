@@ -28,12 +28,12 @@ const router = useRouter()
 const view = ref('overview')
 const np = () => ({ node: String(props.node?.id || '') })
 
-// 容器行 → 跳到实例管理并按下钻关键字过滤（关闭当前节点弹窗）
+// 容器行 → 跳到实例管理：定位到该节点页签 + 按下钻关键字过滤（关闭当前节点弹窗）
 function gotoInstance (c) {
   const kw = c.inst_name || c.owner
   if (!kw) return
   emit('update:open', false)
-  router.push({ path: '/manage', query: { keyword: kw } })
+  router.push({ path: '/manage', query: { keyword: kw, node_id: props.node?.id } })
 }
 
 // ---------- 概览（资源仪表盘） ----------

@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app import tasks
@@ -72,10 +72,13 @@ def list_images(p: Principal = Depends(get_principal)):
 
 @router.get("/instances")
 def my_instances(all: int = 0, page: int = 0, page_size: int = 20, keyword: str = "",
+                 node_id: str = "",
                  p: Principal = Depends(get_principal),
                  db: Session = Depends(get_db)):
-    """实例列表。带 page 参数（管理端分页视图）返回 {items, total}；
-    不带则返回全量数组（用户端列表量小，由前端 UITable 自动分页）。"""
+    """实例列表。带 page 参数（管理端分页视图）返回 {items, total, node_counts, all_total}；
+    不带则返回全量数组（用户端列表量小，由前端 UITable 自动分页）。
+    node_id > 0 时只返回该节点的实例（管理端按节点切换视图用）；
+    node_counts 始终按「当前搜索条件下的全部节点」统计，切换节点后其它页签仍有数量。"""
     sync_instances_status(db)
     q = db.query(Instance)
     if not (p.is_admin and all == 1):
@@ -91,6 +94,20 @@ def my_instances(all: int = 0, page: int = 0, page_size: int = 20, keyword: str 
         if user_ids:
             cond.append(Instance.user_id.in_(user_ids))
         q = q.filter(or_(*cond))
+    # 各节点实例数：基于「搜索后、节点过滤前」的结果，避免切到某节点后其它页签变 0
+    counts = (q.order_by(None)
+              .with_entities(Instance.node_id, func.count())
+              .group_by(Instance.node_id).all())
+    node_counts = {str(nid or 0): cnt for nid, cnt in counts}
+    all_total = sum(node_counts.values())
+    # 前端「全部节点」页签在 URL 里记作 node_id=all（不会拼进 API 参数），
+    # 这里仍做容错：非数字一律视为「不过滤」，避免直接访问 API 时 422
+    try:
+        nid = int(node_id)
+    except (TypeError, ValueError):
+        nid = 0
+    if nid > 0:
+        q = q.filter(Instance.node_id == nid)
     q = q.order_by(Instance.created_at.desc())
     if page >= 1:
         total = q.count()
@@ -100,7 +117,8 @@ def my_instances(all: int = 0, page: int = 0, page_size: int = 20, keyword: str 
         users_map = {u.id: u.username for u in db.query(User).filter(User.id.in_(uids)).all()}
         return {"items": [_out(i, nodes.get(i.node_id),
                                {"owner": users_map.get(i.user_id)}) for i in items],
-                "total": total}
+                "total": total,
+                "node_counts": node_counts, "all_total": all_total}
     nodes = {n.id: n for n in db.query(Node).all()}
     return [_out(i, nodes.get(i.node_id)) for i in q.all()]
 
