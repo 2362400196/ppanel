@@ -260,6 +260,10 @@ svg.chart { width: 100%; height: 260px; display: block; background: var(--bg); b
 .up-bar { flex: 1; height: 6px; border-radius: 4px; background: #e9edf2; overflow: hidden; }
 .up-bar-fill { height: 100%; border-radius: 4px; background: #10b981; transition: width .2s ease; }
 .up-bar-fill.error { background: #e5484d; }
+
+/* 磁盘超配额提醒（只提醒不停机） */
+.warn-banner { display: none; margin: 10px 0 4px; padding: 10px 14px; border: 1px solid #f3c1b8; background: #fdf0ed; color: #b3261e; border-radius: 10px; font-size: 13px; line-height: 1.7; }
+.disk-over-tip { color: #e05a4e; font-size: 12px; font-weight: 600; }
 .up-percent { width: 42px; text-align: right; font-size: 12px; color: #6b7480; flex-shrink: 0; }
 .up-empty { display: flex; flex-direction: column; gap: 10px; justify-content: center; align-items: center; color: #9aa3ab; padding: 32px 0; }
 .up-empty svg { width: 30px; height: 30px; color: #c6cfcb; }
@@ -643,7 +647,7 @@ function showApidoc() {
       <button data-view="logs" onclick="switchView('logs')">日志</button>
       <button data-view="ops" onclick="switchView('ops')">操作记录</button>
       <button data-view="apidoc" onclick="switchView('apidoc')">API 文档</button>
-      <div id="uiVer" style="margin-top:auto;padding:10px 13px;font-size:10.5px;color:var(--text2);opacity:.55;user-select:none">UI v20261104.16</div>
+      <div id="uiVer" style="margin-top:auto;padding:10px 13px;font-size:10.5px;color:var(--text2);opacity:.55;user-select:none">UI v20261104.17</div>
     </nav>
 
     <div class="content">
@@ -785,6 +789,7 @@ function showApidoc() {
             <div class="meter-row" id="diskRow" style="display:none"><span class="k">磁盘用量</span><div class="bar"><i id="diskBar"></i></div><span class="v mono" id="diskVal">-</span></div>
             <div class="meter-row" id="trafRow" style="display:none"><span class="k">本月流量</span><div class="bar"><i id="trafBar"></i></div><span class="v mono" id="trafVal">-</span></div>
           </div>
+          <div id="diskWarn" class="warn-banner" style="display:none">⚠️ <b>磁盘用量已超出配额</b>（<span class="mono" id="diskWarnVal"></span>）。超限不影响当前运行，但请尽快清理大文件、旧备份，或联系管理员升级配额，避免节点磁盘耗尽影响服务。</div>
           <div class="box">
             <div class="page-title" style="margin-bottom:8px">启动命令</div>
             <textarea id="cmdArea" rows="2" style="width:100%;border:1px solid var(--line);border-radius:10px;padding:9px 11px;font-family:ui-monospace,Consolas,monospace;font-size:12.5px;outline:none;resize:vertical" placeholder="python main.py"></textarea>
@@ -834,6 +839,7 @@ function showApidoc() {
             <button class="btn ghost" onclick="promptMkdir()">新建目录</button>
             <button class="btn ghost" onclick="promptNewFile()">新建文件</button>
             <button class="btn ghost" onclick="openUploadMask()">上传</button>
+            <span id="diskTip" class="disk-over-tip" style="display:none"></span>
             <button class="btn ghost" onclick="downloadBackup()">备份</button>
             <button class="btn ghost" onclick="pickRestore()">恢复</button>
             <input type="file" id="restoreInput" accept=".tar.gz,.tgz" style="display:none" onchange="doRestore(this.files[0])">
@@ -2702,14 +2708,24 @@ async function loadStats () {
     $('memBar').style.width = memPct + '%'
     $('memBar').className = memPct > 85 ? 'hot' : ''
     $('memVal').textContent = memUsed.toFixed(0) + ' / ' + memLim + ' MB'
-    // 磁盘用量（host_dir 统计可用时显示）
+    // 磁盘用量（host_dir 统计可用时显示；超配额红色提醒，不停机）
     if (s.disk_used_mb != null) {
       const dLim = inst.disk_quota || 0
+      const over = dLim > 0 && s.disk_used_mb > dLim
       const dPct = dLim ? Math.min(100, s.disk_used_mb / dLim * 100) : 0
       $('diskRow').style.display = ''
       $('diskBar').style.width = dPct + '%'
       $('diskBar').className = dPct > 85 ? 'hot' : ''
-      $('diskVal').textContent = s.disk_used_mb.toFixed(0) + ' / ' + (dLim / 1024).toFixed(1) + ' GB'
+      const usedTxt = s.disk_used_mb >= 1024
+        ? (s.disk_used_mb / 1024).toFixed(1) + ' GB'
+        : s.disk_used_mb.toFixed(0) + ' MB'
+      $('diskVal').textContent = usedTxt + ' / ' + (dLim / 1024).toFixed(1) + ' GB'
+      $('diskVal').style.color = over ? '#e05a4e' : ''
+      if (over) {
+        $('diskWarnVal').textContent = usedTxt + ' / ' + (dLim / 1024).toFixed(1) + ' GB，已超 ' +
+          ((s.disk_used_mb / dLim - 1) * 100).toFixed(0) + '%'
+      }
+      $('diskWarn').style.display = over ? 'block' : 'none'
     }
     // 本月流量（商品设置了限额时显示；不限额则隐藏）
     if (s.traffic_gb) {
@@ -3025,6 +3041,22 @@ async function refreshFiles () {
     dirSizes = {}
     renderRows()
   } catch (e) { toast(e.message, false) }
+  updateDiskTip()
+}
+
+// 文件页工具栏的磁盘超配额提示（只提醒不停机）
+async function updateDiskTip () {
+  try {
+    const s = await api('GET', '/panel/instance/stats')
+    const dLim = inst.disk_quota || 0
+    const tip = $('diskTip')
+    if (dLim > 0 && s.disk_used_mb != null && s.disk_used_mb > dLim) {
+      tip.textContent = '⚠ 磁盘已超配额 ' + (s.disk_used_mb / 1024).toFixed(1) + ' / ' + (dLim / 1024).toFixed(1) + ' GB'
+      tip.style.display = 'inline'
+    } else {
+      tip.style.display = 'none'
+    }
+  } catch (e) { /* 静默 */ }
 }
 
 function renderRows () {
