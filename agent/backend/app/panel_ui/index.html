@@ -223,6 +223,34 @@ svg.chart { width: 100%; height: 260px; display: block; background: var(--bg); b
 .qbtn.text-btn.danger:hover { background: #fdecec; }
 .upload-toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; }
 .upload-summary { font-size: 12px; color: #6b7480; }
+
+/* 文件列表拖拽上传提示层 */
+.table-wrap.drag-over::after {
+  content: '松开鼠标，上传到当前目录';
+  position: absolute; inset: 0; z-index: 5;
+  border: 2px dashed #10b981; border-radius: 10px;
+  background: rgba(16,185,129,.08);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 15px; font-weight: 600; color: #059669;
+  pointer-events: none;
+}
+/* 上传弹窗拖拽高亮 */
+.qmodal-body.drag-over { outline: 2px dashed #10b981; outline-offset: -6px; border-radius: 12px; background: rgba(16,185,129,.05); }
+
+/* 权限单选弹窗 */
+.perm-opt { display: flex; align-items: center; gap: 10px; padding: 11px 12px; border: 1px solid #e5e7eb; border-radius: 10px; margin-bottom: 8px; cursor: pointer; transition: border-color .15s, background .15s; }
+.perm-opt:hover { border-color: #10b981; }
+.perm-opt:has(input:checked) { border-color: #10b981; background: rgba(16,185,129,.06); }
+.perm-opt input[type=radio] { accent-color: #10b981; width: 16px; height: 16px; flex: none; margin: 0; }
+.perm-name { font-size: 13.5px; font-weight: 600; color: #24292e; }
+.perm-mode { font-size: 12px; color: #059669; background: rgba(16,185,129,.1); padding: 1px 7px; border-radius: 6px; }
+.perm-desc { font-size: 12px; color: #6b7480; margin-left: auto; }
+
+/* 编辑器加载遮罩 */
+#editLoading { position: absolute; inset: 0; z-index: 6; display: none; align-items: center; justify-content: center; flex-direction: column; gap: 12px; background: rgba(255,255,255,.92); border-radius: 10px; }
+#editLoading .spin { width: 30px; height: 30px; border: 3px solid #d1fae5; border-top-color: #10b981; border-radius: 50%; animation: spinEd .8s linear infinite; }
+#editLoading .txt { font-size: 13px; color: #6b7480; }
+@keyframes spinEd { to { transform: rotate(360deg); } }
 .up-name { max-width: 0; min-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: flex; align-items: center; gap: 6px; }
 .up-icon { flex-shrink: 0; color: #9aa3ab; width: 15px; height: 15px; }
 .up-icon.success { color: #10b981; }
@@ -615,7 +643,7 @@ function showApidoc() {
       <button data-view="logs" onclick="switchView('logs')">日志</button>
       <button data-view="ops" onclick="switchView('ops')">操作记录</button>
       <button data-view="apidoc" onclick="switchView('apidoc')">API 文档</button>
-      <div id="uiVer" style="margin-top:auto;padding:10px 13px;font-size:10.5px;color:var(--text2);opacity:.55;user-select:none">UI v20261104.14</div>
+      <div id="uiVer" style="margin-top:auto;padding:10px 13px;font-size:10.5px;color:var(--text2);opacity:.55;user-select:none">UI v20261104.15</div>
     </nav>
 
     <div class="content">
@@ -1495,7 +1523,10 @@ function showApidoc() {
           <option value="vs">亮色</option>
         </select>
       </div>
-      <div class="editor-wrap"><div id="monacoHost"></div></div>
+      <div class="editor-wrap" style="position:relative">
+        <div id="monacoHost"></div>
+        <div id="editLoading"><div class="spin"></div><div class="txt">正在从服务器加载文件内容，请稍候…</div></div>
+      </div>
     </div>
     <div class="qmodal-foot">
       <button class="qbtn" onclick="closeEdit()">取消</button>
@@ -1517,6 +1548,27 @@ function showApidoc() {
     <div class="qmodal-foot">
       <button class="qbtn" onclick="closeModal('confirmMask')">取消</button>
       <button id="cfOk" class="qbtn primary">确定</button>
+    </div>
+  </div>
+</div>
+
+<!-- 权限修改弹窗（单选，无需用户懂八进制） -->
+<div id="permMask" class="qmodal-mask">
+  <div class="qmodal" style="width:480px">
+    <div class="qmodal-head"><span class="title" id="permTitle">修改权限</span>
+      <span class="icon-close" onclick="closeModal('permMask')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></span>
+    </div>
+    <div class="qmodal-body">
+      <div style="font-size:12.5px;color:#6b7480;margin-bottom:12px">目标：<span class="mono" id="permName" style="color:#24292e;font-weight:600"></span>　当前权限 <span class="mono" id="permCur" style="color:#059669"></span></div>
+      <div id="permOpts"></div>
+      <label id="permRecRow" style="display:none;align-items:center;gap:8px;margin-top:4px;font-size:13px;color:#24292e;cursor:pointer">
+        <input type="checkbox" id="permRec" style="accent-color:#10b981;width:15px;height:15px">
+        同时应用到目录内所有子项（递归）
+      </label>
+    </div>
+    <div class="qmodal-foot">
+      <button class="qbtn" onclick="closeModal('permMask')">取消</button>
+      <button class="qbtn primary" onclick="doChmod()">确定</button>
     </div>
   </div>
 </div>
@@ -1722,7 +1774,7 @@ function showApidoc() {
       </div>
       <div id="uploadEmpty" class="up-empty">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-        <span>尚未选择文件，点击上方按钮添加</span>
+        <span>点击「选择文件」添加，或把文件拖拽到这里</span>
       </div>
     </div>
     <div class="qmodal-foot">
@@ -2870,8 +2922,12 @@ function setEditorTheme (v) {
   if (editorInst) monaco.editor.setTheme(v)
 }
 
-// 点击文件 → 弹出 VS Code 编辑区
+// 点击文件 → 弹出 VS Code 编辑区（先开弹窗显示加载状态，内容到了再渲染）
 function openFile (path) {
+  const loading = $('editLoading')
+  $('editTitle').textContent = '编辑 - ' + (path.split('/').pop() || path)
+  loading.style.display = 'flex'
+  $('editMask').classList.add('open')
   initMonaco(async () => {
     try {
       const data = await api('GET', '/panel/instance/files/content?path=' + encodeURIComponent(path))
@@ -2886,8 +2942,12 @@ function openFile (path) {
       const tv = localStorage.getItem('ppanel_edi_theme') || 'vs-dark'
       $('edTheme').value = tv
       $('edLang').textContent = LANG_NAMES[langOf(path)] || langOf(path)
-      $('editMask').classList.add('open')
-    } catch (e) { toast('打开失败：' + e.message, false) }
+      loading.style.display = 'none'
+    } catch (e) {
+      loading.style.display = 'none'
+      $('editMask').classList.remove('open')
+      toast('打开失败：' + e.message, false)
+    }
   })
 }
 function closeEdit () {
@@ -3037,9 +3097,9 @@ function rowEl (e) {
     addBtn('edit', '重命名', () => promptRename(curPath, e.name))
     addBtn('trash', '删除', () => delItems([e.name]), true)
   } else {
+    if (editable(e.name)) addBtn('edit', '编辑', () => openFile(full))
     addBtn('key', '权限', () => promptChmod(e.name, e.mode, false))
     if (isImage(e.name)) addBtn('eye', '预览', () => previewImg(e.name))
-    if (editable(e.name)) addBtn('edit', '编辑', () => openFile(full))
     addBtn('download', '下载', () => downloadFile(full))
     if (isZip(e.name)) addBtn('unzip', '解压', () => openUnzip(e.name))
     addBtn('trash', '删除', () => delItems([e.name]), true)
@@ -3320,6 +3380,34 @@ function openUploadMask () {
   renderUpList()
 }
 function pickUpFiles () { $('uploadFilesInput').value = ''; $('uploadFilesInput').click() }
+// ---------- 拖拽上传：文件列表区 + 上传弹窗内均可拖 ----------
+;(() => {
+  const wrap = document.querySelector('#v-files .table-wrap')
+  if (!wrap) return
+  const overOn = el => { ev => { ev.preventDefault(); el.classList.add('drag-over') } }
+  const overOff = el => { ev => { ev.preventDefault(); if (!el.contains(ev.relatedTarget)) el.classList.remove('drag-over') } }
+  // 文件管理页：拖文件进来直接弹上传窗并填充
+  wrap.addEventListener('dragover', overOn(wrap))
+  wrap.addEventListener('dragleave', overOff(wrap))
+  wrap.addEventListener('drop', ev => {
+    ev.preventDefault(); ev.stopPropagation()
+    wrap.classList.remove('drag-over')
+    const fl = ev.dataTransfer && ev.dataTransfer.files
+    if (!fl || !fl.length) return
+    openUploadMask()
+    onPickFiles(fl)
+  })
+  // 上传弹窗内：继续拖入追加文件
+  const body = document.querySelector('#uploadMask .qmodal-body')
+  body.addEventListener('dragover', overOn(body))
+  body.addEventListener('dragleave', overOff(body))
+  body.addEventListener('drop', ev => {
+    ev.preventDefault()
+    body.classList.remove('drag-over')
+    const fl = ev.dataTransfer && ev.dataTransfer.files
+    if (fl && fl.length) onPickFiles(fl)
+  })
+})()
 function onPickFiles (fl) {
   for (const f of fl) {
     if (upItems.some(i => i.name === f.name && i.size === f.size)) continue
@@ -3484,19 +3572,52 @@ function promptRename (dir, name) {
     } catch (e) { toast(e.message, false) }
   })
 }
+// 权限修改（单选预设，普通用户无需理解八进制）
+const PERM_PRESETS_FILE = [
+  { mode: '644', name: '可读写（推荐）', desc: '可以查看和修改内容' },
+  { mode: '755', name: '可读写 + 可执行', desc: '脚本/程序需要运行权限时选这个' },
+  { mode: '444', name: '只读', desc: '只能查看，防止误修改' },
+  { mode: '777', name: '完全开放', desc: '任何人都能改（不安全，慎选）' }
+]
+const PERM_PRESETS_DIR = [
+  { mode: '755', name: '常规（推荐）', desc: '可以进入、查看和修改内容' },
+  { mode: '555', name: '只读', desc: '只能查看，不能修改' },
+  { mode: '777', name: '完全开放', desc: '任何人都能改（不安全，慎选）' }
+]
+let permTarget = null
 function promptChmod (name, mode, isDir) {
+  permTarget = { name, isDir }
+  $('permTitle').textContent = isDir ? '修改目录权限' : '修改文件权限'
+  $('permName').textContent = name
   const cur = mode ? String(parseInt(mode, 8)) : (isDir ? '755' : '644')
-  promptInput('修改权限', '八进制权限（如 755 / 644，目录含子项勾选下一条递归）', cur, async m => {
-    if (!m) return
-    if (!/^[0-7]{1,4}$/.test(m)) { toast('权限需为八进制数字，如 755', false); return }
-    let recursive = false
-    if (isDir) recursive = confirm('同时应用到目录内所有子项（递归）？\n「确定」= 递归，「取消」= 仅本目录')
-    try {
-      const r = await api('POST', '/panel/instance/files/chmod', { path: joinPath(curPath, name), mode: m, recursive })
-      toast(r.detail || '权限已修改', true)
-      refreshFiles()
-    } catch (e) { toast(e.message, false) }
-  })
+  $('permCur').textContent = cur
+  const presets = isDir ? PERM_PRESETS_DIR : PERM_PRESETS_FILE
+  let sel = presets.findIndex(p => p.mode === cur)
+  if (sel < 0) sel = 0
+  $('permOpts').innerHTML = presets.map((p, i) => `
+    <label class="perm-opt">
+      <input type="radio" name="permOpt" value="${p.mode}" ${i === sel ? 'checked' : ''}>
+      <span class="perm-name">${p.name}</span>
+      <span class="mono perm-mode">${p.mode}</span>
+      <span class="perm-desc">${p.desc}</span>
+    </label>`).join('')
+  $('permRecRow').style.display = isDir ? 'flex' : 'none'
+  $('permRec').checked = false
+  $('permMask').classList.add('open')
+}
+async function doChmod () {
+  const sel = document.querySelector('input[name=permOpt]:checked')
+  if (!sel || !permTarget) return closeModal('permMask')
+  try {
+    const r = await api('POST', '/panel/instance/files/chmod', {
+      path: joinPath(curPath, permTarget.name),
+      mode: sel.value,
+      recursive: permTarget.isDir && $('permRec').checked
+    })
+    toast(r.detail || '权限已修改', true)
+    closeModal('permMask')
+    refreshFiles()
+  } catch (e) { toast(e.message, false) }
 }
 function promptNewFile () {
   promptInput('新建文件', '文件名', '', async name => {
