@@ -1,5 +1,6 @@
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { api, errText } from '../api/client'
 import { toastErr, toastOk } from '../components/ui/toast'
 import UIButton from './ui/UIButton.vue'
@@ -22,9 +23,18 @@ const props = defineProps({
   node: { type: Object, default: null } // { id, name }
 })
 const emit = defineEmits(['update:open'])
+const router = useRouter()
 
 const view = ref('overview')
 const np = () => ({ node: String(props.node?.id || '') })
+
+// 容器行 → 跳到实例管理并按下钻关键字过滤（关闭当前节点弹窗）
+function gotoInstance (c) {
+  const kw = c.inst_name || c.owner
+  if (!kw) return
+  emit('update:open', false)
+  router.push({ path: '/manage', query: { keyword: kw } })
+}
 
 // ---------- 概览（资源仪表盘） ----------
 const info = ref(null)
@@ -1553,10 +1563,18 @@ onUnmounted(() => {
             <UIButton type="ghost" @click="loadContainers">刷新</UIButton>
           </div>
           <table class="ftable">
-            <thead><tr><th>名称</th><th>镜像</th><th>状态</th><th>端口</th><th /></tr></thead>
+            <thead><tr><th>名称</th><th style="width:158px">归属用户 / 实例名称</th><th>镜像</th><th>状态</th><th>端口</th><th /></tr></thead>
             <tbody>
               <tr v-for="c in containers" :key="c.id">
                 <td class="mono">{{ c.name }} <UITag v-if="c.is_panel" tone="primary">面板实例</UITag></td>
+                <td>
+                  <template v-if="c.owner">
+                    <button class="cont-link" @click="gotoInstance(c)"
+                            :title="`归属用户：${c.owner}（ID ${c.owner_id}）· 点击到实例管理查看`">{{ c.owner }}</button>
+                    <div class="cont-sub" :title="c.inst_name">实例名：{{ c.inst_name || '未命名' }}</div>
+                  </template>
+                  <span v-else class="cont-none" title="平台服务或自行创建的容器，不归属任何实例">— <span>平台 / 自建</span></span>
+                </td>
                 <td class="mono dim">{{ c.image }}</td>
                 <td><StatusDot :status="c.state" /></td>
                 <td class="mono dim">{{ c.ports }}</td>
@@ -1570,7 +1588,7 @@ onUnmounted(() => {
                   <UIButton type="text" class="danger" @click="askDelContainer(c)">删除</UIButton>
                 </td>
               </tr>
-              <tr v-if="!containers.length"><td colspan="5" class="empty">暂无容器</td></tr>
+              <tr v-if="!containers.length"><td colspan="6" class="empty">暂无容器</td></tr>
             </tbody>
           </table>
         </div>
@@ -2360,6 +2378,14 @@ table.ftable { width: 100%; border-collapse: collapse; font-size: 13px; }
 .ftable tbody tr { cursor: default; }
 .ftable tbody tr:hover td { background: color-mix(in srgb, var(--primary) 4%, transparent); }
 .ftable tbody tr.selected td { background: color-mix(in srgb, var(--primary) 10%, transparent); }
+/* 容器归属：用户名可点击下钻，第二行是用户自定义的实例名 */
+.cont-link { background: none; border: 0; padding: 0; font: inherit; font-size: 12.5px;
+  color: var(--primary); cursor: pointer; text-align: left; }
+.cont-link:hover { text-decoration: underline; }
+.cont-sub { margin-top: 2px; font-size: 11.5px; color: var(--text-dim);
+  max-width: 152px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cont-none { color: var(--text-dim); font-size: 12px; }
+.cont-none span { font-size: 11px; margin-left: 4px; opacity: .75; }
 .empty { text-align: center; color: var(--text-dim); padding: 26px 0 !important; }
 .bk-pager { justify-content: flex-end; margin-top: 10px; }
 .ops { white-space: nowrap; text-align: right; }

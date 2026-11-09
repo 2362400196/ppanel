@@ -1,5 +1,6 @@
 <script setup>
 import { onMounted, onUnmounted, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { api, errText } from '../api/client'
 import { startTask } from '../api/tasks'
 import { fmtTime } from '../utils/format'
@@ -27,7 +28,9 @@ const instCols = [
   { key: 'created_at', label: '创建时间', width: '170px' },
   { key: 'ops', label: '', width: '210px' }
 ]
-const keyword = ref('')
+// 支持从「节点管理 → 容器」下钻跳转：/manage?keyword=实例名或用户名
+const route = useRoute()
+const keyword = ref(String(route.query.keyword || ''))
 
 // 搜索下推到后端（实例名 / 节点名 / 归属用户名），300ms 防抖
 let kwTimer
