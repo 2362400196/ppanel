@@ -12,6 +12,7 @@ import UITable from './ui/UITable.vue'
 import UITag from './ui/UITag.vue'
 import StatusDot from './ui/StatusDot.vue'
 import ConfirmDialog from './ui/ConfirmDialog.vue'
+import LineChart from './LineChart.vue'
 import CodeEditor from './CodeEditor.vue'
 import HostTerminal from './HostTerminal.vue'
 import NodeSysOps from './NodeSysOps.vue'
@@ -885,6 +886,13 @@ async function doSystemPrune() {
 // ---------- 打开/关闭 ----------
 const navs = [
   { key: 'overview', label: '概览' },
+  { key: 'monitor', label: '监控曲线' },
+  { key: 'process', label: '进程管理' },
+  { key: 'ports', label: '端口监听' },
+  { key: 'services', label: '系统服务' },
+  { key: 'logs', label: '日志中心' },
+  { key: 'logins', label: '登录审计' },
+  { key: 'alerts', label: '告警设置' },
   { key: 'containers', label: '容器' },
   { key: 'images', label: '镜像' },
   { key: 'files', label: '文件管理' },
@@ -903,8 +911,10 @@ watch(() => props.open, v => {
   ensureIconfont()
   syncPoll()
   loadStability()
+  loadCerts()
 })
 watch(view, v => {
+  stopMonPoll(); stopProcPoll(); stopJcFollow()
   if (v === 'containers') loadContainers()
   else if (v === 'images') loadImages()
   else if (v === 'files') { if (!entries.value.length) loadFiles(curPath.value) }
@@ -913,6 +923,13 @@ watch(view, v => {
   else if (v === 'sec') loadSec()
   else if (v === 'mysql') loadMysql()
   else if (v === 'backup') { bkPage.value = 1; loadBackups(); loadBkDbs(); loadBjJobs(); if (!containers.value.length) loadContainers(); loadMysql() }
+  else if (v === 'monitor') { loadMonitor(); loadTraffic(); startMonPoll() }
+  else if (v === 'process') { loadProcesses(); startProcPoll() }
+  else if (v === 'ports') loadPorts()
+  else if (v === 'services') loadServices()
+  else if (v === 'logs') { ensureJcSources(); loadJcText() }
+  else if (v === 'logins') loadLogins()
+  else if (v === 'alerts') loadAlerts()
   syncPoll()
 })
 
@@ -1465,6 +1482,330 @@ async function doSecUnban() {
   }
 }
 
+// ============================================================
+// 运维监控：监控曲线 / 进程 / 端口 / 服务 / 日志 / 登录审计 / 告警
+// ============================================================
+
+// ---------- 监控曲线（24h / 7d 时序 + 流量统计） ----------
+const monWin = ref(24)
+const monData = ref(null)          // { points, totals, bucket_min }
+const traffic = ref(null)          // { interfaces, totals_24h }
+let monTimer = null
+
+async function loadMonitor() {
+  try {
+    monData.value = (await api.get('/host/metrics',
+      { params: { ...np(), hours: monWin.value } })).data
+  } catch (e) {
+    const s = e?.response?.status
+    if (s !== 404) toastErr(errText(e))
+    monData.value = { points: [], totals: { rx_mb: 0, tx_mb: 0 } }
+  }
+}
+async function loadTraffic() {
+  try { traffic.value = (await api.get('/host/traffic', { params: np() })).data }
+  catch (e) { traffic.value = null }
+}
+function startMonPoll() {
+  if (!monTimer) monTimer = setInterval(() => { loadMonitor(); loadTraffic() }, 60000)
+}
+function stopMonPoll() {
+  if (monTimer) { clearInterval(monTimer); monTimer = null }
+}
+watch(monWin, () => { if (view.value === 'monitor') loadMonitor() })
+
+const monSpan = computed(() => monWin.value > 24 ? '7d' : '24h')
+const monPts = computed(() => monData.value?.points || [])
+const NET_C = '#2fb59f', WARN_C = '#f59e0b', DANGER_C = '#e5484d'
+const rxTotal = computed(() => fmtSize((monData.value?.totals?.rx_mb || 0) * 1048576))
+const txTotal = computed(() => fmtSize((monData.value?.totals?.tx_mb || 0) * 1048576))
+
+// ---------- 进程管理（排行 + 终止） ----------
+const procRows = ref([])
+const procSort = ref('cpu')
+const procLoading = ref(false)
+let procTimer = null
+const killOpen = ref(false)
+const killTarget = ref(null)
+const killSig = ref('TERM')
+
+async function loadProcesses() {
+  procLoading.value = true
+  try {
+    procRows.value = (await api.get('/host/processes',
+      { params: { ...np(), sort: procSort.value } })).data.rows || []
+  } catch (e) {
+    procRows.value = []
+    toastErr(errText(e))
+  } finally { procLoading.value = false }
+}
+function startProcPoll() {
+  if (!procTimer) procTimer = setInterval(() => loadProcesses(), 8000)
+}
+function stopProcPoll() {
+  if (procTimer) { clearInterval(procTimer); procTimer = null }
+}
+function askKill(r) {
+  killTarget.value = r
+  killSig.value = 'TERM'
+  killOpen.value = true
+}
+async function doKill() {
+  const r = killTarget.value
+  killOpen.value = false
+  if (!r) return
+  try {
+    const { data } = await api.post('/host/processes/kill',
+      { pid: r.pid, sig: killSig.value }, { params: np() })
+    toastOk(data.detail || '已发送信号')
+    loadProcesses()
+  } catch (e) { toastErr(errText(e)) }
+}
+watch(procSort, () => { if (view.value === 'process') loadProcesses() })
+
+// ---------- 端口监听（实时 ss） ----------
+const portRows = ref([])
+const portLoading = ref(false)
+const portQuery = ref('')
+async function loadPorts() {
+  portLoading.value = true
+  try {
+    portRows.value = (await api.get('/host/ports', { params: np() })).data.rows || []
+  } catch (e) {
+    portRows.value = []
+    toastErr(errText(e))
+  } finally { portLoading.value = false }
+}
+const portFiltered = computed(() => {
+  const q = portQuery.value.trim().toLowerCase()
+  if (!q) return portRows.value
+  return portRows.value.filter(r =>
+    r.port.includes(q) || r.addr.toLowerCase().includes(q) ||
+    r.process.toLowerCase().includes(q))
+})
+
+// ---------- 系统服务（systemd） ----------
+const svcRows = ref([])
+const svcLoading = ref(false)
+const svcSearch = ref('')
+const svcBusy = ref('')
+const svcConfirmOpen = ref(false)
+const svcPending = ref(null)       // { unit, action }
+
+async function loadServices() {
+  svcLoading.value = true
+  try {
+    svcRows.value = (await api.get('/host/services', { params: np() })).data.rows || []
+  } catch (e) {
+    svcRows.value = []
+    toastErr(errText(e))
+  } finally { svcLoading.value = false }
+}
+const svcFiltered = computed(() => {
+  const q = svcSearch.value.trim().toLowerCase()
+  if (!q) return svcRows.value
+  return svcRows.value.filter(r =>
+    r.unit.toLowerCase().includes(q) || r.desc.toLowerCase().includes(q))
+})
+function askSvc(u, action) {
+  // stop / restart 影响运行中的服务，先确认；start / enable / disable 直接执行
+  if (action === 'stop' || action === 'restart') {
+    svcPending.value = { unit: u, action }
+    svcConfirmOpen.value = true
+    return
+  }
+  doSvc(u, action)
+}
+async function doSvc(u, action) {
+  svcBusy.value = u
+  try {
+    const { data } = await api.post(`/host/services/${u}/${action}`, null, { params: np() })
+    toastOk(data.detail || '已执行')
+    loadServices()
+  } catch (e) { toastErr(errText(e)) }
+  finally { svcBusy.value = '' }
+}
+
+// ---------- 日志中心（journalctl + 容器日志；jc 前缀避免与容器日志弹窗冲突） ----------
+const jcKind = ref('journal')      // journal / container
+const jcUnit = ref('')
+const jcCont = ref('')
+const jcTail = ref(200)
+const jcText = ref('')
+const jcLoading = ref(false)
+const jcFollow = ref(false)
+let jcTimer = null
+
+const jcUnitOpts = computed(() => [
+  { value: '', label: '全部系统日志' },
+  ...svcRows.value.map(s => ({ value: s.unit, label: s.unit }))
+])
+const jcContOpts = computed(() => containers.value.map(c =>
+  ({ value: c.id, label: `${c.name}（${c.state === 'running' ? '运行中' : '已停止'}）` })))
+
+async function ensureJcSources() {
+  const jobs = []
+  if (!svcRows.value.length) jobs.push(loadServices())
+  if (!containers.value.length) jobs.push(loadContainers())
+  await Promise.all(jobs)
+  if (jcKind.value === 'container' && !jcCont.value) {
+    const running = containers.value.find(c => c.state === 'running') || containers.value[0]
+    if (running) jcCont.value = running.id
+  }
+}
+async function loadJcText() {
+  jcLoading.value = true
+  try {
+    if (jcKind.value === 'journal') {
+      const { data } = await api.get('/host/journal',
+        { params: { ...np(), unit: jcUnit.value, lines: jcTail.value }, timeout: 30000 })
+      jcText.value = data.text || '(无日志)'
+    } else {
+      if (!jcCont.value) { jcText.value = '暂无容器可选'; return }
+      const { data } = await api.get(`/docker/containers/${jcCont.value}/logs`,
+        { params: { ...np(), tail: jcTail.value }, timeout: 30000 })
+      jcText.value = data.logs || '(无日志)'
+    }
+  } catch (e) {
+    jcText.value = '加载失败：' + errText(e)
+  } finally { jcLoading.value = false }
+}
+function toggleJcFollow() {
+  jcFollow.value = !jcFollow.value
+  if (jcFollow.value) {
+    loadJcText()
+    jcTimer = setInterval(loadJcText, 4000)
+  } else stopJcFollow()
+}
+function stopJcFollow() {
+  jcFollow.value = false
+  if (jcTimer) { clearInterval(jcTimer); jcTimer = null }
+}
+watch([jcKind, jcUnit, jcCont], () => {
+  if (view.value === 'logs') { stopJcFollow(); loadJcText() }
+})
+
+// ---------- 登录审计（last / lastb） ----------
+const logins = ref(null)
+const loginsTab = ref('ok')
+const loginsLoading = ref(false)
+const LOGIN_STATUS = { online: ['在线', 'ok'], logout: ['已退出', 'dim'], abnormal: ['异常断开', 'warn'] }
+
+async function loadLogins() {
+  loginsLoading.value = true
+  try { logins.value = (await api.get('/host/logins', { params: np() })).data }
+  catch (e) {
+    logins.value = { logins: [], failed: [], available: false }
+    toastErr(errText(e))
+  } finally { loginsLoading.value = false }
+}
+
+// ---------- 告警设置（阈值 + Webhook 推送） ----------
+const alertCfg = reactive({
+  enabled: false, cpu_threshold: 90, mem_threshold: 90, disk_threshold: 90,
+  webhook_type: '', webhook_url: '', webhook_extra: '', quiet_minutes: 10
+})
+const alertLogs = ref([])
+const alertSaving = ref(false)
+const alertTesting = ref(false)
+const webhookTypeOpts = [
+  { value: '', label: '不推送（仅记录）' },
+  { value: 'feishu', label: '飞书群机器人' },
+  { value: 'dingtalk', label: '钉钉群机器人' },
+  { value: 'telegram', label: 'Telegram Bot' },
+  { value: 'custom', label: '自定义 Webhook' }
+]
+const webhookPlaceholder = computed(() => ({
+  feishu: 'https://open.feishu.cn/open-apis/bot/v2/hook/xxxx',
+  dingtalk: 'https://oapi.dingtalk.com/robot/send?access_token=xxxx',
+  telegram: 'https://api.telegram.org/bot<token>/sendMessage',
+  custom: 'https://example.com/hook（POST JSON：{"message": ...}）'
+}[alertCfg.webhook_type] || ''))
+const webhookExtraLabel = computed(() => ({
+  feishu: '签名密钥（自定义安全设置时必填）',
+  dingtalk: '签名密钥（安全设置为加签时必填）',
+  telegram: 'Chat ID（必填）',
+  custom: '附加参数（可选）'
+}[alertCfg.webhook_type] || ''))
+
+async function loadAlerts() {
+  try {
+    const { data } = await api.get('/host/alerts', { params: np() })
+    Object.assign(alertCfg, data.config)
+    alertLogs.value = data.logs || []
+  } catch (e) {
+    const s = e?.response?.status
+    if (s !== 404) toastErr(errText(e))
+    alertLogs.value = []
+  }
+}
+async function saveAlerts() {
+  alertSaving.value = true
+  try {
+    const { data } = await api.put('/host/alerts', { ...alertCfg }, { params: np() })
+    toastOk(data.detail || '已保存')
+    loadAlerts()
+  } catch (e) { toastErr(errText(e)) }
+  finally { alertSaving.value = false }
+}
+async function testWebhook() {
+  alertTesting.value = true
+  try {
+    const { data } = await api.post('/host/alerts/test', null, { params: np() })
+    toastOk(data.detail || '测试消息已发送')
+  } catch (e) { toastErr(errText(e)) }
+  finally { alertTesting.value = false }
+}
+async function clearAlertLogs() {
+  try {
+    const { data } = await api.delete('/host/alerts/logs', { params: np() })
+    toastOk(data.detail || '已清空')
+    loadAlerts()
+  } catch (e) { toastErr(errText(e)) }
+}
+function fmtAlertTs(s) {
+  return fmtISO(s)  // 复用备份模块的 UTC 时间格式化
+}
+
+// ---------- 容器实时资源（docker stats 快照，可开关 4s 轮询） ----------
+const contStats = ref(null)        // name → stats row
+const contStatsOn = ref(false)
+let contStatsTimer = null
+
+async function loadContStats() {
+  try {
+    const rows = (await api.get('/docker/stats', { params: np(), timeout: 45000 })).data
+    const map = {}
+    for (const r of rows || []) map[r.name] = r
+    contStats.value = map
+  } catch (e) { /* stats 快照失败不打断容器列表 */ }
+}
+function toggleContStats() {
+  contStatsOn.value = !contStatsOn.value
+  if (contStatsOn.value) {
+    loadContStats()
+    contStatsTimer = setInterval(loadContStats, 4000)
+  } else {
+    if (contStatsTimer) clearInterval(contStatsTimer)
+    contStatsTimer = null
+    contStats.value = null
+  }
+}
+function statOf(name) {
+  return contStatsOn.value ? (contStats.value || {})[name] : null
+}
+
+// ---------- SSL 证书到期（概览卡片） ----------
+const certs = ref(null)            // rows | null
+async function loadCerts() {
+  try {
+    certs.value = (await api.get('/host/certs', { params: np(), timeout: 30000 })).data.rows || []
+  } catch (e) { certs.value = null }
+}
+function certTone(d) {
+  return d == null ? 'dim' : d <= 7 ? 'danger' : d <= 30 ? 'warn' : 'ok'
+}
+
 onMounted(() => {
   ensureIconfont()
   document.addEventListener('mousedown', onDocMouseDown)
@@ -1474,6 +1815,8 @@ onMounted(() => {
 })
 onUnmounted(() => {
   if (statTimer) clearInterval(statTimer)
+  stopMonPoll(); stopProcPoll(); stopJcFollow()
+  if (contStatsTimer) clearInterval(contStatsTimer)
   document.removeEventListener('mousedown', onDocMouseDown)
   document.removeEventListener('keydown', onGlobalKey)
   window.removeEventListener('scroll', closeCtx, true)
@@ -1554,16 +1897,275 @@ onUnmounted(() => {
             </template>
             <p v-else class="hint-text">评分数据加载中…</p>
           </div>
+
+          <!-- SSL 证书到期 -->
+          <div class="stab-card">
+            <div class="bar">
+              <span class="hint-text">SSL 证书（Caddy 站点与实例域名）</span>
+              <span class="sp" />
+              <UIButton type="ghost" @click="loadCerts">刷新</UIButton>
+            </div>
+            <table v-if="certs && certs.length" class="ftable">
+              <thead><tr><th>域名</th><th>到期时间</th><th>剩余</th></tr></thead>
+              <tbody>
+                <tr v-for="c in certs" :key="c.domain">
+                  <td class="mono">{{ c.domain }}</td>
+                  <td class="mono dim">{{ c.not_after || '-' }}</td>
+                  <td>
+                    <UITag :tone="certTone(c.days_left)">
+                      {{ c.days_left == null ? '检测失败' : (c.days_left < 0 ? '已过期' : c.days_left + ' 天') }}
+                    </UITag>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+            <p v-else class="hint-text">暂无绑定域名的站点（检测失败时请检查域名解析与 443 端口）。</p>
+          </div>
+        </div>
+
+        <!-- 监控曲线（24h / 7d 时序 + 流量统计） -->
+        <div v-else-if="view === 'monitor'">
+          <div class="bar">
+            <div class="win-chips">
+              <button v-for="w in [{ v: 24, l: '24小时' }, { v: 168, l: '7天' }]" :key="w.v"
+                      class="win-chip" :class="{ active: monWin === w.v }" @click="monWin = w.v">
+                {{ w.l }}
+              </button>
+            </div>
+            <span class="sp" />
+            <span v-if="monData" class="dim mono">24h 收 {{ rxTotal }} / 发 {{ txTotal }}</span>
+            <UIButton type="ghost" @click="loadMonitor">刷新</UIButton>
+          </div>
+          <div class="mon-grid">
+            <LineChart :points="monPts" :height="150" :span="monSpan"
+                       :series="[{ key: 'cpu', label: 'CPU %', color: NET_C, max: 100 }]" />
+            <LineChart :points="monPts" :height="150" :span="monSpan"
+                       :series="[{ key: 'mem', label: '内存 %', color: WARN_C, max: 100 }]" />
+            <LineChart :points="monPts" :height="150" :span="monSpan"
+                       :series="[{ key: 'disk', label: '磁盘 %', color: DANGER_C, max: 100 }]" />
+            <LineChart :points="monPts" :height="150" :span="monSpan"
+                       :series="[{ key: 'rx_rate', label: '下载 KB/s', color: NET_C },
+                                 { key: 'tx_rate', label: '上传 KB/s', color: WARN_C }]" />
+          </div>
+          <p class="hint-text">被控每分钟采样一次（CPU / 内存 / 磁盘 / 网络速率），数据保留 7 天；节点刚接入时曲线需等待积累。</p>
+
+          <h3 class="set-title">网卡累计流量</h3>
+          <table v-if="traffic && traffic.interfaces.length" class="ftable">
+            <thead><tr><th>网卡</th><th>累计接收</th><th>累计发送</th></tr></thead>
+            <tbody>
+              <tr v-for="it in traffic.interfaces" :key="it.name">
+                <td class="mono">{{ it.name }}</td>
+                <td class="mono">{{ fmtSize(it.rx_mb * 1048576) }}</td>
+                <td class="mono">{{ fmtSize(it.tx_mb * 1048576) }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <p v-else class="hint-text">未读到物理网卡流量数据。</p>
+        </div>
+
+        <!-- 进程管理（排行 + 终止） -->
+        <div v-else-if="view === 'process'">
+          <div class="bar">
+            <span class="hint-text">每 8 秒自动刷新，按占用排序（前 200）</span>
+            <span class="sp" />
+            <UISelect v-model="procSort" class="w130"
+                      :options="[{ value: 'cpu', label: 'CPU 排序' }, { value: 'mem', label: '内存排序' }]" />
+            <UIButton type="ghost" :loading="procLoading" @click="loadProcesses">刷新</UIButton>
+          </div>
+          <table class="ftable">
+            <thead><tr>
+              <th>PID</th><th>用户</th><th>CPU</th><th>内存</th><th>常驻内存</th><th>命令</th><th />
+            </tr></thead>
+            <tbody>
+              <tr v-for="p in procRows" :key="p.pid">
+                <td class="mono">{{ p.pid }}</td>
+                <td class="mono dim">{{ p.user }}</td>
+                <td class="mono" :class="{ 'danger-text': p.cpu >= 60 }">{{ p.cpu }}%</td>
+                <td class="mono" :class="{ 'danger-text': p.mem >= 60 }">{{ p.mem }}%</td>
+                <td class="mono dim">{{ p.rss_mb }} MB</td>
+                <td class="mono dim cmd-cell" :title="p.cmd">{{ p.cmd }}</td>
+                <td class="ops">
+                  <UIButton type="text" class="danger" @click="askKill(p)">终止</UIButton>
+                </td>
+              </tr>
+              <tr v-if="!procRows.length"><td colspan="7" class="empty">暂无数据</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- 端口监听（ss 实时状态） -->
+        <div v-else-if="view === 'ports'">
+          <div class="bar">
+            <span class="hint-text">共 {{ portFiltered.length }} 个监听端口</span>
+            <span class="sp" />
+            <UIInput v-model="portQuery" placeholder="搜索端口 / 进程 / 地址" class="w220" />
+            <UIButton type="ghost" :loading="portLoading" @click="loadPorts">刷新</UIButton>
+          </div>
+          <table class="ftable">
+            <thead><tr><th>协议</th><th>端口</th><th>监听地址</th><th>进程</th><th>PID</th></tr></thead>
+            <tbody>
+              <tr v-for="(r, i) in portFiltered" :key="i">
+                <td><UITag :tone="r.proto === 'tcp' ? 'primary' : 'dim'">{{ r.proto }}</UITag></td>
+                <td class="mono">{{ r.port }}</td>
+                <td class="mono dim">{{ r.addr }}</td>
+                <td class="mono">{{ r.process }}</td>
+                <td class="mono dim">{{ r.pid || '-' }}</td>
+              </tr>
+              <tr v-if="!portFiltered.length"><td colspan="5" class="empty">暂无监听端口</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- 系统服务（systemd） -->
+        <div v-else-if="view === 'services'">
+          <div class="bar">
+            <span class="hint-text">共 {{ svcFiltered.length }} 个服务</span>
+            <span class="sp" />
+            <UIInput v-model="svcSearch" placeholder="搜索服务名 / 描述" class="w220" />
+            <UIButton type="ghost" :loading="svcLoading" @click="loadServices">刷新</UIButton>
+          </div>
+          <table class="ftable">
+            <thead><tr><th>服务</th><th>状态</th><th>描述</th><th /></tr></thead>
+            <tbody>
+              <tr v-for="s in svcFiltered" :key="s.unit">
+                <td class="mono">{{ s.unit }}</td>
+                <td><StatusDot :status="s.active === 'active' ? 'running' : 'exited'" />
+                  {{ s.active === 'active' ? '运行中' : (s.active === 'failed' ? '失败' : '已停止') }}</td>
+                <td class="dim desc-cell" :title="s.desc">{{ s.desc }}</td>
+                <td class="ops">
+                  <template v-if="s.active === 'active'">
+                    <UIButton type="text" :loading="svcBusy === s.unit" @click="askSvc(s.unit, 'restart')">重启</UIButton>
+                    <UIButton type="text" class="danger" :loading="svcBusy === s.unit" @click="askSvc(s.unit, 'stop')">停止</UIButton>
+                  </template>
+                  <UIButton v-else type="text" :loading="svcBusy === s.unit" @click="askSvc(s.unit, 'start')">启动</UIButton>
+                </td>
+              </tr>
+              <tr v-if="!svcFiltered.length"><td colspan="4" class="empty">暂无服务</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- 日志中心（journalctl + 容器日志） -->
+        <div v-else-if="view === 'logs'" class="logview">
+          <div class="bar">
+            <UISelect v-model="jcKind" class="w130"
+                      :options="[{ value: 'journal', label: '系统日志' }, { value: 'container', label: '容器日志' }]" />
+            <UISelect v-if="jcKind === 'journal'" v-model="jcUnit" class="w240" :options="jcUnitOpts" />
+            <UISelect v-else v-model="jcCont" class="w240" :options="jcContOpts" />
+            <UISelect v-model="jcTail" class="w110"
+                      :options="[{ value: 100, label: '100 行' }, { value: 200, label: '200 行' },
+                                 { value: 500, label: '500 行' }, { value: 1000, label: '1000 行' }]" />
+            <span class="sp" />
+            <button class="win-chip" :class="{ active: jcFollow }" @click="toggleJcFollow">自动刷新</button>
+            <UIButton type="ghost" :loading="jcLoading" @click="loadJcText">刷新</UIButton>
+          </div>
+          <pre class="log-box mono">{{ jcText }}</pre>
+        </div>
+
+        <!-- 登录审计（last / lastb） -->
+        <div v-else-if="view === 'logins'">
+          <div class="bar">
+            <div class="win-chips">
+              <button class="win-chip" :class="{ active: loginsTab === 'ok' }" @click="loginsTab = 'ok'">登录记录</button>
+              <button class="win-chip" :class="{ active: loginsTab === 'bad' }" @click="loginsTab = 'bad'">失败尝试</button>
+            </div>
+            <span class="sp" />
+            <UIButton type="ghost" :loading="loginsLoading" @click="loadLogins">刷新</UIButton>
+          </div>
+          <table v-if="logins" class="ftable">
+            <thead><tr><th>用户</th><th>终端</th><th>来源</th><th>时间</th><th>状态</th></tr></thead>
+            <tbody>
+              <template v-if="loginsTab === 'ok'">
+                <tr v-for="(l, i) in logins.logins" :key="i">
+                  <td class="mono">{{ l.user }}</td>
+                  <td class="mono dim">{{ l.tty }}</td>
+                  <td class="mono">{{ l.source }}</td>
+                  <td class="mono dim">{{ l.time }}</td>
+                  <td><UITag :tone="LOGIN_STATUS[l.status]?.[1] || 'dim'">{{ LOGIN_STATUS[l.status]?.[0] || l.tail }}</UITag></td>
+                </tr>
+                <tr v-if="!logins.logins.length"><td colspan="5" class="empty">暂无登录记录</td></tr>
+              </template>
+              <template v-else>
+                <tr v-for="(l, i) in logins.failed" :key="i">
+                  <td class="mono">{{ l.user }}</td>
+                  <td class="mono dim">{{ l.tty }}</td>
+                  <td class="mono">{{ l.source }}</td>
+                  <td class="mono dim">{{ l.time }}</td>
+                  <td><UITag tone="danger">登录失败</UITag></td>
+                </tr>
+                <tr v-if="!logins.failed.length"><td colspan="5" class="empty">暂无失败尝试（btmp 为空）</td></tr>
+              </template>
+            </tbody>
+          </table>
+          <p v-else class="hint-text">加载中…</p>
+        </div>
+
+        <!-- 告警设置（阈值 + Webhook 推送） -->
+        <div v-else-if="view === 'alerts'">
+          <h3 class="set-title">阈值告警</h3>
+          <div class="set-card">
+            <div class="set-row">
+              <label class="check-line">
+                <input v-model="alertCfg.enabled" type="checkbox">
+                <span>启用阈值告警（每分钟随采样检测，同一指标静默期内不重复推送）</span>
+              </label>
+            </div>
+            <div class="af-grid">
+              <label class="p-field"><span>CPU 阈值（%）</span><UIInput v-model.number="alertCfg.cpu_threshold" type="number" /></label>
+              <label class="p-field"><span>内存阈值（%）</span><UIInput v-model.number="alertCfg.mem_threshold" type="number" /></label>
+              <label class="p-field"><span>磁盘阈值（%）</span><UIInput v-model.number="alertCfg.disk_threshold" type="number" /></label>
+              <label class="p-field"><span>静默时长（分钟）</span><UIInput v-model.number="alertCfg.quiet_minutes" type="number" /></label>
+            </div>
+          </div>
+
+          <h3 class="set-title">Webhook 推送</h3>
+          <div class="set-card">
+            <div class="af-grid">
+              <label class="p-field"><span>推送渠道</span><UISelect v-model="alertCfg.webhook_type" :options="webhookTypeOpts" /></label>
+              <label class="p-field"><span>{{ webhookExtraLabel }}</span><UIInput v-model="alertCfg.webhook_extra" /></label>
+            </div>
+            <label class="p-field"><span>Webhook 地址</span><UIInput v-model="alertCfg.webhook_url" :placeholder="webhookPlaceholder" /></label>
+            <div class="set-row">
+              <UIButton :loading="alertSaving" @click="saveAlerts">保存配置</UIButton>
+              <UIButton type="ghost" :loading="alertTesting" @click="testWebhook">发送测试消息</UIButton>
+            </div>
+            <p class="form-tip">自定义渠道会收到 POST JSON：{"event": "ppanel_host_alert", "message": "..."}</p>
+          </div>
+
+          <h3 class="set-title">告警记录</h3>
+          <div class="set-row">
+            <UIButton type="ghost" @click="clearAlertLogs">清空记录</UIButton>
+          </div>
+          <table class="ftable">
+            <thead><tr><th>时间</th><th>指标</th><th>数值</th><th>阈值</th><th>推送</th></tr></thead>
+            <tbody>
+              <tr v-for="l in alertLogs" :key="l.ts + l.metric">
+                <td class="mono dim">{{ fmtAlertTs(l.ts) }}</td>
+                <td><UITag :tone="l.metric === 'cpu' ? 'primary' : l.metric === 'mem' ? 'warn' : 'danger'">
+                  {{ l.metric === 'cpu' ? 'CPU' : l.metric === 'mem' ? '内存' : '磁盘' }}</UITag></td>
+                <td class="mono">{{ l.value }}%</td>
+                <td class="mono dim">{{ l.threshold }}%</td>
+                <td><UITag :tone="l.sent ? 'ok' : 'dim'">{{ l.sent ? '已推送' : '仅记录' }}</UITag></td>
+              </tr>
+              <tr v-if="!alertLogs.length"><td colspan="5" class="empty">暂无告警记录</td></tr>
+            </tbody>
+          </table>
         </div>
 
         <!-- 容器 -->
         <div v-else-if="view === 'containers'">
           <div class="bar">
             <span class="hint-text">共 {{ containers.length }} 个容器</span>
+            <span class="sp" />
+            <button class="win-chip" :class="{ active: contStatsOn }" @click="toggleContStats">实时资源</button>
             <UIButton type="ghost" @click="loadContainers">刷新</UIButton>
           </div>
           <table class="ftable">
-            <thead><tr><th>名称</th><th style="width:158px">归属用户 / 实例名称</th><th>镜像</th><th>状态</th><th>端口</th><th /></tr></thead>
+            <thead><tr>
+              <th>名称</th><th style="width:158px">归属用户 / 实例名称</th><th>镜像</th><th>状态</th>
+              <th v-if="contStatsOn">CPU</th><th v-if="contStatsOn">内存</th><th v-if="contStatsOn">网络 IO</th>
+              <th v-else>端口</th><th />
+            </tr></thead>
             <tbody>
               <tr v-for="c in containers" :key="c.id">
                 <td class="mono">{{ c.name }} <UITag v-if="c.is_panel" tone="primary">面板实例</UITag></td>
@@ -1577,7 +2179,15 @@ onUnmounted(() => {
                 </td>
                 <td class="mono dim">{{ c.image }}</td>
                 <td><StatusDot :status="c.state" /></td>
-                <td class="mono dim">{{ c.ports }}</td>
+                <template v-if="contStatsOn">
+                  <td class="mono">{{ statOf(c.name)?.cpu_percent != null ? statOf(c.name).cpu_percent + '%' : '-' }}</td>
+                  <td class="mono">
+                    <template v-if="statOf(c.name)">{{ statOf(c.name).mem_usage }}（{{ statOf(c.name).mem_percent }}%）</template>
+                    <template v-else>-</template>
+                  </td>
+                  <td class="mono dim">{{ statOf(c.name)?.net_io || '-' }}</td>
+                </template>
+                <td v-else class="mono dim">{{ c.ports }}</td>
                 <td class="ops">
                   <UIButton v-if="c.state !== 'running'" type="text" @click="contAction(c, 'start')">启动</UIButton>
                   <template v-else>
@@ -1588,7 +2198,7 @@ onUnmounted(() => {
                   <UIButton type="text" class="danger" @click="askDelContainer(c)">删除</UIButton>
                 </td>
               </tr>
-              <tr v-if="!containers.length"><td colspan="6" class="empty">暂无容器</td></tr>
+              <tr v-if="!containers.length"><td :colspan="contStatsOn ? 8 : 6" class="empty">暂无容器</td></tr>
             </tbody>
           </table>
         </div>
@@ -2266,6 +2876,16 @@ onUnmounted(() => {
                    message="解封后该 IP 可立即重新连接 SSH。确定解封吗？"
                    confirm-text="解封" @confirm="doSecUnban" />
 
+    <!-- 进程终止确认 -->
+    <ConfirmDialog v-model:open="killOpen" :title="`终止进程 ${killTarget?.pid}`"
+                   :message="`确定向进程 ${killTarget?.pid}（${killTarget?.cmd?.slice(0, 60) || ''}）发送 ${killSig} 信号吗？`"
+                   confirm-text="终止" danger @confirm="doKill" />
+
+    <!-- 系统服务停止/重启确认 -->
+    <ConfirmDialog v-model:open="svcConfirmOpen" :title="`${svcPending?.action === 'stop' ? '停止' : '重启'}服务`"
+                   :message="`确定${svcPending?.action === 'stop' ? '停止' : '重启'}「${svcPending?.unit}」吗？该服务可能正在提供线上服务。`"
+                   confirm-text="确定" :danger="svcPending?.action === 'stop'" @confirm="doSvc(svcPending?.unit, svcPending?.action)" />
+
     <!-- MySQL 停用确认（可选同时删数据卷） -->
     <UIModal v-model:open="mysqlDisableOpen" title="停用 MySQL 服务" width="440px">
       <p class="form-tip">将停止并删除 MySQL {{ mysqlDisableVer }} 容器，该版本下所有实例数据库将无法连接。</p>
@@ -2581,4 +3201,23 @@ tr[data-kind='file'] .f-svg { color: var(--text-2); }
 .plat-bar { margin-bottom: 10px; }
 .plat-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .plat-sel { width: 360px; }
+
+/* ---------- 运维监控（曲线 / 进程 / 端口 / 服务 / 日志 / 登录 / 告警） ---------- */
+.mon-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+@media (max-width: 1100px) { .mon-grid { grid-template-columns: 1fr; } }
+.w130 { width: 130px; flex-shrink: 0; }
+.w110 { width: 110px; flex-shrink: 0; }
+.w220 { width: 220px; flex-shrink: 0; }
+.w240 { width: 240px; flex-shrink: 0; }
+.cmd-cell { max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.desc-cell { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.danger-text { color: #e5484d; font-weight: 600; }
+.logview { display: flex; flex-direction: column; height: calc(100% - 0px); }
+.log-box {
+  margin: 0; flex: 1; min-height: 55vh; max-height: 62vh; overflow: auto;
+  white-space: pre-wrap; word-break: break-all;
+  background: #10161a; color: #d5e0dc; border-radius: 8px; padding: 12px 14px;
+  font-size: 12px; line-height: 1.55;
+}
+.af-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0 14px; }
 </style>
