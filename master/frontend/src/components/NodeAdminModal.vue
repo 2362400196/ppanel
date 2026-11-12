@@ -884,30 +884,70 @@ async function doSystemPrune() {
 }
 
 // ---------- 打开/关闭 ----------
-const navs = [
-  { key: 'overview', label: '概览' },
-  { key: 'monitor', label: '监控曲线' },
-  { key: 'process', label: '进程管理' },
-  { key: 'ports', label: '端口监听' },
-  { key: 'services', label: '系统服务' },
-  { key: 'logs', label: '日志中心' },
-  { key: 'logins', label: '登录审计' },
-  { key: 'alerts', label: '告警设置' },
-  { key: 'containers', label: '容器' },
-  { key: 'images', label: '镜像' },
-  { key: 'files', label: '文件管理' },
-  { key: 'terminal', label: '宿主机终端' },
-  { key: 'firewall', label: '防火墙' },
-  { key: 'sec', label: 'SSH 防护' },
-  { key: 'sysops', label: '系统运维' },
-  { key: 'mysql', label: 'MySQL 服务' },
-  { key: 'backup', label: '备份' },
-  { key: 'settings', label: '设置' }
+// 侧边栏按用途归为 5 组（可折叠），避免一屏堆 18 项。
+// 无 label 的分组（概览 / 设置）直接平铺，不加分组标题。
+const navGroups = [
+  { key: 'home', label: '', items: [{ key: 'overview', label: '概览' }] },
+  {
+    key: 'mon', label: '监控与告警',
+    items: [
+      { key: 'monitor', label: '监控曲线' },
+      { key: 'alerts', label: '告警设置' },
+      { key: 'logins', label: '登录审计' }
+    ]
+  },
+  {
+    key: 'sys', label: '系统状态',
+    items: [
+      { key: 'process', label: '进程管理' },
+      { key: 'ports', label: '端口监听' },
+      { key: 'services', label: '系统服务' },
+      { key: 'logs', label: '日志中心' },
+      { key: 'sysops', label: '系统运维' }
+    ]
+  },
+  {
+    key: 'dock', label: '容器与数据',
+    items: [
+      { key: 'containers', label: '容器' },
+      { key: 'images', label: '镜像' },
+      { key: 'mysql', label: 'MySQL 服务' },
+      { key: 'backup', label: '备份' }
+    ]
+  },
+  {
+    key: 'file', label: '文件与终端',
+    items: [
+      { key: 'files', label: '文件管理' },
+      { key: 'terminal', label: '宿主机终端' }
+    ]
+  },
+  {
+    key: 'sec', label: '安全防护',
+    items: [
+      { key: 'firewall', label: '防火墙' },
+      { key: 'sec', label: 'SSH 防护' }
+    ]
+  },
+  { key: 'cfg', label: '', items: [{ key: 'settings', label: '设置' }] }
 ]
+// 分组折叠状态：未记录过的分组自动跟随「当前页所在分组展开」，记录后以用户操作为准
+const gOpen = ref({})
+function hasActive(g) { return g.items.some(i => i.key === view.value) }
+function isOpen(g) {
+  if (!g.label) return true
+  const s = gOpen.value[g.key]
+  return s === undefined ? hasActive(g) : s
+}
+function toggleGroup(g) {
+  if (!g.label) return
+  gOpen.value[g.key] = !isOpen(g)
+}
 
 watch(() => props.open, v => {
   if (!v) return
   view.value = 'overview'
+  gOpen.value = {}
   ensureIconfont()
   syncPoll()
   loadStability()
@@ -1829,11 +1869,21 @@ onUnmounted(() => {
            @update:open="emit('update:open', $event)">
     <div class="nam-body">
       <aside class="nam-side">
-        <button v-for="n in navs" :key="n.key" class="nav-item" :class="{ active: view === n.key }"
-                @click="view = n.key">
-          <span>{{ n.label }}</span>
-          <i v-if="view === n.key" class="ind" />
-        </button>
+        <template v-for="g in navGroups" :key="g.key">
+          <button v-if="g.label" class="nav-group" :class="{ on: hasActive(g), open: isOpen(g) }"
+                  @click="toggleGroup(g)">
+            <span>{{ g.label }}</span>
+            <i class="chev" />
+          </button>
+          <template v-if="isOpen(g)">
+            <button v-for="n in g.items" :key="n.key" class="nav-item"
+                    :class="{ active: view === n.key, sub: !!g.label }"
+                    @click="view = n.key">
+              <span>{{ n.label }}</span>
+              <i v-if="view === n.key" class="ind" />
+            </button>
+          </template>
+        </template>
       </aside>
 
       <section class="nam-main">
@@ -2940,12 +2990,31 @@ onUnmounted(() => {
   white-space: pre-wrap; word-break: break-all;
 }
 .nam-body { display: flex; height: 82vh; }
-.nam-side { width: 148px; border-right: 1px solid var(--line); padding: 10px 8px; display: flex; flex-direction: column; gap: 2px; }
+.nam-side {
+  width: 156px; flex: none; border-right: 1px solid var(--line);
+  padding: 10px 8px; display: flex; flex-direction: column; gap: 1px; overflow-y: auto;
+}
+.nav-group {
+  display: flex; align-items: center; justify-content: space-between; width: 100%;
+  margin-top: 7px; padding: 6px 12px 5px; border: none; background: transparent;
+  font-size: 11px; font-family: inherit; letter-spacing: .04em;
+  color: var(--text-dim); cursor: pointer; border-radius: 6px; flex: none;
+}
+.nav-group:hover { color: var(--text-2); }
+.nav-group.on { color: var(--primary); }
+.nav-group .chev {
+  width: 6px; height: 6px; flex: none; margin-right: 2px; opacity: .75;
+  border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor;
+  transform: rotate(45deg); transition: transform .15s;
+}
+.nav-group.open .chev { transform: rotate(-135deg); }
 .nav-item {
   position: relative; display: flex; align-items: center; justify-content: space-between;
-  padding: 9px 12px; border: none; border-radius: 8px; background: transparent;
-  font-size: 13px; font-family: inherit; color: var(--text-2); cursor: pointer; transition: all .15s;
+  padding: 8px 12px; border: none; border-radius: 8px; background: transparent;
+  font-size: 13px; font-family: inherit; color: var(--text-2); cursor: pointer;
+  transition: all .15s; flex: none;
 }
+.nav-item.sub { padding-left: 22px; }
 .nav-item:hover { background: color-mix(in srgb, var(--primary) 8%, transparent); color: var(--text-1); }
 .nav-item.active { background: color-mix(in srgb, var(--primary) 12%, transparent); color: var(--primary); font-weight: 600; }
 .nav-item .ind { width: 4px; height: 14px; border-radius: 2px; background: var(--primary); }
