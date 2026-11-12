@@ -933,6 +933,7 @@ const navGroups = [
 ]
 // 分组折叠状态：未记录过的分组自动跟随「当前页所在分组展开」，记录后以用户操作为准
 const gOpen = ref({})
+const mainEl = ref(null)
 function hasActive(g) { return g.items.some(i => i.key === view.value) }
 function isOpen(g) {
   if (!g.label) return true
@@ -971,6 +972,7 @@ watch(view, v => {
   else if (v === 'logins') loadLogins()
   else if (v === 'alerts') loadAlerts()
   syncPoll()
+  nextTick(() => { if (mainEl.value) mainEl.value.scrollTop = 0 })
 })
 
 // ---------- MySQL 服务（节点级共享 MySQL：每版本一容器，实例一库） ----------
@@ -1875,18 +1877,21 @@ onUnmounted(() => {
             <span>{{ g.label }}</span>
             <i class="chev" />
           </button>
-          <template v-if="isOpen(g)">
-            <button v-for="n in g.items" :key="n.key" class="nav-item"
-                    :class="{ active: view === n.key, sub: !!g.label }"
-                    @click="view = n.key">
-              <span>{{ n.label }}</span>
-              <i v-if="view === n.key" class="ind" />
-            </button>
-          </template>
+          <div class="nav-collapse" :class="{ open: isOpen(g) }">
+            <div class="nav-collapse-inner" :inert="!isOpen(g)">
+              <button v-for="n in g.items" :key="n.key" class="nav-item"
+                      :class="{ active: view === n.key, sub: !!g.label }"
+                      @click="view = n.key">
+                <span>{{ n.label }}</span>
+                <i v-if="view === n.key" class="ind" />
+              </button>
+            </div>
+          </div>
         </template>
       </aside>
 
-      <section class="nam-main">
+      <section class="nam-main" ref="mainEl">
+        <div class="view-pane" :key="view">
         <!-- 概览（资源仪表盘） -->
         <div v-if="view === 'overview'">
           <div class="dash-row">
@@ -2733,6 +2738,7 @@ onUnmounted(() => {
             </div>
           </div>
         </div>
+        </div>
       </section>
     </div>
 
@@ -3005,14 +3011,27 @@ onUnmounted(() => {
 .nav-group .chev {
   width: 6px; height: 6px; flex: none; margin-right: 2px; opacity: .75;
   border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor;
-  transform: rotate(45deg); transition: transform .15s;
+  transform: rotate(45deg); transition: transform .25s cubic-bezier(.4, 0, .2, 1);
 }
 .nav-group.open .chev { transform: rotate(-135deg); }
+/* 分组展开/收起：grid-template-rows 0fr↔1fr，高度自适应且可过渡 */
+.nav-collapse {
+  display: grid; grid-template-rows: 0fr;
+  transition: grid-template-rows .25s cubic-bezier(.4, 0, .2, 1);
+  flex: none;
+}
+.nav-collapse.open { grid-template-rows: 1fr; }
+.nav-collapse-inner { overflow: hidden; min-height: 0; display: flex; flex-direction: column; gap: 1px; }
+.nav-collapse-inner > * {
+  opacity: 0; transform: translateY(-5px);
+  transition: opacity .2s ease .03s, transform .2s ease .03s, background .15s, color .15s;
+}
+.nav-collapse.open .nav-collapse-inner > * { opacity: 1; transform: none; }
 .nav-item {
   position: relative; display: flex; align-items: center; justify-content: space-between;
   padding: 8px 12px; border: none; border-radius: 8px; background: transparent;
   font-size: 13px; font-family: inherit; color: var(--text-2); cursor: pointer;
-  transition: all .15s; flex: none;
+  flex: none;
 }
 .nav-item.sub { padding-left: 22px; }
 .nav-item:hover { background: color-mix(in srgb, var(--primary) 8%, transparent); color: var(--text-1); }
@@ -3020,6 +3039,12 @@ onUnmounted(() => {
 .nav-item .ind { width: 4px; height: 14px; border-radius: 2px; background: var(--primary); }
 
 .nam-main { flex: 1; overflow: auto; padding: 16px 18px; }
+/* 切换页面：淡入 + 轻微上移，避免内容瞬间替换的生硬感 */
+.view-pane { animation: paneIn .28s cubic-bezier(.4, 0, .2, 1) both; }
+@keyframes paneIn {
+  from { opacity: 0; transform: translateY(10px) scale(.997); }
+  to { opacity: 1; transform: none; }
+}
 
 .ov-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
 .ov-cell { border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px; display: flex; flex-direction: column; gap: 4px; }
