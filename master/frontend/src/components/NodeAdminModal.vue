@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, h, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { api, errText } from '../api/client'
 import { toastErr, toastOk } from '../components/ui/toast'
@@ -13,7 +13,17 @@ import UITag from './ui/UITag.vue'
 import StatusDot from './ui/StatusDot.vue'
 import ConfirmDialog from './ui/ConfirmDialog.vue'
 import LineChart from './LineChart.vue'
-import CodeEditor from './CodeEditor.vue'
+// 编辑器内嵌整个 monaco（约 3MB），改为按需加载，避免把节点管理首屏撑到 4MB
+const CodeEditor = defineAsyncComponent({
+  loader: () => import('./CodeEditor.vue'),
+  loadingComponent: {
+    render: () => h('div', {
+      style: 'height:56vh;display:flex;align-items:center;justify-content:center;'
+        + 'color:var(--text-dim);font-size:13px'
+    }, '编辑器加载中…')
+  },
+  delay: 60
+})
 import HostTerminal from './HostTerminal.vue'
 import NodeSysOps from './NodeSysOps.vue'
 import { startTask } from '../api/tasks'
@@ -958,7 +968,7 @@ watch(view, v => {
   stopMonPoll(); stopProcPoll(); stopJcFollow()
   if (v === 'containers') loadContainers()
   else if (v === 'images') loadImages()
-  else if (v === 'files') { if (!entries.value.length) loadFiles(curPath.value) }
+  else if (v === 'files') { if (!entries.value.length) loadFiles(curPath.value); import('./CodeEditor.vue') }
   else if (v === 'settings') { loadDf(); loadSettings() }
   else if (v === 'firewall') loadFirewall()
   else if (v === 'sec') loadSec()

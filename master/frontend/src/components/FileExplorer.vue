@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, defineAsyncComponent, h, onMounted, ref } from 'vue'
 import { api, errText } from '../api/client'
 import { fmtBytes, fmtTime } from '../utils/format'
 import { toastErr, toastOk } from './ui/toast'
@@ -8,7 +8,17 @@ import UIModal from './ui/UIModal.vue'
 import UIInput from './ui/UIInput.vue'
 import UIProgress from './ui/UIProgress.vue'
 import ConfirmDialog from './ui/ConfirmDialog.vue'
-import CodeEditor from './CodeEditor.vue'
+// monaco 体积大，按需加载（编辑时才拉取）
+const CodeEditor = defineAsyncComponent({
+  loader: () => import('./CodeEditor.vue'),
+  loadingComponent: {
+    render: () => h('div', {
+      style: 'height:56vh;display:flex;align-items:center;justify-content:center;'
+        + 'color:var(--text-dim);font-size:13px'
+    }, '编辑器加载中…')
+  },
+  delay: 60
+})
 
 const props = defineProps({
   instanceId: { type: String, required: true }
