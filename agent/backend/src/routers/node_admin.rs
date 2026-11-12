@@ -1389,6 +1389,105 @@ async fn docker_info(_a: NodeAuth, State(state): State<AppState>) -> AppResult<J
     })))
 }
 
+/// 容器实时资源快照（docker stats 一次性采样）：新面板「容器」页的实时资源开关用。
+/// 返回数组，字段与 Python 版 /docker/stats 对齐：name/cpu_percent/mem_usage/mem_percent/net_io。
+async fn docker_stats(_a: NodeAuth, State(state): State<AppState>) -> AppResult<Json<Value>> {
+    use bollard::container::StatsOptions;
+    let docker = state.docker.get().await?;
+    let opts = ListContainersOptions::<String> {
+        all: false,
+        ..Default::default()
+    };
+    let list = docker.list_containers(Some(opts)).await.map_err(docker_fail)?;
+
+    let mut rows: Vec<Value> = Vec::new();
+    for c in list {
+        let a = serde_json::to_value(&c).unwrap_or(Value::Null);
+        let id = jstr(&a, "Id");
+        if id.is_empty() {
+            continue;
+        }
+        let name = {
+            let n = a
+                .get("Names")
+                .and_then(|x| x.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .trim_start_matches('/')
+                .to_string();
+            if n.is_empty() {
+                id.chars().take(12).collect()
+            } else {
+                n
+            }
+        };
+        let s_opts = StatsOptions {
+            stream: false,
+            one_shot: true,
+        };
+        let mut stream = docker.stats(&id, Some(s_opts));
+        let Some(Ok(st)) = stream.next().await else {
+            continue;
+        };
+        let v = serde_json::to_value(&st).unwrap_or(Value::Null);
+
+        let cpu_total = v["cpu_stats"]["cpu_usage"]["total_usage"]
+            .as_f64()
+            .unwrap_or(0.0);
+        let pre_total = v["precpu_stats"]["cpu_usage"]["total_usage"]
+            .as_f64()
+            .unwrap_or(0.0);
+        let sys_total = v["cpu_stats"]["system_cpu_usage"].as_f64().unwrap_or(0.0);
+        let pre_sys = v["precpu_stats"]["system_cpu_usage"]
+            .as_f64()
+            .unwrap_or(0.0);
+        let online = v["cpu_stats"]["online_cpus"].as_f64().unwrap_or(1.0).max(1.0);
+        let cpu_delta = cpu_total - pre_total;
+        let sys_delta = sys_total - pre_sys;
+        let cpu_percent = if sys_delta > 0.0 && cpu_delta > 0.0 {
+            crate::models::round1(cpu_delta / sys_delta * online * 100.0)
+        } else {
+            0.0
+        };
+
+        let usage = v["memory_stats"]["usage"].as_f64().unwrap_or(0.0);
+        let cache = v["memory_stats"]["stats"]["cache"]
+            .as_f64()
+            .or_else(|| v["memory_stats"]["stats"]["inactive_file"].as_f64())
+            .unwrap_or(0.0);
+        let limit = v["memory_stats"]["limit"].as_f64().unwrap_or(0.0);
+        let mem_used = (usage - cache).max(0.0);
+        let mem_percent = if limit > 0.0 {
+            crate::models::round1(mem_used / limit * 100.0)
+        } else {
+            0.0
+        };
+
+        let (mut rx, mut tx) = (0.0f64, 0.0f64);
+        if let Some(nets) = v["networks"].as_object() {
+            for (_, n) in nets {
+                rx += n["rx_bytes"].as_f64().unwrap_or(0.0);
+                tx += n["tx_bytes"].as_f64().unwrap_or(0.0);
+            }
+        }
+
+        rows.push(json!({
+            "name": name,
+            "cpu_percent": cpu_percent,
+            "mem_usage": fmt_size(mem_used as i64),
+            "mem_percent": mem_percent,
+            "mem_bytes": mem_used as u64,
+            "mem_limit": limit as u64,
+            "net_io": format!("↓{} / ↑{}", fmt_size(rx as i64), fmt_size(tx as i64)),
+            "rx_bytes": rx as u64,
+            "tx_bytes": tx as u64,
+            "pids": v["pids_stats"]["current"].as_u64().unwrap_or(0),
+        }));
+    }
+    Ok(Json(json!(rows)))
+}
+
 fn fmt_ports_list(ports: &Value) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(arr) = ports.as_array() {
@@ -2356,6 +2455,7 @@ pub fn routes() -> Router<crate::state::AppState> {
         // Docker 运维（最终挂到 /agent/docker/*）
         .route("/docker/info", get(docker_info))
         .route("/docker/containers", get(list_containers))
+        .route("/docker/stats", get(docker_stats))
         .route("/docker/containers/{cid}/start", post(container_start))
         .route("/docker/containers/{cid}/stop", post(container_stop))
         .route("/docker/containers/{cid}/restart", post(container_restart))

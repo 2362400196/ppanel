@@ -258,7 +258,47 @@ const DDL: &[&str] = &[
         detail TEXT NOT NULL DEFAULT '',
         created_at DATETIME
     )"#,
+    // 宿主机资源采样：每分钟一条，保留 7 天（由 host_metrics::run_loop 维护）
+    r#"CREATE TABLE IF NOT EXISTS host_metrics (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts DATETIME,
+        cpu_percent FLOAT NOT NULL DEFAULT 0,
+        mem_used_mb FLOAT NOT NULL DEFAULT 0,
+        mem_total_mb FLOAT NOT NULL DEFAULT 0,
+        disk_used_gb FLOAT NOT NULL DEFAULT 0,
+        disk_total_gb FLOAT NOT NULL DEFAULT 0,
+        load1 FLOAT NOT NULL DEFAULT 0,
+        net_rx_mb FLOAT NOT NULL DEFAULT 0,
+        net_tx_mb FLOAT NOT NULL DEFAULT 0,
+        rx_rate_kbps FLOAT NOT NULL DEFAULT 0,
+        tx_rate_kbps FLOAT NOT NULL DEFAULT 0
+    )"#,
+    // 阈值告警配置（单行 id=1）+ Webhook 渠道
+    r#"CREATE TABLE IF NOT EXISTS host_alert_config (
+        id INTEGER PRIMARY KEY,
+        enabled INTEGER NOT NULL DEFAULT 0,
+        cpu_threshold FLOAT NOT NULL DEFAULT 90,
+        mem_threshold FLOAT NOT NULL DEFAULT 90,
+        disk_threshold FLOAT NOT NULL DEFAULT 90,
+        webhook_type VARCHAR(16) NOT NULL DEFAULT '',
+        webhook_url VARCHAR(512) NOT NULL DEFAULT '',
+        webhook_extra VARCHAR(255) NOT NULL DEFAULT '',
+        quiet_minutes INTEGER NOT NULL DEFAULT 10,
+        updated_at DATETIME
+    )"#,
+    // 告警触发记录（同时作为静默去重游标）
+    r#"CREATE TABLE IF NOT EXISTS host_alert_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts DATETIME,
+        metric VARCHAR(16) NOT NULL,
+        value FLOAT NOT NULL DEFAULT 0,
+        threshold FLOAT NOT NULL DEFAULT 0,
+        message TEXT NOT NULL DEFAULT '',
+        sent INTEGER NOT NULL DEFAULT 0
+    )"#,
     "CREATE INDEX IF NOT EXISTS ix_instances_user_id ON instances (user_id)",
+    "CREATE INDEX IF NOT EXISTS ix_host_metrics_ts ON host_metrics (ts)",
+    "CREATE INDEX IF NOT EXISTS ix_host_alert_logs_metric ON host_alert_logs (metric)",
     "CREATE INDEX IF NOT EXISTS ix_instances_panel_token ON instances (panel_token)",
     "CREATE INDEX IF NOT EXISTS ix_instances_domain ON instances (domain)",
     "CREATE INDEX IF NOT EXISTS ix_agent_metrics_instance_id ON agent_metrics (instance_id)",

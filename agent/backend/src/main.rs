@@ -128,6 +128,8 @@ async fn main() {
     }
 
     tokio::spawn(metrics_loop(state.clone()));
+    // 宿主机资源采样 + 阈值告警（每分钟；数据供节点面板 24h/7d 曲线与告警设置）
+    tokio::spawn(services::host_metrics::run_loop(state.clone()));
     tokio::spawn(cron::run_loop(state.clone()));
     tokio::spawn(services::db_backup::run_loop(state.clone()));
 
