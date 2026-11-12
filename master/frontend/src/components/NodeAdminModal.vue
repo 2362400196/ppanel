@@ -2996,11 +2996,11 @@ onUnmounted(() => {
 }
 .nav-group {
   display: flex; align-items: center; justify-content: space-between; width: 100%;
-  margin-top: 7px; padding: 6px 12px 5px; border: none; background: transparent;
-  font-size: 11px; font-family: inherit; letter-spacing: .04em;
-  color: var(--text-dim); cursor: pointer; border-radius: 6px; flex: none;
+  margin-top: 7px; padding: 6px 12px; border: none; background: transparent;
+  font-size: 12px; font-weight: 600; font-family: inherit; letter-spacing: .02em;
+  color: var(--text-2); cursor: pointer; border-radius: 6px; flex: none;
 }
-.nav-group:hover { color: var(--text-2); }
+.nav-group:hover { background: color-mix(in srgb, var(--primary) 6%, transparent); }
 .nav-group.on { color: var(--primary); }
 .nav-group .chev {
   width: 6px; height: 6px; flex: none; margin-right: 2px; opacity: .75;
