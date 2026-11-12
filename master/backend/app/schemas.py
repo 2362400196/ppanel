@@ -15,6 +15,12 @@ class ChangePasswordIn(BaseModel):
     new_password: str = Field(min_length=6, max_length=128)
 
 
+class RegisterIn(BaseModel):
+    username: str = Field(min_length=3, max_length=32)
+    password: str = Field(min_length=8, max_length=128)
+    invite_code: str = Field(default="", max_length=64)
+
+
 class UserOut(BaseModel):
     id: int
     username: str

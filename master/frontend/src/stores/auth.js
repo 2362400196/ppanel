@@ -16,6 +16,14 @@ export const useAuthStore = defineStore('auth', {
       this.user = data.user
       localStorage.setItem('ppanel_token', data.token)
     },
+    async register(username, password, inviteCode = '') {
+      const { data } = await api.post('/auth/register', {
+        username, password, invite_code: inviteCode
+      })
+      this.token = data.token
+      this.user = data.user
+      localStorage.setItem('ppanel_token', data.token)
+    },
     async fetchMe() {
       const { data } = await api.get('/me')
       this.user = data

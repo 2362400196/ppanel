@@ -60,6 +60,12 @@ class Settings:
     # 商城对接 X-API-Key（空则 /api/open 禁用）
     api_key: str = field(default_factory=lambda: _env("MASTER_API_KEY", ""))
 
+    # 注册：ALLOW_REGISTER=0 可关闭自助注册；REGISTER_INVITE_CODE 非空则必须填邀请码
+    allow_register: bool = field(default_factory=lambda: _env(
+        "ALLOW_REGISTER", "1").strip().lower() not in ("0", "false", "no", "off"))
+    register_invite_code: str = field(default_factory=lambda: _env("REGISTER_INVITE_CODE", ""))
+    register_ip_hourly_limit: int = field(default_factory=lambda: _env_int("REGISTER_IP_HOURLY_LIMIT", 5))
+
     # 首次启动管理员
     admin_username: str = field(default_factory=lambda: _env("ADMIN_USERNAME", "admin"))
     admin_password: str = field(default_factory=lambda: _env("ADMIN_PASSWORD", "admin123"))
